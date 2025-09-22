@@ -1001,8 +1001,9 @@ class MainWindow(QMainWindow):
         self.redraw_main_plot()
 
     ##################################################
-    ##ADD Peaks Button##
+    ##ADD Peaks Button                              ##
     ##################################################
+
     def on_add_peaks_toggled(self, checked: bool):
         """Enter/exit Add Peaks mode, mutually exclusive with Delete mode."""
         self._add_peaks_mode = checked
