@@ -425,12 +425,12 @@ class MainWindow(QMainWindow):
         st.use_invert    = self.InvertSignal_checkBox.isChecked()
 
 
-        # # Peaks/breaths no longer valid if filters change
-        # if hasattr(self.state, "peaks_by_sweep"):
-        #     self.state.peaks_by_sweep.clear()
-        # if hasattr(self.state, "breath_by_sweep"):
-        #     self.state.breath_by_sweep.clear()
-        # self._maybe_enable_peak_apply()  # re-enable Apply Peak if threshold is valid
+        # Peaks/breaths no longer valid if filters change
+        if hasattr(self.state, "peaks_by_sweep"):
+            self.state.peaks_by_sweep.clear()
+        if hasattr(self.state, "breath_by_sweep"):
+            self.state.breath_by_sweep.clear()
+        self._maybe_enable_peak_apply()  # re-enable Apply Peak if threshold is valid
 
         # Peaks/breaths/y2 no longer valid if filters change
         if hasattr(self.state, "peaks_by_sweep"):
@@ -439,7 +439,6 @@ class MainWindow(QMainWindow):
             self.state.breath_by_sweep.clear()
             self.state.y2_values_by_sweep.clear()
             self.plot_host.clear_y2()
-        self._maybe_enable_peak_apply()  # re-enable Apply Peak if threshold is valid
 
 
 
@@ -1002,9 +1001,8 @@ class MainWindow(QMainWindow):
         self.redraw_main_plot()
 
     ##################################################
-    ##ADD Peaks Button                              ##
+    ##ADD Peaks Button##
     ##################################################
-
     def on_add_peaks_toggled(self, checked: bool):
         """Enter/exit Add Peaks mode, mutually exclusive with Delete mode."""
         self._add_peaks_mode = checked
@@ -2058,7 +2056,7 @@ class MainWindow(QMainWindow):
         label_by_key: dict[str, str],
         stim_zero: float | None,
         stim_dur: float | None,
-    ):
+        ):
         """
         Build a two-page PDF:
         • Page 1: rows = metrics, cols = [all sweeps | mean±SEM | histograms] using RAW data
