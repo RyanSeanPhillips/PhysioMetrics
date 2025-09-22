@@ -41,12 +41,12 @@ Pleth_App_analysis/
 
 # Ignore any folder literally named 'old' or 'images' anywhere
 **/old/**
-# **/images/**
+**/images/**
 
-# Images: ignore all files under images/, but keep .ico files
-images/**
-!images/
-!images/**/*.ico
+# Ensure assets/ is NOT ignored
+!/assets/
+!/assets/**
+
 
 # Keep the app icon (even if you later move it into an images folder)
 !assets/plethapp_thumbnail.ico
