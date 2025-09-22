@@ -43,6 +43,11 @@ Pleth_App_analysis/
 **/old/**
 # **/images/**
 
+# Images: ignore all files under images/, but keep .ico files
+images/**
+!images/
+!images/**/*.ico
+
 # Keep the app icon (even if you later move it into an images folder)
 !assets/plethapp_thumbnail.ico
 "@ | Set-Content -Encoding UTF8 .gitignore
