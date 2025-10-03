@@ -72,12 +72,48 @@ def main():
 
     try:
         # Import and run the main application
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QSplashScreen
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtCore import Qt
         from main import MainWindow
 
         app = QApplication(sys.argv)
+
+        # Create splash screen
+        icon_paths = [
+            Path(__file__).parent / "images" / "plethapp_thumbnail_dark_round.ico",
+            Path(__file__).parent / "assets" / "plethapp_thumbnail_dark_round.ico",
+        ]
+
+        splash_pix = None
+        for icon_path in icon_paths:
+            if icon_path.exists():
+                splash_pix = QPixmap(str(icon_path))
+                break
+
+        if splash_pix is None or splash_pix.isNull():
+            splash_pix = QPixmap(200, 150)
+            splash_pix.fill(Qt.GlobalColor.darkGray)
+
+        splash_pix = splash_pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+
+        splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+        splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        splash.showMessage(
+            "Loading PlethApp...",
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
+            Qt.GlobalColor.white
+        )
+        splash.show()
+        app.processEvents()
+
+        # Create main window
         w = MainWindow()
+
+        # Close splash and show main window
+        splash.finish(w)
         w.show()
+
         sys.exit(app.exec())
 
     except Exception as e:
