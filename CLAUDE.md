@@ -307,14 +307,299 @@ Improved peak editing workflow with keyboard modifiers and precision controls:
 1. Remove modifier key detection from `_on_plot_click_add_peak()` and `_on_plot_click_delete_peak()`
 2. Change delete logic back to: `pks_new = pks[(pks < i_lo) | (pks > i_hi)]` (deletes all in window)
 
-## Future Enhancements
-- Code signing for professional distribution
+## Development Roadmap
+
+### High Priority (Next Implementation Phase)
+
+#### 1. High-Resolution Splash Screen
+- **Description**: Replace current splash screen with higher resolution image for better visual presentation
+- **Files to modify**: `run_debug.py`, image assets
+- **Effort**: 30 minutes
+
+#### 2. NPZ File Save/Load with Full State Restoration
+- **Description**: Save all analysis data (traces, peaks, metrics, annotations) to NPZ file for later review
+- **Features**:
+  - Save: raw data, processed traces, detected peaks/events, calculated metrics, manual edits, filter settings
+  - Load: Restore complete analysis state - user can review, verify, or modify previous work
+  - Auto-populate filename when re-saving (update existing NPZ file)
+  - Versioned format with backward compatibility checking
+- **Use case**: Quality control, collaborative review, incremental analysis sessions
+- **File structure**:
+  ```python
+  npz_data = {
+      'raw_sweeps': dict,          # Original channel data
+      'sr_hz': float,
+      'channel_names': list,
+      'peaks_by_sweep': dict,      # All detected features
+      'breath_metrics': dict,      # Computed metrics
+      'manual_edits': dict,        # User annotations
+      'filter_params': dict,       # Processing settings
+      'version': str               # Format version for compatibility
+  }
+  ```
+- **Files to modify**: `core/export.py` (add save_npz/load_npz), `main.py` (file dialog, state restoration)
+- **Effort**: 5-6 hours
+
+#### 3. Multi-File ABF Concatenation
+- **Description**: Load multiple ABF files as concatenated sweeps
+- **Features**:
+  - Multi-select in file dialog → files treated as sequential sweeps
+  - Validation checks:
+    - Same number of channels across all files
+    - Same channel names
+    - Same sample rate
+    - Same date (extracted from filename format: `YYYYMMDD####.abf`)
+  - Warning dialog if checks fail with option to proceed anyway
+  - Display concatenated file info in status bar: "File 1 of 3: 2024010_0001.abf (Sweeps 0-9)"
+- **Files to modify**: `main.py` (file dialog, validation), `core/abf_io.py` (concatenation logic)
+- **Effort**: 4-5 hours
+
+#### 4. CSV/Text Time-Series Import
+- **Description**: Load arbitrary time-series data from CSV/text files
+- **Features**:
+  - File preview dialog showing first 20 rows
+  - Column selection UI: user picks time column + data columns
+  - Auto-detect headers, delimiter (comma/tab/space), decimal separator
+  - Sample rate detection: auto-calculate from time column or user-specified
+  - Map columns to "sweeps" (each selected column becomes a sweep)
+- **UI Components**:
+  - `CSVImportDialog` with table preview and column selectors
+  - Checkbox: "First row is header"
+  - Spinbox: "Sample rate (Hz)" with auto-detect option
+- **Files to create**: `core/io/csv_loader.py`, `CSVImportDialog` in `main.py`
+- **Effort**: 6-7 hours
+
+#### 5. Spike2 .smrx File Support
+- **Description**: Load Spike2/CED .smrx files using neo library
+- **Implementation**: Use `neo` package (cross-platform, supports Python 3.8+)
+- **Features**:
+  - Read .smr and .smrx formats
+  - Extract analog channels and metadata
+  - Sample rate and time vector generation
+  - Unified interface with ABF loader
+- **Dependencies**: `pip install neo` (add to requirements.txt)
+- **Alternative**: `sonpy` (official CED library, Windows-only, Python 3.9-3.12)
+- **Files to create**: `core/io/smrx_loader.py`
+- **Files to modify**: `main.py` (file dialog filter, loader selection)
+- **Effort**: 3-4 hours
+
+#### 6. Move Point Editing Mode
+- **Description**: Add button/mode to manually drag and reposition detected peaks (inspiratory, expiratory, onsets, offsets)
+- **Implementation**: New editing mode with click-and-drag functionality
+- **Use case**: Fine-tune automated detection results
+- **Files to modify**: `main.py` (editing modes), `core/editing.py`
+- **Effort**: 3-4 hours
+
+#### 7. Enhanced Eupnea Threshold Controls
+- **Description**: Convert "Eupnea Thresh (Hz)" label to clickable button/link
+- **Features**:
+  - Opens dialog with all eupnea detection parameters (frequency threshold, duration threshold, regularity criteria)
+  - Manual mode: User can click to highlight/annotate eupnic regions
+  - Visual feedback with region overlays
+- **Files to modify**: `main.py`, possibly new `EupneaControlDialog` class
+- **Effort**: 4-5 hours
+
+#### 8. Enhanced Outlier Threshold Controls
+- **Description**: Convert "Outlier Thresh (SD)" label to clickable button/link
+- **Features**:
+  - Opens dialog to select which metrics to use for outlier detection (Ti, frequency, amplitude, etc.)
+  - Multi-metric selection with individual SD thresholds
+  - Preview of flagged breaths before applying
+- **Files to modify**: `main.py`, `core/metrics.py`
+- **Effort**: 4-5 hours
+
+#### 9. Statistical Significance in Consolidated Data
+- **Description**: Add statistical testing to identify when stim response differs significantly from baseline
+- **Features**:
+  - Three new columns in consolidated CSV output:
+    - `cohens_d`: Effect size at each timepoint (mean - baseline_mean) / baseline_sd
+    - `p_value`: Uncorrected paired t-test p-value (timepoint sweeps vs baseline sweeps)
+    - `sig_corrected`: Boolean flag after Bonferroni correction (p < 0.05/n_timepoints)
+  - Visual enhancements in consolidated plot:
+    - Shaded gray background for significant regions
+    - Asterisks for significance levels: `*` p<0.05, `**` p<0.01, `***` p<0.001
+    - Horizontal dashed lines at Cohen's d = ±0.5 (medium effect size)
+  - User-configurable options:
+    - Baseline window (default: -2 to 0 sec pre-stim)
+    - Significance threshold (default: 0.05)
+    - Correction method: Bonferroni (conservative) or None
+- **Alternative methods** (future consideration):
+  - Cluster-based permutation testing for sustained effects
+  - Confidence interval non-overlap flagging
+- **Files to modify**: `main.py` (consolidation dialog, plotting), `core/metrics.py` (statistical helpers)
+- **Dependencies**: scipy.stats (already included)
+- **Effort**: 4-5 hours
+
+### Medium Priority
+
+#### 10. Sniffing Bout Detection and Annotation
+- **Description**: Automated and manual detection of high-frequency sniffing bouts
+- **Features**:
+  - Algorithmic detection based on rapid, shallow breathing patterns
+  - Manual annotation mode: click-and-drag to mark sniffing regions
+  - Visual indicators (color-coded overlays similar to eupnea/apnea)
+- **Files to modify**: `core/metrics.py`, `main.py`
+- **Effort**: 5-6 hours
+
+#### 11. Expiratory Onset Detection
+- **Description**: Add separate expiratory onset point (distinct from inspiratory offset)
+- **Rationale**: Rare cases have gap between inspiratory offset and expiratory onset
+- **Implementation**: Extend `compute_breath_events()` in `core/peaks.py`
+- **UI changes**: Add expiratory onset markers to plots
+- **Files to modify**: `core/peaks.py`, `core/metrics.py`, `main.py` (plotting)
+- **Effort**: 3-4 hours
+
+#### 12. Dark Mode for Main Plot
+- **Description**: Toggle dark theme for matplotlib plot area (background, grid, text colors)
+- **Implementation**: Add checkbox/button to switch between light and dark plot themes
+- **Files to modify**: `main.py` (plotting section), possibly `core/plotting.py`
+- **Effort**: 2-3 hours
+
+### Long-Term / Major Features
+
+#### 13. Universal Data Loader Framework (Cross-App Infrastructure)
+- **Description**: Create modular, reusable file loading system for all neuroscience apps
+- **Motivation**: Unified interface for PlethApp, photometry analysis, Spike2 viewer, Neuropixels pipeline
+- **Architecture**:
+  ```
+  breathtools_io/  (or neuro_io/)
+  ├── __init__.py
+  ├── base.py              # Abstract DataLoader protocol
+  ├── loaders/
+  │   ├── abf.py          # Axon Binary Format (pyabf)
+  │   ├── smrx.py         # Spike2 (neo/sonpy)
+  │   ├── csv.py          # Generic CSV/text
+  │   ├── spikeglx.py     # Neuropixels (spikeglx-python)
+  │   ├── tdt.py          # Tucker-Davis systems
+  │   └── photometry.py   # Multi-file photometry workflows
+  ├── registry.py          # Auto-detect file format
+  └── utils.py            # Concatenation, validation, alignment
+  ```
+- **Unified Interface**:
+  ```python
+  from breathtools_io import load_data
+
+  # Auto-detect format or specify explicitly
+  data = load_data("file.abf")  # Returns standardized dict
+  data = load_data(["f1.csv", "f2.csv"], format="photometry")
+
+  # All loaders return:
+  {
+      'signals': dict[str, np.ndarray],  # channel -> (samples, trials)
+      'sample_rate': float,
+      'time': np.ndarray,
+      'metadata': dict,
+      'source_files': list[Path]
+  }
+  ```
+- **Multi-File Strategies**:
+  - `merge_strategy="concatenate"`: Sequential sweeps (PlethApp ABF workflow)
+  - `merge_strategy="align_timestamps"`: Sync multi-channel photometry
+  - `merge_strategy="interleave"`: Alternating channels
+  - Validation: same date, same channels, same sample rate
+- **Benefits**:
+  - Write file loader once, use in all apps
+  - Easy to add new formats (just add new loader class)
+  - Consistent error handling and validation
+  - Facilitates data sharing between pipelines
+- **Distribution**: Standalone pip package or shared module across projects
+- **Files to create**: New repository `breathtools_io/` or submodule in existing project
+- **Effort**: 12-15 hours (saves 3-5 hours per future app)
+
+#### 14. ML-Ready Data Export
+- **Description**: Export format optimized for machine learning training and analysis
+- **Features**:
+  - Structured output with features + labels (breath events, eupnea regions, sighs, sniffs)
+  - Support for multiple formats: CSV (pandas-compatible), HDF5 (large datasets), JSON (metadata)
+  - Include raw signal segments, computed features, and manual annotations
+  - Batch export across multiple files/sweeps
+  - Standardized schema for reproducible ML pipelines
+- **Output structure**:
+  - `breath_features.csv`: Per-breath metrics (Ti, Te, amplitude, frequency, etc.)
+  - `annotations.csv`: User labels (eupnea, sniff bouts, quality flags, manual edits)
+  - `raw_segments.h5`: Time-aligned signal windows around each breath
+  - `metadata.json`: Experimental parameters, detection settings, file provenance
+- **Files to modify**: `core/export.py`, add ML export dialog to `main.py`
+- **Effort**: 4-5 hours
+
+#### 15. Machine Learning Integration
+- **Description**: Train models on exported labeled data to improve automated detection
+- **Prerequisites**: ML-Ready Data Export (item #14)
+- **Implementation Strategy**: Phased approach with increasing automation
+
+  **Phase 1: ML-Assisted Flagging (Non-invasive)**
+  - ML runs after traditional peak detection
+  - Flags potentially problematic breaths for user review
+  - Visual markers on plot: orange (sniff), red (artifact), yellow (uncertain)
+  - Click flag to accept/reject/manually edit
+  - User always has final control
+
+  **Phase 2: ML-Enhanced Refinement (Optional)**
+  - Checkbox: "Use ML to refine peak positions"
+  - Shows both original (faded) and ML-adjusted (highlighted) detections
+  - Only high-confidence adjustments (>80%) suggested
+  - User reviews all changes before accepting
+
+  **Phase 3: Active Learning Loop (Continuous Improvement)**
+  - Manual corrections automatically added to training dataset
+  - "Export Training Data" includes all user edits
+  - Model improves over time, adapts to specific recording conditions
+  - Model versioning and performance tracking
+
+- **UI Components**:
+  - ML Control Panel with flagging options and confidence threshold slider
+  - Model selector dropdown (switch between model versions)
+  - Review Flags dialog showing all flagged breaths with confidence scores
+  - Export Training Data button for contributing to model improvement
+
+- **Features**:
+  - Train classifiers for: breath quality, eupnea regions, sniff detection, sigh detection, artifact removal
+  - Confidence scores and uncertainty visualization
+  - Fallback to traditional detection for low-confidence predictions
+  - Multiple detection modes: Traditional / ML-Assisted / Hybrid (user selectable)
+
+- **Technologies**: scikit-learn (initial), TensorFlow/PyTorch (optional for advanced models)
+- **Files to create**: `core/ml_models.py`, `core/ml_training.py`, `MLControlDialog` in `main.py`
+- **Effort**:
+  - Phase 1 (Flagging): 8-10 hours
+  - Phase 2 (Refinement): 6-8 hours
+  - Phase 3 (Active Learning): 4-6 hours
+  - Total: 18-24 hours
+
+#### 16. Core Modularization (Breathtools Package)
+- **Description**: Refactor core analysis functions into standalone, reusable library
+- **Features**:
+  - Pip-installable package independent of GUI
+  - Generic data loaders (CSV, HDF5, not just ABF)
+  - Integration with fiber photometry and electrophysiology pipelines
+  - Standalone examples and API documentation
+- **Implementation**:
+  - Create `core/__init__.py` with public API
+  - Extract pure data models from `AppState`
+  - Add `pyproject.toml` for pip installation
+  - Create example scripts (`examples/analyze_breath_simple.py`)
+- **Files to modify**: Entire `core/` restructure
+- **Effort**: 8-10 hours
+
+#### 17. PyPI Publication
+- **Description**: Publish app to Python Package Index for public `pip install`
+- **Prerequisites**: Choose professional package name, add licensing
+- **Steps**:
+  - Check name availability on PyPI
+  - Create proper package structure (`pyproject.toml`, entry points)
+  - Test with `pip install -e .`
+  - Build and upload to PyPI with `twine`
+- **Alternative**: Install from GitHub (`pip install git+https://...`)
+- **Effort**: 4-6 hours (first-time setup)
+
+### Potential Future Directions (Speculative)
+- Code signing for professional Windows distribution
 - Automated testing framework with edge case coverage
-- Additional file format support (EDF, WFDB)
+- Additional file format support (EDF, WFDB beyond ABF)
 - Real-time data acquisition capabilities
-- Advanced statistical analysis modules
-- Plugin architecture for custom algorithms
-- Automated quality assessment and signal validation
+- Advanced statistical analysis modules (wavelet coherence, time-frequency)
+- Plugin architecture for custom user algorithms
+- Cloud-based batch processing and collaboration features
 
 ## Contributing
 When modifying the codebase:
