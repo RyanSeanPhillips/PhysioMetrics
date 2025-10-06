@@ -16,7 +16,7 @@ plethapp/
 ├── BUILD_INSTRUCTIONS.md     # Detailed build documentation
 ├── core/                     # Core application modules
 │   ├── state.py             # Application state management
-│   ├── abf_io.py            # ABF file I/O operations
+│   ├── abf_io.py            # ABF file I/O operations (dispatcher for ABF and SMRX)
 │   ├── filters.py           # Signal filtering functions
 │   ├── plotting.py          # Matplotlib integration and plot management
 │   ├── stim.py              # Stimulus detection algorithms
@@ -24,7 +24,11 @@ plethapp/
 │   ├── metrics.py           # Breathing metrics and pattern analysis
 │   ├── navigation.py        # Data navigation utilities
 │   ├── editing.py           # Manual peak editing tools
-│   └── export.py            # Data export functionality
+│   ├── export.py            # Data export functionality
+│   └── io/                  # File format loaders
+│       ├── son64_dll_loader.py   # CED SON64 DLL wrapper (low-level)
+│       ├── son64_loader.py       # SMRX loader for PlethApp (high-level)
+│       └── s2rx_parser.py        # Spike2 .s2rx XML configuration parser
 ├── ui/                      # PyQt6 UI definition files
 │   └── pleth_app_layout_02.ui # Main application UI layout
 ├── images/                  # Application icons and assets
@@ -43,7 +47,7 @@ plethapp/
 - **Manual Peak Editing**: Add/delete peaks and annotate sighs with keyboard shortcuts (Shift/Ctrl modifiers)
 - **Spectral Analysis Window**: Power spectrum, wavelet scalogram, and notch filter configuration
 - **Data Export**: CSV export of analyzed breathing metrics
-- **Multi-format Support**: ABF file format support with extensible I/O architecture
+- **Multi-format Support**: ABF and Spike2 SMRX (.smrx) file format support with extensible I/O architecture
 
 ## Core Algorithms
 
@@ -91,6 +95,49 @@ Advanced error-resistant metrics calculation system:
 - Real-time filter parameter adjustment
 - **Notch (band-stop) filtering** for removing specific frequency ranges
 - **Spectral analysis tools** for identifying noise contamination
+
+### File Format Support (core/io/)
+
+#### Spike2 SMRX Files (SON64 Format)
+PlethApp supports reading Spike2 .smrx files using the official CED SON64 library.
+
+**Implementation:**
+- **core/io/son64_dll_loader.py**: Low-level ctypes wrapper for `ceds64int.dll`
+- **core/io/son64_loader.py**: High-level loader that converts SMRX data to PlethApp format
+- **core/io/s2rx_parser.py**: Parser for Spike2 `.s2rx` XML configuration files
+- **Dependencies**: Requires CED MATLAB SON library (CEDS64ML) installed at `C:\CEDMATLAB\CEDS64ML\`
+
+**Key Technical Details:**
+- Uses `S64ChanDivide` to get actual sample interval in ticks (critical for correct timing)
+- Time calculation: `time[i] = (first_tick + i * chan_divide) * time_base`
+- Handles multi-segment data (files with gaps) by reading segments and concatenating
+- Resamples channels to common time grid using scipy.interpolate.interp1d
+- **IMPORTANT**: SMRX files must be closed in Spike2 before opening in PlethApp (CED DLL uses exclusive file locking)
+
+**Supported Features:**
+- Waveform channels (ADC and ADCMARK types)
+- Multiple sample rates (automatically aligned to lowest rate to avoid upsampling artifacts)
+- Full time range with accurate tick-based timing
+- Channel metadata (titles, units, scale, offset)
+- **Automatic channel visibility filtering**: Reads `.s2rx` configuration files to hide channels marked as hidden in Spike2
+  - Looks for `.s2rx` file with same name as `.smrx` file
+  - Respects `Vis="0"` attribute in channel settings
+  - Defaults to showing all channels if `.s2rx` not found
+  - Channels not mentioned in `.s2rx` default to visible
+
+**Example Usage:**
+```python
+from core.io.son64_loader import load_son64
+
+# Load file (returns PlethApp format)
+sr_hz, sweeps_by_channel, channel_names, t = load_son64('file.smrx')
+# sweeps_by_channel[channel_name] -> shape (n_samples, 1) - continuous recording
+```
+
+**Troubleshooting:**
+- Error code -1 from S64Open: File is locked (close in Spike2) or path issue
+- Data duplication: Fixed by using S64ChanDivide instead of calculating from sample rate
+- Missing channels: Only waveform channels (kind 1 or 7) are loaded
 
 ## Development Commands
 
@@ -369,19 +416,20 @@ Improved peak editing workflow with keyboard modifiers and precision controls:
 - **Files to create**: `core/io/csv_loader.py`, `CSVImportDialog` in `main.py`
 - **Effort**: 6-7 hours
 
-#### 5. Spike2 .smrx File Support
-- **Description**: Load Spike2/CED .smrx files using neo library
-- **Implementation**: Use `neo` package (cross-platform, supports Python 3.8+)
+#### 5. ✅ Spike2 .smrx File Support (COMPLETED)
+- **Status**: ✅ **IMPLEMENTED** (2025-10-05)
+- **Implementation**: Direct CED DLL wrapper using official CEDS64ML library
 - **Features**:
-  - Read .smr and .smrx formats
-  - Extract analog channels and metadata
-  - Sample rate and time vector generation
-  - Unified interface with ABF loader
-- **Dependencies**: `pip install neo` (add to requirements.txt)
-- **Alternative**: `sonpy` (official CED library, Windows-only, Python 3.9-3.12)
-- **Files to create**: `core/io/smrx_loader.py`
-- **Files to modify**: `main.py` (file dialog filter, loader selection)
-- **Effort**: 3-4 hours
+  - Read .smrx (SON64) format using ctypes wrapper for `ceds64int.dll`
+  - Multi-segment waveform reading with gap handling
+  - Accurate tick-based timing using `S64ChanDivide`
+  - Multi-rate channel support with automatic alignment
+  - Full channel metadata extraction
+- **Dependencies**: Requires CED MATLAB SON library installed at `C:\CEDMATLAB\CEDS64ML\`
+- **Files created**: `core/io/son64_dll_loader.py`, `core/io/son64_loader.py`
+- **Files modified**: `core/abf_io.py` (dispatcher), `main.py` (file dialog)
+- **Note**: Files must be closed in Spike2 before opening in PlethApp (exclusive file lock)
+- **See**: "File Format Support" section above for detailed documentation
 
 #### 6. Move Point Editing Mode
 - **Description**: Add button/mode to manually drag and reposition detected peaks (inspiratory, expiratory, onsets, offsets)

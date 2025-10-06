@@ -10,6 +10,11 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # Get the directory containing this spec file
 spec_root = os.path.dirname(os.path.abspath(SPEC))
 
+# Import version for naming the executable
+import sys
+sys.path.insert(0, spec_root)
+from version_info import VERSION_STRING
+
 block_cipher = None
 
 # Collect additional data files
@@ -23,6 +28,10 @@ added_files = [
 
     # Core modules
     (os.path.join(spec_root, 'core'), 'core'),
+
+    # Python 3.9 embedded environment for Son64 (.smrx) file loading
+    # This includes the full Python 3.9 runtime with sonpy library
+    (os.path.join(spec_root, 'lib', 'python39'), os.path.join('lib', 'python39')),
 ]
 
 # Hidden imports - modules that PyInstaller might miss
@@ -135,7 +144,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='PlethApp',
+    name=f'PlethApp_v{VERSION_STRING}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -156,5 +165,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='PlethApp',
+    name=f'PlethApp_v{VERSION_STRING}',
 )

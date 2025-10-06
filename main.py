@@ -26,7 +26,8 @@ from core import stim as stimdet   # stim detection
 from core import peaks as peakdet   # peak detection
 from core import metrics  # calculation of breath metrics
 
-
+# Import version
+from version_info import VERSION_STRING
 
 
 ORG = "PlethApp"
@@ -47,7 +48,7 @@ class MainWindow(QMainWindow):
             if w.property("startHidden") is True:
                 w.hide()
 
-        self.setWindowTitle("PlethAnalysis")
+        self.setWindowTitle(f"PlethAnalysis v{VERSION_STRING}")
 
         self.settings = QSettings(ORG, APP)
         self.state = AppState()
@@ -268,7 +269,7 @@ class MainWindow(QMainWindow):
             last_dir = str(Path.home())
 
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select ABF", last_dir, "ABF (*.abf);;All Files (*.*)"
+            self, "Select File", last_dir, "Data Files (*.abf *.smrx);;ABF Files (*.abf);;SMRX Files (*.smrx);;All Files (*.*)"
         )
         if not path:
             return
@@ -280,9 +281,12 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QProgressDialog, QApplication
         from PyQt6.QtCore import Qt
 
+        # Determine file type for progress dialog title
+        file_type = path.suffix.upper()[1:]  # .abf -> ABF, .smrx -> SMRX
+
         # Create progress dialog
         progress = QProgressDialog(f"Loading file...\n{path.name}", None, 0, 100, self)
-        progress.setWindowTitle("Opening ABF File")
+        progress.setWindowTitle(f"Opening {file_type} File")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)  # Show immediately
         progress.setCancelButton(None)  # No cancel button
@@ -297,7 +301,8 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
-            sr, sweeps_by_ch, ch_names, t = abf_io.load_abf(path, progress_callback=update_progress)
+            # Load data file (supports .abf and .smrx)
+            sr, sweeps_by_ch, ch_names, t = abf_io.load_data_file(path, progress_callback=update_progress)
         except Exception as e:
             progress.close()
             QMessageBox.critical(self, "Load error", str(e))
@@ -11855,15 +11860,17 @@ if __name__ == "__main__":
 
     # Create splash screen
     # Try to load icon (with fallback path handling)
-    icon_paths = [
+    splash_paths = [
+        Path(__file__).parent / "images" / "plethapp_splash_dark-01.png",
+        Path(__file__).parent / "images" / "plethapp_splash.png",
         Path(__file__).parent / "images" / "plethapp_thumbnail_dark_round.ico",
         Path(__file__).parent / "assets" / "plethapp_thumbnail_dark_round.ico",
     ]
 
     splash_pix = None
-    for icon_path in icon_paths:
-        if icon_path.exists():
-            splash_pix = QPixmap(str(icon_path))
+    for splash_path in splash_paths:
+        if splash_path.exists():
+            splash_pix = QPixmap(str(splash_path))
             break
 
     if splash_pix is None or splash_pix.isNull():
@@ -11872,7 +11879,7 @@ if __name__ == "__main__":
         splash_pix.fill(Qt.GlobalColor.darkGray)
 
     # Scale to smaller size for faster display
-    splash_pix = splash_pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+    splash_pix = splash_pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
     splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
     splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)

@@ -76,31 +76,34 @@ def main():
         from PyQt6.QtGui import QPixmap
         from PyQt6.QtCore import Qt
         from main import MainWindow
+        from version_info import VERSION_STRING
 
         app = QApplication(sys.argv)
 
         # Create splash screen
-        icon_paths = [
+        splash_paths = [
+            Path(__file__).parent / "images" / "plethapp_splash_dark-01.png",
+            Path(__file__).parent / "images" / "plethapp_splash.png",
             Path(__file__).parent / "images" / "plethapp_thumbnail_dark_round.ico",
             Path(__file__).parent / "assets" / "plethapp_thumbnail_dark_round.ico",
         ]
 
         splash_pix = None
-        for icon_path in icon_paths:
-            if icon_path.exists():
-                splash_pix = QPixmap(str(icon_path))
+        for splash_path in splash_paths:
+            if splash_path.exists():
+                splash_pix = QPixmap(str(splash_path))
                 break
 
         if splash_pix is None or splash_pix.isNull():
             splash_pix = QPixmap(200, 150)
             splash_pix.fill(Qt.GlobalColor.darkGray)
 
-        splash_pix = splash_pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+        splash_pix = splash_pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
         splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
         splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         splash.showMessage(
-            "Loading PlethApp...",
+            f"Loading PlethApp v{VERSION_STRING}...",
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
             Qt.GlobalColor.white
         )

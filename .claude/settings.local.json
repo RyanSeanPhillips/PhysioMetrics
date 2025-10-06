@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"\nwith open(''main.py'', ''r'', encoding=''utf-8'') as f:\n    lines = f.readlines()\n\n# Keep lines 0 to 5077 (line 5078 is index 5077)\n# Skip lines 5078 to 5552 (indices 5077 to 5551)  \n# Keep lines from 5553 onwards (index 5552 onwards)\n\nnew_lines = lines[:5077] + lines[5552:]\n\nwith open(''main.py'', ''w'', encoding=''utf-8'') as f:\n    f.writelines(new_lines)\n\nprint(f''Removed lines 5078-5552 ({5552-5077} lines)'')\n\")"
+      "Bash(python:*)",
+      "Bash(curl:*)",
+      "Bash(./python.exe -c \"import encodings; print(''encodings module loaded successfully'')\")",
+      "Bash(./python.exe -c \"import sonpy; print(''sonpy loaded:'', sonpy.__file__)\")",
+      "Read(//c/CEDMATLAB/CEDS64ML/**)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []
