@@ -889,7 +889,8 @@ def _filter_duration(mask: np.ndarray, t: np.ndarray, min_duration_sec: float) -
 def detect_eupnic_regions(
     t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None,
     freq_threshold_hz: float = 5.0,
-    min_duration_sec: float = 2.0
+    min_duration_sec: float = 2.0,
+    sniff_regions: list = None
 ) -> np.ndarray:
     """
     Detect regions of eupnic (normal, regular) breathing.
@@ -897,6 +898,10 @@ def detect_eupnic_regions(
     Simplified eupnic breathing criteria:
     - Respiratory rate below freq_threshold_hz
     - Sustained for at least 2 seconds
+    - Excluded from sniffing regions (if provided)
+
+    Args:
+        sniff_regions: List of (start_time, end_time) tuples marking sniffing bouts
 
     Returns:
         Binary array (0/1) same length as y, where 1 indicates eupnic breathing
@@ -922,6 +927,17 @@ def detect_eupnic_regions(
 
     # Step 3: Merge nearby pre-qualified regions (fill small gaps between long chunks)
     final_mask = _merge_nearby_regions(prefiltered_mask, t, max_gap_sec=0.5)
+
+    # Step 4: Exclude sniffing regions with buffer (sniffing overrides eupnea)
+    if sniff_regions:
+        buffer_sec = 0.5  # Add 0.5s buffer on each side of sniffing region
+        for (start_time, end_time) in sniff_regions:
+            # Expand region by buffer on both sides
+            buffered_start = start_time - buffer_sec
+            buffered_end = end_time + buffer_sec
+            # Find indices corresponding to this buffered time range
+            sniff_idx = (t >= buffered_start) & (t <= buffered_end)
+            final_mask[sniff_idx] = False
 
     return final_mask.astype(float)
 

@@ -114,7 +114,8 @@ def identify_problematic_breaths(t: np.ndarray,
                                  expmins: np.ndarray,
                                  expoffs: np.ndarray,
                                  metrics_dict: Dict[str, np.ndarray],
-                                 outlier_threshold: float = 3.0) -> Tuple[np.ndarray, np.ndarray]:
+                                 outlier_threshold: float = 3.0,
+                                 outlier_metrics: list = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Identify problematic breath cycles using outlier detection and failure detection.
 
@@ -123,6 +124,7 @@ def identify_problematic_breaths(t: np.ndarray,
         peaks, onsets, offsets, expmins, expoffs: Breath event indices
         metrics_dict: Dictionary of computed metrics (from metrics.METRICS)
         outlier_threshold: Number of standard deviations for outlier detection
+        outlier_metrics: List of metric keys to check (default: all numeric metrics)
 
     Returns:
         Tuple of (outlier_mask, failure_mask):
@@ -136,8 +138,9 @@ def identify_problematic_breaths(t: np.ndarray,
     if onsets is None or len(onsets) < 3:
         return outlier_mask, failure_mask
 
-    # Metrics to check for outliers
-    outlier_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
+    # Metrics to check for outliers (use provided list or default)
+    if outlier_metrics is None:
+        outlier_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
 
     print(f"\n=== Breath Outlier Detection ===")
     print(f"Analyzing {len(onsets)} breath cycles")

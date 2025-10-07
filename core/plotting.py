@@ -41,11 +41,22 @@ class PlotHost(QWidget):
             padding: 5px 8px; margin: 2px;
         }
         QToolBar#PlotNavToolbar QToolButton:hover { background: #515c72; border-color: #6a7694; }
-        QToolBar#PlotNavToolbar QToolButton:pressed,
-        QToolBar#PlotNavToolbar QToolButton:checked { background: #5f6d88; border-color: #7886a6; }
+        QToolBar#PlotNavToolbar QToolButton:pressed { background: #5f6d88; border-color: #7886a6; }
+        QToolBar#PlotNavToolbar QToolButton:checked {
+            background: #4A90E2;
+            color: white;
+            border-color: #357ABD;
+        }
         QToolBar#PlotNavToolbar QToolButton:disabled {
             background: #353b4a; border-color: #444d60; color: #8691a8;
         }""")
+
+        # Connect toolbar actions to turn off edit modes
+        self._toolbar_callback = None
+        self._block_toolbar_callback = False  # Flag to prevent feedback loops
+        for action in self.toolbar.actions():
+            if action.isCheckable():
+                action.toggled.connect(self._on_toolbar_action)
 
         #Per breath metrics
         self.ax_main = None
@@ -103,7 +114,39 @@ class PlotHost(QWidget):
         if mode is None or mode == "grid":
             self._last_grid   = {"xlim": None, "ylims": []}
 
+    def set_toolbar_callback(self, callback):
+        """Set callback to be called when toolbar actions are triggered."""
+        self._toolbar_callback = callback
+
+    def turn_off_toolbar_modes(self):
+        """Turn off all matplotlib toolbar modes (zoom, pan)."""
+        # Block callback to prevent feedback loop
+        self._block_toolbar_callback = True
+
+        # Explicitly turn off matplotlib's internal mode
+        # This prevents matplotlib from hijacking mouse events
+        if hasattr(self.toolbar, 'mode') and self.toolbar.mode != '':
+            # There's an active mode - turn it off by calling the same method again (toggle)
+            if self.toolbar.mode == 'pan/zoom':
+                self.toolbar.pan()
+            elif self.toolbar.mode == 'zoom rect':
+                self.toolbar.zoom()
+
+        # Uncheck all checkable toolbar actions
+        for action in self.toolbar.actions():
+            if action.isCheckable() and action.isChecked():
+                action.setChecked(False)
+
+        # Re-enable callback
+        self._block_toolbar_callback = False
+
     # ------- interactions -------
+    def _on_toolbar_action(self, checked):
+        """Called when any toolbar action (zoom, pan, etc.) is toggled."""
+        # Only call callback if not blocked (prevents feedback loops)
+        if checked and self._toolbar_callback is not None and not self._block_toolbar_callback:
+            self._toolbar_callback()
+
     def _on_button(self, event):
         if event.dblclick and event.inaxes is not None:
             ax = event.inaxes

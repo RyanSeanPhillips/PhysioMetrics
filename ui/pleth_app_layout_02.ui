@@ -30,95 +30,109 @@
   </property>
   <widget class="QWidget" name="centralwidget">
    <property name="styleSheet">
-    <string notr="true">QWidget {
-    background-color: #2b2b2b;
-    color: #f0f0f0;
+    <string notr="true">/* VS Code Dark+ Theme */
+QWidget {
+    background-color: #1e1e1e;    /* VS Code editor background */
+    color: #d4d4d4;               /* VS Code text color */
 }
 
 QLineEdit, QTextEdit, QPlainTextEdit {
-    background-color: #3c3c3c;
-    color: #ffffff;
-    border: 1px solid #5a5a5a;
+    background-color: #252526;    /* VS Code input background */
+    color: #cccccc;
+    border: 1px solid #3e3e42;    /* VS Code border */
+    border-radius: 3px;
+    padding: 3px;
+}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #007acc;    /* VS Code focus blue */
 }
 
 /* Buttons */
 QPushButton {
-    background-color: #444444;
-    color: #ffffff;
-    border: 1px solid #5a5a5a;
+    background-color: #2d2d30;    /* VS Code button background */
+    color: #cccccc;
+    border: 1px solid #3e3e42;
     padding: 5px;
+    border-radius: 3px;
 }
-QPushButton:hover { background-color: #555555; }
-QPushButton:pressed { background-color: #333333; }
+QPushButton:hover {
+    background-color: #3e3e42;    /* VS Code button hover */
+}
+QPushButton:pressed {
+    background-color: #094771;    /* VS Code button pressed */
+}
 
 /* Checkboxes */
-#centralwidget QCheckBox { color: #ffffff; }
-#centralwidget QCheckBox:disabled { color: #7f8899; }
+#centralwidget QCheckBox {
+    color: #cccccc;
+}
+#centralwidget QCheckBox:disabled {
+    color: #6a6a6a;
+}
 
-/* Combo boxes — match text boxes */
+/* Combo boxes — match VS Code dropdowns */
 #centralwidget QComboBox {
-    background-color: #3c3c3c;
-    color: #ffffff;
-    border: 1px solid #5a5a5a;
-    padding: 2px 6px;
+    background-color: #252526;
+    color: #cccccc;
+    border: 1px solid #3e3e42;
+    padding: 3px 6px;
     border-radius: 3px;
 }
 #centralwidget QComboBox:hover {
-    background-color: #454545;   /* subtle hover */
+    background-color: #2d2d30;
 }
 #centralwidget QComboBox:disabled {
-    background-color: #2f2f2f;
-    color: #9a9a9a;
-    border-color: #4a4a4a;
+    background-color: #1e1e1e;
+    color: #6a6a6a;
+    border-color: #2d2d30;
 }
 
-/* Drop-down button area (kept slightly lighter so the default arrow is visible) */
+/* Drop-down button area */
 #centralwidget QComboBox::drop-down {
-    background: #4a4a4a;
-    border-left: 1px solid #5a5a5a;
+    background: #2d2d30;
+    border-left: 1px solid #3e3e42;
     width: 18px;
 }
 
 /* Popup list */
 #centralwidget QComboBox QAbstractItemView {
-    background: #3c3c3c;
-    color: #ffffff;
-    border: 1px solid #5a5a5a;
-    selection-background-color: #555555;
+    background: #252526;
+    color: #cccccc;
+    border: 1px solid #3e3e42;
+    selection-background-color: #094771;  /* VS Code selection */
     selection-color: #ffffff;
     outline: 0;
 }
 
 /* If any combo is editable, make its inner editor match too */
 #centralwidget QComboBox QLineEdit {
-    background-color: #3c3c3c;
-    color: #ffffff;
+    background-color: #252526;
+    color: #cccccc;
     border: none;
 }
 
-
-/* White outline for checkbox indicator (the little box) */
+/* Checkbox indicator */
 #centralwidget QCheckBox::indicator {
     width: 16px;
     height: 16px;
-    border: 1px solid #ffffff;    /* &lt;- white outline */
-    border-radius: 3px;           /* optional */
-    background: transparent;      /* keep your dark bg showing through */
-    margin-right: 6px;            /* space between box and label */
+    border: 1px solid #cccccc;
+    border-radius: 3px;
+    background: #252526;
+    margin-right: 6px;
 }
 
 #centralwidget QCheckBox::indicator:hover {
-    border-color: #b6bfda;        /* softer hover hint */
+    border-color: #007acc;        /* VS Code blue on hover */
 }
 
 #centralwidget QCheckBox::indicator:checked {
-    background: #0d6efd;          /* blue fill when checked (optional) */
-    border-color: #ffffff;        /* keep white outline when checked */
+    background: #007acc;          /* VS Code blue when checked */
+    border-color: #007acc;
 }
 
 #centralwidget QCheckBox::indicator:disabled {
-    border-color: #7f8899;        /* muted outline when disabled */
-    background: transparent;
+    border-color: #6a6a6a;
+    background: #1e1e1e;
 }
 </string>
    </property>
@@ -738,7 +752,7 @@ QPushButton#ApplyChanPushButton:disabled {
              </font>
             </property>
             <property name="text">
-             <string>Filer &amp; Data Channel Prepararation</string>
+             <string>Filtering &amp; Preprocessing</string>
             </property>
            </widget>
           </item>
@@ -776,6 +790,18 @@ QPushButton#ApplyChanPushButton:disabled {
                 <verstretch>0</verstretch>
                </sizepolicy>
               </property>
+              <property name="minimumSize">
+               <size>
+                <width>40</width>
+                <height>0</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>40</width>
+                <height>16777215</height>
+               </size>
+              </property>
              </widget>
             </item>
             <item>
@@ -806,6 +832,18 @@ QPushButton#ApplyChanPushButton:disabled {
                 <horstretch>0</horstretch>
                 <verstretch>0</verstretch>
                </sizepolicy>
+              </property>
+              <property name="minimumSize">
+               <size>
+                <width>40</width>
+                <height>0</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>40</width>
+                <height>16777215</height>
+               </size>
               </property>
              </widget>
             </item>
@@ -866,7 +904,7 @@ QPushButton#ApplyChanPushButton:disabled {
                </font>
               </property>
               <property name="text">
-               <string>Mean Subtraction (s):</string>
+               <string>Mean Sub (s):</string>
               </property>
               <property name="toolTip">
                <string>Subtract rolling mean baseline from the signal using specified time window</string>
@@ -880,6 +918,18 @@ QPushButton#ApplyChanPushButton:disabled {
                 <horstretch>0</horstretch>
                 <verstretch>0</verstretch>
                </sizepolicy>
+              </property>
+              <property name="minimumSize">
+               <size>
+                <width>40</width>
+                <height>0</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>40</width>
+                <height>16777215</height>
+               </size>
               </property>
              </widget>
             </item>
@@ -1063,7 +1113,7 @@ QCheckBox:disabled {
                </font>
               </property>
               <property name="text">
-               <string>Min Peak Distance (s):</string>
+               <string>Min Peak Dist (s):</string>
               </property>
               <property name="toolTip">
                <string>Minimum time interval between consecutive breath peaks (prevents detecting multiple peaks per breath)</string>
@@ -1080,60 +1130,10 @@ QCheckBox:disabled {
               </property>
               <property name="maximumSize">
                <size>
-                <width>30</width>
+                <width>50</width>
                 <height>16777215</height>
                </size>
               </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QLabel" name="ThreshDirect">
-              <property name="sizePolicy">
-               <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
-                <horstretch>0</horstretch>
-                <verstretch>0</verstretch>
-               </sizepolicy>
-              </property>
-              <property name="maximumSize">
-               <size>
-                <width>75</width>
-                <height>16777215</height>
-               </size>
-              </property>
-              <property name="font">
-               <font>
-                <pointsize>11</pointsize>
-               </font>
-              </property>
-              <property name="text">
-               <string>Direction:</string>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QComboBox" name="PeakDetectionDirection">
-              <property name="sizePolicy">
-               <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                <horstretch>0</horstretch>
-                <verstretch>0</verstretch>
-               </sizepolicy>
-              </property>
-              <property name="maximumSize">
-               <size>
-                <width>75</width>
-                <height>16777215</height>
-               </size>
-              </property>
-              <item>
-               <property name="text">
-                <string>Above</string>
-               </property>
-              </item>
-              <item>
-               <property name="text">
-                <string>Below</string>
-               </property>
-              </item>
              </widget>
             </item>
             <item>
@@ -1303,6 +1303,11 @@ QTabBar::tab:bottom:selected {
                   <height>16777215</height>
                  </size>
                 </property>
+                <property name="styleSheet">
+                 <string notr="true">QPushButton {
+    border-radius: 6px;
+}</string>
+                </property>
                 <property name="text">
                  <string>◀ Prev Sweep</string>
                 </property>
@@ -1331,6 +1336,11 @@ QTabBar::tab:bottom:selected {
                   <height>16777215</height>
                  </size>
                 </property>
+                <property name="styleSheet">
+                 <string notr="true">QPushButton {
+    border-radius: 6px;
+}</string>
+                </property>
                 <property name="text">
                  <string>Next Sweep ▶</string>
                 </property>
@@ -1355,6 +1365,11 @@ QTabBar::tab:bottom:selected {
                 <height>0</height>
                </size>
               </property>
+              <property name="styleSheet">
+               <string notr="true">QPushButton {
+    border-radius: 6px;
+}</string>
+              </property>
               <property name="text">
                <string>Go to Sweep View</string>
               </property>
@@ -1362,6 +1377,19 @@ QTabBar::tab:bottom:selected {
                <string>Jump to a specific sweep number</string>
               </property>
              </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_sweep">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>0</height>
+               </size>
+              </property>
+             </spacer>
             </item>
            </layout>
           </item>
@@ -1388,6 +1416,11 @@ QTabBar::tab:bottom:selected {
                   <width>100</width>
                   <height>16777215</height>
                  </size>
+                </property>
+                <property name="styleSheet">
+                 <string notr="true">QPushButton {
+    border-radius: 6px;
+}</string>
                 </property>
                 <property name="text">
                  <string>◀ Prev Window </string>
@@ -1417,6 +1450,11 @@ QTabBar::tab:bottom:selected {
                   <height>16777215</height>
                  </size>
                 </property>
+                <property name="styleSheet">
+                 <string notr="true">QPushButton {
+    border-radius: 6px;
+}</string>
+                </property>
                 <property name="text">
                  <string>Next Window ▶</string>
                 </property>
@@ -1428,32 +1466,74 @@ QTabBar::tab:bottom:selected {
              </layout>
             </item>
             <item>
+             <widget class="QPushButton" name="SnaptoWindowButton">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="minimumSize">
+               <size>
+                <width>205</width>
+                <height>0</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>205</width>
+                <height>16777215</height>
+               </size>
+              </property>
+              <property name="styleSheet">
+               <string notr="true">QPushButton {
+    border-radius: 6px;
+}</string>
+              </property>
+              <property name="text">
+               <string>Go to Window View</string>
+              </property>
+              <property name="toolTip">
+               <string>Jump to a specific time point</string>
+              </property>
+             </widget>
+            </item>
+            <item>
              <layout class="QHBoxLayout" name="horizontalLayout_5">
+              <property name="alignment">
+               <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+              </property>
               <item>
-               <widget class="QPushButton" name="SnaptoWindowButton">
+               <widget class="QLabel" name="WindowSizeLabel">
                 <property name="sizePolicy">
-                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
                   <horstretch>0</horstretch>
                   <verstretch>0</verstretch>
                  </sizepolicy>
                 </property>
                 <property name="minimumSize">
                  <size>
-                  <width>131</width>
+                  <width>105</width>
                   <height>0</height>
                  </size>
                 </property>
                 <property name="maximumSize">
                  <size>
-                  <width>131</width>
+                  <width>105</width>
                   <height>16777215</height>
                  </size>
                 </property>
-                <property name="text">
-                 <string>Go to Window View</string>
+                <property name="font">
+                 <font>
+                  <pointsize>10</pointsize>
+                  <bold>false</bold>
+                 </font>
                 </property>
-                <property name="toolTip">
-                 <string>Jump to a specific time point</string>
+                <property name="text">
+                 <string>Window Size (s):</string>
+                </property>
+                <property name="alignment">
+                 <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
                 </property>
                </widget>
               </item>
@@ -1467,46 +1547,15 @@ QTabBar::tab:bottom:selected {
                 </property>
                 <property name="minimumSize">
                  <size>
-                  <width>30</width>
+                  <width>40</width>
                   <height>0</height>
                  </size>
                 </property>
                 <property name="maximumSize">
                  <size>
-                  <width>30</width>
+                  <width>40</width>
                   <height>16777215</height>
                  </size>
-                </property>
-               </widget>
-              </item>
-              <item>
-               <widget class="QLabel" name="WindowRangeLabel">
-                <property name="sizePolicy">
-                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
-                  <horstretch>0</horstretch>
-                  <verstretch>0</verstretch>
-                 </sizepolicy>
-                </property>
-                <property name="minimumSize">
-                 <size>
-                  <width>15</width>
-                  <height>0</height>
-                 </size>
-                </property>
-                <property name="maximumSize">
-                 <size>
-                  <width>15</width>
-                  <height>16777215</height>
-                 </size>
-                </property>
-                <property name="font">
-                 <font>
-                  <pointsize>11</pointsize>
-                  <bold>false</bold>
-                 </font>
-                </property>
-                <property name="text">
-                 <string>(s)</string>
                 </property>
                </widget>
               </item>
@@ -1518,6 +1567,9 @@ QTabBar::tab:bottom:selected {
            <layout class="QVBoxLayout" name="verticalLayout_7">
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_6">
+              <property name="alignment">
+               <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+              </property>
               <item>
                <widget class="QLabel" name="y2plotlabel">
                 <property name="sizePolicy">
@@ -1548,7 +1600,7 @@ QTabBar::tab:bottom:selected {
                  <string>y2 Plot:</string>
                 </property>
                 <property name="alignment">
-                 <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+                 <set>Qt::AlignLeft|Qt::AlignVCenter</set>
                 </property>
                </widget>
               </item>
@@ -1623,7 +1675,7 @@ QTabBar::tab:bottom:selected {
                </widget>
               </item>
               <item>
-               <widget class="QLabel" name="EupneaThreshLabel">
+               <widget class="QPushButton" name="EupneaThreshButton">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
                   <horstretch>0</horstretch>
@@ -1637,10 +1689,25 @@ QTabBar::tab:bottom:selected {
                  </size>
                 </property>
                 <property name="text">
-                 <string>Eupnea Thresh (Hz)</string>
+                 <string>Eupnea Thr (Hz)</string>
                 </property>
                 <property name="toolTip">
-                 <string>Maximum breathing frequency (Hz) to classify a region as normal eupneic breathing</string>
+                 <string>Click to configure eupnea detection parameters</string>
+                </property>
+                <property name="styleSheet">
+                 <string>QPushButton {
+    text-align: left;
+    border: none;
+    background: transparent;
+    text-decoration: underline;
+    color: #4A9EFF;
+}
+QPushButton:hover {
+    color: #6BB6FF;
+}</string>
+                </property>
+                <property name="cursor">
+                 <cursorShape>PointingHandCursor</cursorShape>
                 </property>
                </widget>
               </item>
@@ -1667,7 +1734,7 @@ QTabBar::tab:bottom:selected {
                </widget>
               </item>
               <item>
-               <widget class="QLabel" name="label">
+               <widget class="QPushButton" name="OutlierThreshButton">
                 <property name="minimumSize">
                  <size>
                   <width>105</width>
@@ -1681,10 +1748,25 @@ QTabBar::tab:bottom:selected {
                  </size>
                 </property>
                 <property name="text">
-                 <string>Outlier Thresh (SD):</string>
+                 <string>Outlier Thr (SD):</string>
                 </property>
                 <property name="toolTip">
-                 <string>Number of standard deviations from mean to flag breath cycles as statistical outliers</string>
+                 <string>Click to select which metrics to use for outlier detection</string>
+                </property>
+                <property name="styleSheet">
+                 <string>QPushButton {
+    text-align: left;
+    border: none;
+    background: transparent;
+    text-decoration: underline;
+    color: #4A9EFF;
+}
+QPushButton:hover {
+    color: #6BB6FF;
+}</string>
+                </property>
+                <property name="cursor">
+                 <cursorShape>PointingHandCursor</cursorShape>
                 </property>
                </widget>
               </item>
@@ -1705,6 +1787,19 @@ QTabBar::tab:bottom:selected {
                </widget>
               </item>
              </layout>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_y2">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>0</height>
+               </size>
+              </property>
+             </spacer>
             </item>
            </layout>
           </item>
@@ -1838,6 +1933,54 @@ QPushButton:pressed {
              </widget>
             </item>
             <item row="1" column="1">
+             <widget class="QPushButton" name="movePointButton">
+              <property name="minimumSize">
+               <size>
+                <width>100</width>
+                <height>0</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>100</width>
+                <height>16777215</height>
+               </size>
+              </property>
+              <property name="styleSheet">
+               <string notr="true">QPushButton {
+    background-color: #FFA500;   /* orange */
+    color: #1F2937;              /* dark text */
+    border: 1px solid #FF8C00;   /* darker orange border */
+    border-radius: 6px;
+    padding: 5px 10px;
+}
+
+/* Hover state */
+QPushButton:hover {
+    background-color: #FFB733;   /* lighter orange */
+}
+
+/* Pressed/clicked state */
+QPushButton:pressed {
+    background-color: #FF8C00;   /* darker orange */
+}
+
+/* Checked state (when mode is active) */
+QPushButton:checked {
+    background-color: #FF8C00;   /* darker orange when ON */
+    color: white;
+}
+</string>
+              </property>
+              <property name="text">
+               <string>Move Point</string>
+              </property>
+              <property name="toolTip">
+               <string>Click a point, then use arrow keys to move it left/right. Press Enter to save.</string>
+              </property>
+             </widget>
+            </item>
+            <item row="2" column="0">
              <widget class="QPushButton" name="OmitSweepButton">
               <property name="minimumSize">
                <size>
@@ -1879,6 +2022,57 @@ QPushButton:pressed {
               </property>
               <property name="startHidden" stdset="0">
                <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+            <item row="2" column="1">
+             <widget class="QPushButton" name="markSniffButton">
+              <property name="minimumSize">
+               <size>
+                <width>100</width>
+                <height>0</height>
+               </size>
+              </property>
+              <property name="maximumSize">
+               <size>
+                <width>100</width>
+                <height>16777215</height>
+               </size>
+              </property>
+              <property name="styleSheet">
+               <string notr="true">QPushButton {
+    background-color: #9B59B6;   /* purple */
+    color: white;
+    border: 1px solid #8E44AD;   /* darker purple border */
+    border-radius: 6px;
+    padding: 5px 10px;
+}
+
+/* Hover state */
+QPushButton:hover {
+    background-color: #AF7AC5;   /* lighter purple */
+}
+
+/* Pressed/clicked state */
+QPushButton:pressed {
+    background-color: #8E44AD;   /* darker purple */
+}
+
+/* Checked state (when mode is active) */
+QPushButton:checked {
+    background-color: #8E44AD;   /* darker purple when ON */
+    color: white;
+}
+</string>
+              </property>
+              <property name="text">
+               <string>Mark Sniff</string>
+              </property>
+              <property name="toolTip">
+               <string>Click and drag to highlight sniffing regions</string>
+              </property>
+              <property name="checkable">
+               <bool>true</bool>
               </property>
              </widget>
             </item>
@@ -1981,7 +2175,33 @@ QPushButton#SaveAnalyzedDataButton:disabled {
               </property>
              </widget>
             </item>
+            <item>
+             <spacer name="verticalSpacer_savebuttons">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>0</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
            </layout>
+          </item>
+          <item>
+           <spacer name="horizontalSpacer_buttonGroups">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>0</width>
+              <height>20</height>
+             </size>
+            </property>
+           </spacer>
           </item>
          </layout>
         </item>
@@ -2191,7 +2411,7 @@ QListWidget#selectedFilesList:focus {
               <property name="font">
                <font>
                 <family>Segoe UI</family>
-                <pointsize>-1</pointsize>
+                <pointsize>14</pointsize>
                 <bold>true</bold>
                </font>
               </property>
@@ -2228,7 +2448,7 @@ QPushButton#moveAllRight:pressed {
               <property name="font">
                <font>
                 <family>Segoe UI</family>
-                <pointsize>-1</pointsize>
+                <pointsize>14</pointsize>
                 <bold>true</bold>
                </font>
               </property>
@@ -2265,7 +2485,7 @@ QPushButton#moveSingleRight:pressed {
               <property name="font">
                <font>
                 <family>Segoe UI</family>
-                <pointsize>-1</pointsize>
+                <pointsize>14</pointsize>
                 <bold>true</bold>
                </font>
               </property>
@@ -2302,7 +2522,7 @@ QPushButton#moveSingleLeft:pressed {
               <property name="font">
                <font>
                 <family>Segoe UI</family>
-                <pointsize>-1</pointsize>
+                <pointsize>14</pointsize>
                 <bold>true</bold>
                </font>
               </property>
@@ -2347,7 +2567,7 @@ QPushButton#moveAllLeft:pressed {
                </font>
               </property>
               <property name="text">
-               <string>Files to Consolidtate</string>
+               <string>Files to Consolidate</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignCenter</set>
@@ -2528,7 +2748,6 @@ QPushButton:disabled {
   <tabstop>ThreshVal</tabstop>
   <tabstop>PeakPromValue</tabstop>
   <tabstop>MinPeakDistValue</tabstop>
-  <tabstop>PeakDetectionDirection</tabstop>
   <tabstop>ApplyPeakFindPushButton</tabstop>
   <tabstop>PrevSweepButton</tabstop>
   <tabstop>NextSweepButton</tabstop>

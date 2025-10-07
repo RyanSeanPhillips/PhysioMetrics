@@ -36,7 +36,7 @@ APP = "PlethApp"
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_02.ui"
+        ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_02_horizontal.ui"
         uic.loadUi(ui_file, self)
 
         # icon_path = Path(__file__).parent / "assets" / "plethapp_thumbnail_light_02.ico"
@@ -68,6 +68,12 @@ class MainWindow(QMainWindow):
         # Filter order
         self.filter_order = 4  # Default Butterworth filter order
 
+        # Outlier detection metrics (default set)
+        self.outlier_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
+
+        # Eupnea detection parameters
+        self.eupnea_min_duration = 2.0  # seconds - minimum sustained duration for eupnea region
+
         # --- Embed Matplotlib into MainPlot (QFrame in Designer) ---
         self.plot_host = PlotHost(self.MainPlot)
         layout = self.MainPlot.layout()
@@ -89,15 +95,9 @@ class MainWindow(QMainWindow):
         ctrl_o_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         ctrl_o_shortcut.activated.connect(self.on_ctrl_o_pressed)
 
-        # --- Wire channel selection ---
+        # --- Wire channel selection (immediate application) ---
         self.AnalyzeChanSelect.currentIndexChanged.connect(self.on_analyze_channel_changed)
         self.StimChanSelect.currentIndexChanged.connect(self.on_stim_channel_changed)
-        self.ApplyChanPushButton.clicked.connect(self.on_apply_channels_clicked)
-        self.ApplyChanPushButton.setEnabled(False)  # disabled until something changes
-
-        # Track pending (unapplied) selections
-        self._pending_analyze_idx = None
-        self._pending_stim_idx = None
 
 
         # --- Wire filter controls ---
@@ -109,18 +109,21 @@ class MainWindow(QMainWindow):
         # filters: commit-on-finish, not per key
         self.LowPassVal.editingFinished.connect(self.update_and_redraw)
         self.HighPassVal.editingFinished.connect(self.update_and_redraw)
-        self.MeanSubractVal.editingFinished.connect(self.update_and_redraw)
         self.FilterOrderSpin.valueChanged.connect(self.update_and_redraw)
 
         # checkboxes toggled immediately, but we debounce the draw
         self.LowPass_checkBox.toggled.connect(self.update_and_redraw)
         self.HighPass_checkBox.toggled.connect(self.update_and_redraw)
-        self.MeanSubtract_checkBox.toggled.connect(self.update_and_redraw)
         self.InvertSignal_checkBox.toggled.connect(self.update_and_redraw)
 
         # Spectral Analysis button
         self.SpectralAnalysisButton.clicked.connect(self.on_spectral_analysis_clicked)
 
+        # Outlier Threshold button
+        self.OutlierThreshButton.clicked.connect(self.on_outlier_thresh_clicked)
+
+        # Eupnea Threshold button
+        self.EupneaThreshButton.clicked.connect(self.on_eupnea_thresh_clicked)
 
         # --- Wire sweep navigation ---
         self.PrevSweepButton.clicked.connect(self.on_prev_sweep)
@@ -152,7 +155,6 @@ class MainWindow(QMainWindow):
         self.ThreshVal.textChanged.connect(self._maybe_enable_peak_apply)
         self.PeakPromValue.textChanged.connect(self._maybe_enable_peak_apply)
         self.MinPeakDistValue.textChanged.connect(self._maybe_enable_peak_apply)
-        self.PeakDetectionDirection.currentIndexChanged.connect(self._maybe_enable_peak_apply)
 
         # Default for refractory period / min peak distance (seconds)
         self.MinPeakDistValue.setText("0.05")
@@ -205,7 +207,29 @@ class MainWindow(QMainWindow):
         self.addSighButton.setCheckable(True)
         self.addSighButton.toggled.connect(self.on_add_sigh_toggled)
 
+        # --- Move Point mode ---
+        self._move_point_mode = False
+        self._selected_point = None  # {'type': 'peak'|'onset'|'offset'|'exp', 'index': int, 'artist': Line2D}
+        self._move_point_artist = None  # Visual marker for selected point
+        self._key_press_cid = None  # Connection ID for matplotlib key events
+        self._motion_cid = None  # Connection ID for mouse motion events
 
+        # --- Sniffing regions (manual markers) ---
+        self.state.sniff_regions_by_sweep = {}  # map: sweep_idx -> list of (start_time, end_time) tuples
+        self._mark_sniff_mode = False
+        self._sniff_start_x = None  # X-coordinate where drag started
+        self._sniff_drag_artist = None  # Visual indicator while dragging
+        self._sniff_artists = []  # Matplotlib artists for sniff overlays
+        self._sniff_edge_mode = None  # 'start' or 'end' if dragging an edge, None if creating new region
+        self._sniff_region_index = None  # Index of region being edited
+        self._release_cid = None  # Connection ID for mouse release events
+        self._is_dragging = False  # Track if currently dragging a point
+
+        self.movePointButton.setCheckable(True)
+        self.movePointButton.toggled.connect(self.on_move_point_toggled)
+
+        # Mark Sniff button
+        self.markSniffButton.toggled.connect(self.on_mark_sniff_toggled)
 
         #wire save analyzed data button
         self.SaveAnalyzedDataButton.clicked.connect(self.on_save_analyzed_clicked)
@@ -220,12 +244,14 @@ class MainWindow(QMainWindow):
         self.LowPassVal.setText("20")
         self.HighPass_checkBox.setChecked(False)
         self.LowPass_checkBox.setChecked(True)
-        self.MeanSubtract_checkBox.setChecked(False)
         self.InvertSignal_checkBox.setChecked(False)
 
         # Push defaults into state (no-op if no data yet)
         self.update_and_redraw()
         self._refresh_omit_button_label()
+
+        # Connect matplotlib toolbar to turn off edit modes
+        self.plot_host.set_toolbar_callback(self._turn_off_all_edit_modes)
 
 
         # --- Curation tab wiring ---
@@ -254,6 +280,94 @@ class MainWindow(QMainWindow):
         """Save window geometry on close."""
         self.settings.setValue("geometry", self.saveGeometry())
         super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        """Handle keyboard events for move point mode."""
+        from PyQt6.QtCore import Qt
+
+        if self._move_point_mode and self._selected_point:
+            if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                # Move point left or right
+                direction = -1 if event.key() == Qt.Key.Key_Left else 1
+                self._move_selected_point(direction)
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                # Save the moved point
+                self._save_moved_point()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_Escape:
+                # Cancel move
+                self._cancel_move_point()
+                event.accept()
+                return
+
+        # Pass to parent for other key handling
+        super().keyPressEvent(event)
+
+    def _on_canvas_key_press(self, event):
+        """Handle matplotlib canvas key events for move point mode."""
+        if not self._move_point_mode or not self._selected_point:
+            return
+
+        if event.key in ('left', 'right'):
+            # Move point left or right
+            direction = -1 if event.key == 'left' else 1
+            self._move_selected_point(direction)
+        elif event.key in ('enter', 'return'):
+            # Save the moved point
+            self._save_moved_point()
+        elif event.key == 'escape':
+            # Cancel move
+            self._cancel_move_point()
+
+    def _on_canvas_motion(self, event):
+        """Handle mouse motion for click-and-drag point movement."""
+        if not self._move_point_mode:
+            return
+
+        # Toolbar already disabled when entering move mode
+
+        if not self._selected_point:
+            return
+
+        # Only move if mouse button is pressed (dragging)
+        if event.button != 1 or event.xdata is None or event.inaxes is None:
+            return
+
+        st = self.state
+        s = self._selected_point['sweep']
+        t, y = self._current_trace()
+        if t is None or y is None:
+            return
+
+        # Get time basis
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_plot = t - t0
+        else:
+            t_plot = t
+
+        # Find closest sample to mouse position
+        import numpy as np
+        new_idx = int(np.clip(np.searchsorted(t_plot, float(event.xdata)), 0, len(t_plot) - 1))
+
+        # Constrain movement between adjacent peaks
+        new_idx = self._constrain_to_peak_boundaries(new_idx, s)
+
+        # Update the point to new position
+        self._update_point_position(new_idx, t_plot, y, s)
+
+    def _on_canvas_release(self, event):
+        """Handle mouse release - auto-save the moved point."""
+        if not self._move_point_mode or not self._selected_point:
+            return
+
+        if event.button == 1:  # Left click release
+            # Auto-save and recompute metrics
+            self._save_moved_point(recompute_metrics=True)
 
     def on_ctrl_o_pressed(self):
         """Handle Ctrl+O shortcut - triggers different buttons based on active tab."""
@@ -348,8 +462,9 @@ class MainWindow(QMainWindow):
         # Fill combos safely (no signal during population)
         self.AnalyzeChanSelect.blockSignals(True)
         self.AnalyzeChanSelect.clear()
+        self.AnalyzeChanSelect.addItem("All Channels")  # First option for grid view
         self.AnalyzeChanSelect.addItems(ch_names)
-        self.AnalyzeChanSelect.setCurrentIndex(0)  # default analyze = first channel
+        self.AnalyzeChanSelect.setCurrentIndex(0)  # default = "All Channels" (grid mode)
         self.AnalyzeChanSelect.blockSignals(False)
 
         self.StimChanSelect.blockSignals(True)
@@ -358,12 +473,6 @@ class MainWindow(QMainWindow):
         self.StimChanSelect.addItems(ch_names)
         self.StimChanSelect.setCurrentIndex(0)     # select "None"
         self.StimChanSelect.blockSignals(False)
-
-        # Reset deferred state & button
-        self._pending_analyze_idx = None
-        self._pending_stim_idx = None
-        # self.ApplyChanPushButton.setEnabled(False)
-        self._update_apply_button_enabled()
 
         #Clear peaks
         self.state.peaks_by_sweep.clear()
@@ -378,9 +487,9 @@ class MainWindow(QMainWindow):
 
 
 
-        # Default analyze channel: first
-        if ch_names:
-            st.analyze_chan = ch_names[0]
+        # Start in grid mode (All Channels view)
+        st.analyze_chan = None  # None = grid mode showing all channels
+        self.single_panel_mode = False  # Start in grid mode
 
         # No stim selected by default
         st.stim_chan = None
@@ -393,9 +502,6 @@ class MainWindow(QMainWindow):
         self.single_panel_mode = False
         self.plot_host.clear_saved_view("grid")  # fresh autoscale for grid
         self.plot_all_channels()
-
-        # start with Apply enabled so the user can jump to single panel immediately
-        self.ApplyChanPushButton.setEnabled(True)
 
     def _proc_key(self, chan: str, sweep: int):
         st = self.state
@@ -435,120 +541,87 @@ class MainWindow(QMainWindow):
         )
 
     def on_analyze_channel_changed(self, idx: int):
-        # record pending selection; enable Apply
-        self._pending_analyze_idx = idx
-        self.ApplyChanPushButton.setEnabled(True)
-
-    def on_stim_channel_changed(self, idx: int):
-        # record pending selection; enable Apply
-        self._pending_stim_idx = idx
-        self.ApplyChanPushButton.setEnabled(True)
-
-    def _update_apply_button_enabled(self):
+        """Apply analyze channel selection immediately."""
         st = self.state
-        has_data = bool(st.channel_names)
-        has_analyze = has_data and (st.analyze_chan in st.channel_names)
+        if not st.channel_names:
+            return
 
-        changed = False
+        # Check if "All Channels" was selected (idx 0)
+        if idx == 0:
+            # Switch to grid mode (multi-channel view)
+            if self.single_panel_mode:
+                self.single_panel_mode = False
+                st.analyze_chan = None
 
-        # pending analyze differs?
-        if self._pending_analyze_idx is not None and 0 <= self._pending_analyze_idx < len(st.channel_names):
-            current_an_idx = st.channel_names.index(st.analyze_chan) if st.analyze_chan in st.channel_names else -1
-            if self._pending_analyze_idx != current_an_idx:
-                changed = True
+                # Clear stimulus data but keep the channel selected in dropdown
+                # so it will be recomputed when switching back to single channel
+                st.stim_onsets_by_sweep.clear()
+                st.stim_offsets_by_sweep.clear()
+                st.stim_spans_by_sweep.clear()
+                st.stim_metrics_by_sweep.clear()
 
-        # pending stim differs? (UI idx: 0 = None)
-        if self._pending_stim_idx is not None:
-            current_stim_ui_idx = 0 if (st.stim_chan is None) else (st.channel_names.index(st.stim_chan) + 1)
-            if self._pending_stim_idx != current_stim_ui_idx:
-                changed = True
-
-        # Enable if: we have an analyze channel AND (we're still in grid mode OR there are pending changes)
-        enable = has_analyze and ((not self.single_panel_mode) or changed)
-        self.ApplyChanPushButton.setEnabled(enable)
-
-    def on_apply_channels_clicked(self):
-        st = self.state
-        something_changed = False
-        mode_changed = False  # grid <-> single
-
-        # ---- Apply analyze channel (if pending) ----
-        if self._pending_analyze_idx is not None and 0 <= self._pending_analyze_idx < len(st.channel_names):
-            new_an = st.channel_names[self._pending_analyze_idx]
-            if new_an != st.analyze_chan:
-                st.analyze_chan = new_an
                 st.proc_cache.clear()
 
-                # Clear all previously detected peaks, sighs, and breath events
+                # Clear saved view to force fresh autoscale for grid mode
+                self.plot_host.clear_saved_view("grid")
+                self.plot_host.clear_saved_view("single")
+
+                # Switch to grid plot
+                self.plot_all_channels()
+        elif 0 < idx <= len(st.channel_names):
+            # Switch to single channel view
+            new_chan = st.channel_names[idx - 1]  # -1 because idx 0 is "All Channels"
+            if new_chan != st.analyze_chan or not self.single_panel_mode:
+                st.analyze_chan = new_chan
+                st.proc_cache.clear()
                 st.peaks_by_sweep.clear()
                 st.sigh_by_sweep.clear()
                 if hasattr(st, 'breath_by_sweep'):
                     st.breath_by_sweep.clear()
 
-                # Clear manual edits (omitted points, ranges, and sweeps)
-                st.omitted_points.clear()
-                st.omitted_ranges.clear()
-                if hasattr(st, 'omitted_sweeps'):
-                    st.omitted_sweeps.clear()
-
-                # Refresh the omit button label since sweep omissions were cleared
-                self._refresh_omit_button_label()
-
-                # Reset to first sweep and first window
-                st.sweep_idx = 0
-                self._win_left = None  # Reset window position (will default to start of trace)
-
-                # Switch to single-panel mode when analyze channel changes
+                # Switch to single panel mode
                 if not self.single_panel_mode:
                     self.single_panel_mode = True
-                    mode_changed = True
 
-                something_changed = True
-
-        # ---- Apply stim channel (if pending) ----
-        if self._pending_stim_idx is not None:
-            idx = self._pending_stim_idx
-            if idx <= 0:
-                # "None" → clear stim, but go/stay in single-panel without spans
+                # If a stimulus channel is selected, recompute it for the current sweep
                 if st.stim_chan is not None:
-                    st.stim_chan = None
-                    st.stim_onsets_by_sweep.clear()
-                    st.stim_offsets_by_sweep.clear()
-                    st.stim_spans_by_sweep.clear()
-                    st.stim_metrics_by_sweep.clear()
-                    something_changed = True
-                if not self.single_panel_mode:
-                    self.single_panel_mode = True
-                    mode_changed = True
-            else:
-                if 1 <= idx <= len(st.channel_names):
-                    new_stim = st.channel_names[idx - 1]
-                    if (new_stim != st.stim_chan) or (not self.single_panel_mode):
-                        st.stim_chan = new_stim
-                        self._compute_stim_for_current_sweep()
-                        if not self.single_panel_mode:
-                            self.single_panel_mode = True
-                            mode_changed = True
-                        st.proc_cache.clear()
-                        something_changed = True
+                    self._compute_stim_for_current_sweep()
 
-        # If nothing changed but we’re still in grid mode, switch to single-panel
-        if not something_changed and not self.single_panel_mode:
-            self.single_panel_mode = True
-            mode_changed = True
-            something_changed = True
+                # Clear saved view to force fresh autoscale for single mode
+                self.plot_host.clear_saved_view("single")
+                self.plot_host.clear_saved_view("grid")
 
-        # ALWAYS reset x-range on Apply (full autoscale next draw)
-        # We’ll be in single-panel after Apply in all the flows above.
-        self.plot_host.clear_saved_view("single")
+                self.ApplyPeakFindPushButton.setEnabled(False)
+                self._maybe_enable_peak_apply()
+                self.redraw_main_plot()
 
-        # Clear pending and disable Apply until there’s another change
-        self._pending_analyze_idx = None
-        self._pending_stim_idx = None
-        self.ApplyChanPushButton.setEnabled(False)
+    def on_stim_channel_changed(self, idx: int):
+        """Apply stimulus channel selection immediately."""
+        st = self.state
+        if not st.channel_names:
+            return
 
-        if something_changed or mode_changed:
+        # idx 0 = "None", idx 1+ = channel names
+        new_stim = None if idx == 0 else st.channel_names[idx - 1]
+        if new_stim != st.stim_chan:
+            st.stim_chan = new_stim
+
+            # Clear stimulus detection results
+            st.stim_onsets_by_sweep.clear()
+            st.stim_offsets_by_sweep.clear()
+            st.stim_spans_by_sweep.clear()
+            st.stim_metrics_by_sweep.clear()
+
+            # Compute stimulus for current sweep if a channel is selected
+            if new_stim is not None:
+                self._compute_stim_for_current_sweep()
+
+            # Clear saved view to force fresh autoscale when stimulus changes
+            self.plot_host.clear_saved_view("single")
+
+            st.proc_cache.clear()
             self.redraw_main_plot()
+
 
     def _compute_stim_for_current_sweep(self, thresh: float = 1.0):
         st = self.state
@@ -582,7 +655,8 @@ class MainWindow(QMainWindow):
         # checkboxes
         st.use_low       = self.LowPass_checkBox.isChecked()
         st.use_high      = self.HighPass_checkBox.isChecked()
-        st.use_mean_sub  = self.MeanSubtract_checkBox.isChecked()
+        # Mean subtraction is now controlled from Spectral Analysis dialog
+        # st.use_mean_sub is set directly in the dialog handlers
         st.use_invert    = self.InvertSignal_checkBox.isChecked()
 
         # Filter order
@@ -621,15 +695,15 @@ class MainWindow(QMainWindow):
         # only take values if box is checked AND entry is valid
         st.low_hz  = _val_if_enabled(self.LowPassVal, st.use_low, float, None)
         st.high_hz = _val_if_enabled(self.HighPassVal, st.use_high, float, None)
-        st.mean_val= _val_if_enabled(self.MeanSubractVal, st.use_mean_sub, float, 0.0)
+        # Mean subtraction value is now controlled from Spectral Analysis dialog
+        # st.mean_win_s is set directly in the dialog handlers
 
         # If the checkbox is checked but the box is empty/invalid, disable that filter automatically
         if st.use_low and st.low_hz is None:
             st.use_low = False
         if st.use_high and st.high_hz is None:
             st.use_high = False
-        if st.use_mean_sub and st.mean_val is None:
-            st.use_mean_sub = False
+        # Mean subtraction validation is handled in Spectral Analysis dialog
 
         # Invalidate processed cache
         st.proc_cache.clear()
@@ -764,10 +838,12 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.plot_host.clear_breath_markers()
-            
+
             # update sigh markers (if any)
             # self._update_sigh_artists(t_plot, y, s)
 
+            # Update sniff region overlays
+            self._update_sniff_artists(t_plot, s)
 
             # ---- Y2 metric (if selected and available for this sweep) ----
             key = getattr(st, "y2_metric_key", None)
@@ -803,10 +879,15 @@ class MainWindow(QMainWindow):
                     eupnea_thresh = self._parse_float(self.EupneaThresh) or 5.0  # Hz
                     apnea_thresh = self._parse_float(self.ApneaThresh) or 0.5    # seconds
 
-                    # Compute eupnea regions using UI threshold
+                    # Get sniff regions for this sweep
+                    sniff_regions = self.state.sniff_regions_by_sweep.get(s, [])
+
+                    # Compute eupnea regions using UI threshold (excluding sniff regions)
                     eupnea_mask = metrics.detect_eupnic_regions(
                         t, y, st.sr_hz, pks, on_idx, off_idx, ex_idx, exoff_idx,
-                        freq_threshold_hz=eupnea_thresh
+                        freq_threshold_hz=eupnea_thresh,
+                        min_duration_sec=self.eupnea_min_duration,
+                        sniff_regions=sniff_regions
                     )
 
                     # Compute apnea regions using UI threshold
@@ -844,7 +925,8 @@ class MainWindow(QMainWindow):
                         # Identify problematic breaths (returns separate masks for outliers and failures)
                         outlier_mask, failure_mask = identify_problematic_breaths(
                             t, y, st.sr_hz, peaks_arr, onsets_arr, offsets_arr,
-                            expmins_arr, expoffs_arr, metrics_dict, outlier_threshold=outlier_sd
+                            expmins_arr, expoffs_arr, metrics_dict, outlier_threshold=outlier_sd,
+                            outlier_metrics=self.outlier_metrics
                         )
 
                     except Exception as outlier_error:
@@ -1264,9 +1346,7 @@ class MainWindow(QMainWindow):
         thresh = _num(self.ThreshVal)                 # required (button enabled only if valid)
         prom   = _num(self.PeakPromValue)             # optional
         min_d  = _num(self.MinPeakDistValue)          # seconds
-        direction = (self.PeakDetectionDirection.currentText() or "up").strip().lower()
-        if direction not in ("up", "down"):
-            direction = "up"
+        direction = "up"  # Always detect peaks above threshold for breathing signals
 
         min_dist_samples = None
         if min_d is not None and min_d > 0:
@@ -1350,6 +1430,74 @@ class MainWindow(QMainWindow):
         self.redraw_main_plot()
 
     ##################################################
+    ## Turn Off All Edit Modes ##
+    ##################################################
+    def _turn_off_all_edit_modes(self):
+        """Turn off all edit modes (add/delete peaks, add sigh, move point, mark sniff)."""
+        # Turn off Add Peaks mode
+        if getattr(self, "_add_peaks_mode", False):
+            self._add_peaks_mode = False
+            self.addPeaksButton.blockSignals(True)
+            self.addPeaksButton.setChecked(False)
+            self.addPeaksButton.blockSignals(False)
+            self.addPeaksButton.setText("Add Peaks")
+
+        # Turn off Delete Peaks mode
+        if getattr(self, "_delete_peaks_mode", False):
+            self._delete_peaks_mode = False
+            self.deletePeaksButton.blockSignals(True)
+            self.deletePeaksButton.setChecked(False)
+            self.deletePeaksButton.blockSignals(False)
+            self.deletePeaksButton.setText("Delete Peaks")
+
+        # Turn off Add Sigh mode
+        if getattr(self, "_add_sigh_mode", False):
+            self._add_sigh_mode = False
+            self.addSighButton.blockSignals(True)
+            self.addSighButton.setChecked(False)
+            self.addSighButton.blockSignals(False)
+            self.addSighButton.setText("ADD/DEL Sigh")
+
+        # Turn off Move Point mode
+        if getattr(self, "_move_point_mode", False):
+            self._move_point_mode = False
+            self.movePointButton.blockSignals(True)
+            self.movePointButton.setChecked(False)
+            self.movePointButton.blockSignals(False)
+            self.movePointButton.setText("Move Point")
+            # Clean up any selected point visualization
+            if self._move_point_artist:
+                self._move_point_artist.remove()
+                self._move_point_artist = None
+            self._selected_point = None
+
+        # Turn off Mark Sniff mode
+        if getattr(self, "_mark_sniff_mode", False):
+            self._mark_sniff_mode = False
+            self.markSniffButton.blockSignals(True)
+            self.markSniffButton.setChecked(False)
+            self.markSniffButton.blockSignals(False)
+            self.markSniffButton.setText("Mark Sniff")
+            # Disconnect matplotlib events if connected
+            if self._motion_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self._motion_cid = None
+            if self._release_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self._release_cid = None
+            # Clear drag state
+            if self._sniff_drag_artist:
+                self._sniff_drag_artist.remove()
+                self._sniff_drag_artist = None
+            self._sniff_start_x = None
+            self._sniff_edge_mode = None
+            self._sniff_region_index = None
+
+        # Clear click callback and reset cursor
+        self.plot_host.clear_click_callback()
+        self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+
+    ##################################################
     ##ADD Peaks Button##
     ##################################################
     # def on_add_peaks_toggled(self, checked: bool):
@@ -1379,6 +1527,9 @@ class MainWindow(QMainWindow):
         self._add_peaks_mode = checked
 
         if checked:
+            # Turn off matplotlib toolbar modes (zoom, pan)
+            self.plot_host.turn_off_toolbar_modes()
+
             # turn OFF delete mode
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
@@ -1393,7 +1544,23 @@ class MainWindow(QMainWindow):
                 self.addSighButton.blockSignals(True)
                 self.addSighButton.setChecked(False)
                 self.addSighButton.blockSignals(False)
-                self.addSighButton.setText("Add Sigh")
+                self.addSighButton.setText("ADD/DEL Sigh")
+
+            # turn OFF move point mode
+            if getattr(self, "_move_point_mode", False):
+                self._move_point_mode = False
+                self.movePointButton.blockSignals(True)
+                self.movePointButton.setChecked(False)
+                self.movePointButton.blockSignals(False)
+                self.movePointButton.setText("Move Point")
+
+            # turn OFF mark sniff mode
+            if getattr(self, "_mark_sniff_mode", False):
+                self._mark_sniff_mode = False
+                self.markSniffButton.blockSignals(True)
+                self.markSniffButton.setChecked(False)
+                self.markSniffButton.blockSignals(False)
+                self.markSniffButton.setText("Mark Sniff")
 
             self.addPeaksButton.setText("Add Peaks (ON) [Shift=Del, Ctrl=Sigh]")
             self.plot_host.set_click_callback(self._on_plot_click_add_peak)
@@ -1459,10 +1626,9 @@ class MainWindow(QMainWindow):
         if i1 <= i0:
             return
 
-        # Local extremum depends on the detection direction
-        direction = (self.PeakDetectionDirection.currentText() or "up").strip().lower()
+        # Find local maximum (breathing signals always use upward peaks)
         seg = y[i0:i1 + 1]
-        loc = int(np.argmin(seg)) if direction == "down" else int(np.argmax(seg))
+        loc = int(np.argmax(seg))
         i_peak = i0 + loc
 
         # ---- NEW: enforce minimum separation from existing peaks ----
@@ -1523,6 +1689,9 @@ class MainWindow(QMainWindow):
         self._delete_peaks_mode = checked
 
         if checked:
+            # Turn off matplotlib toolbar modes (zoom, pan)
+            self.plot_host.turn_off_toolbar_modes()
+
             # turn OFF add mode
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
@@ -1537,7 +1706,23 @@ class MainWindow(QMainWindow):
                 self.addSighButton.blockSignals(True)
                 self.addSighButton.setChecked(False)
                 self.addSighButton.blockSignals(False)
-                self.addSighButton.setText("Add Sigh")
+                self.addSighButton.setText("ADD/DEL Sigh")
+
+            # turn OFF move point mode
+            if getattr(self, "_move_point_mode", False):
+                self._move_point_mode = False
+                self.movePointButton.blockSignals(True)
+                self.movePointButton.setChecked(False)
+                self.movePointButton.blockSignals(False)
+                self.movePointButton.setText("Move Point")
+
+            # turn OFF mark sniff mode
+            if getattr(self, "_mark_sniff_mode", False):
+                self._mark_sniff_mode = False
+                self.markSniffButton.blockSignals(True)
+                self.markSniffButton.setChecked(False)
+                self.markSniffButton.blockSignals(False)
+                self.markSniffButton.setText("Mark Sniff")
 
             self.deletePeaksButton.setText("Delete Peaks (ON) [Shift=Add, Ctrl=Sigh]")
             self.plot_host.set_click_callback(self._on_plot_click_delete_peak)
@@ -1849,6 +2034,9 @@ class MainWindow(QMainWindow):
         self._add_sigh_mode = checked
 
         if checked:
+            # Turn off matplotlib toolbar modes (zoom, pan)
+            self.plot_host.turn_off_toolbar_modes()
+
             # turn OFF other modes (without triggering their slots)
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
@@ -1864,6 +2052,22 @@ class MainWindow(QMainWindow):
                 self.deletePeaksButton.blockSignals(False)
                 self.deletePeaksButton.setText("Delete Peaks")
 
+            # turn OFF move point mode
+            if getattr(self, "_move_point_mode", False):
+                self._move_point_mode = False
+                self.movePointButton.blockSignals(True)
+                self.movePointButton.setChecked(False)
+                self.movePointButton.blockSignals(False)
+                self.movePointButton.setText("Move Point")
+
+            # turn OFF mark sniff mode
+            if getattr(self, "_mark_sniff_mode", False):
+                self._mark_sniff_mode = False
+                self.markSniffButton.blockSignals(True)
+                self.markSniffButton.setChecked(False)
+                self.markSniffButton.blockSignals(False)
+                self.markSniffButton.setText("Mark Sniff")
+
             self.addSighButton.setText("Add Sigh (ON)")
             self.plot_host.set_click_callback(self._on_plot_click_add_sigh)
             self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
@@ -1874,6 +2078,758 @@ class MainWindow(QMainWindow):
                 self.plot_host.clear_click_callback()
                 self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
 
+
+    def on_move_point_toggled(self, checked: bool):
+        """Enter/exit Move Point mode; mutually exclusive with other edit modes."""
+        self._move_point_mode = checked
+
+        if checked:
+            # Turn off matplotlib toolbar modes (zoom, pan)
+            self.plot_host.turn_off_toolbar_modes()
+
+            # Turn OFF other edit modes
+            if getattr(self, "_add_peaks_mode", False):
+                self._add_peaks_mode = False
+                self.addPeaksButton.blockSignals(True)
+                self.addPeaksButton.setChecked(False)
+                self.addPeaksButton.blockSignals(False)
+                self.addPeaksButton.setText("Add Peaks")
+
+            if getattr(self, "_delete_peaks_mode", False):
+                self._delete_peaks_mode = False
+                self.deletePeaksButton.blockSignals(True)
+                self.deletePeaksButton.setChecked(False)
+                self.deletePeaksButton.blockSignals(False)
+                self.deletePeaksButton.setText("Delete Peaks")
+
+            if getattr(self, "_add_sigh_mode", False):
+                self._add_sigh_mode = False
+                self.addSighButton.blockSignals(True)
+                self.addSighButton.setChecked(False)
+                self.addSighButton.blockSignals(False)
+                self.addSighButton.setText("ADD/DEL Sigh")
+
+            # turn OFF mark sniff mode
+            if getattr(self, "_mark_sniff_mode", False):
+                self._mark_sniff_mode = False
+                self.markSniffButton.blockSignals(True)
+                self.markSniffButton.setChecked(False)
+                self.markSniffButton.blockSignals(False)
+                self.markSniffButton.setText("Mark Sniff")
+
+            self.movePointButton.setText("Move Point (ON)")
+            self.plot_host.set_click_callback(self._on_plot_click_move_point)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+
+            # Connect matplotlib events
+            self._key_press_cid = self.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
+            self._motion_cid = self.plot_host.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
+            self._release_cid = self.plot_host.canvas.mpl_connect('button_release_event', self._on_canvas_release)
+
+            # Disable matplotlib's built-in toolbar - turn off any active modes
+            # The toolbar has a mode attribute we can check
+            if hasattr(self.plot_host.toolbar, 'mode') and self.plot_host.toolbar.mode != '':
+                # There's an active mode - turn it off by calling the same method again (toggle)
+                if self.plot_host.toolbar.mode == 'pan/zoom':
+                    self.plot_host.toolbar.pan()
+                elif self.plot_host.toolbar.mode == 'zoom rect':
+                    self.plot_host.toolbar.zoom()
+
+            self.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.plot_host.canvas.setFocus()
+        else:
+            self.movePointButton.setText("Move Point")
+
+            # Disconnect matplotlib events
+            if self._key_press_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._key_press_cid)
+                self._key_press_cid = None
+            if self._motion_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self._motion_cid = None
+            if self._release_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self._release_cid = None
+
+            # Re-enable toolbar (user can re-select zoom/pan if they want)
+            self.plot_host.canvas.toolbar.setEnabled(True)
+
+            # Clear selected point
+            self._selected_point = None
+            if self._move_point_artist:
+                try:
+                    self._move_point_artist.remove()
+                except:
+                    pass
+                self._move_point_artist = None
+                self.plot_host.canvas.draw_idle()
+            # Only clear if no other edit mode is active
+            if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _on_plot_click_move_point(self, xdata, ydata, event):
+        """Select a point (peak/onset/offset/exp) to move."""
+        if not getattr(self, "_move_point_mode", False):
+            return
+        if event.inaxes is None or xdata is None:
+            return
+
+        # No need to check toolbar here - it's disabled when entering move mode
+
+        st = self.state
+        if st.t is None or st.analyze_chan not in st.sweeps:
+            return
+
+        s = max(0, min(st.sweep_idx, self._sweep_count() - 1))
+        t, y = self._current_trace()
+        if t is None or y is None:
+            return
+
+        # Get time basis (normalized if stim)
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_plot = t - t0
+        else:
+            t_plot = t
+
+        # Find closest point among all types (within a reasonable distance)
+        import numpy as np
+        pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+        breaths = st.breath_by_sweep.get(s, {})
+
+        # Debug: print what's in the breaths dict
+        print(f"[move-point-debug] breath_by_sweep keys for sweep {s}: {list(breaths.keys()) if breaths else 'None'}")
+
+        onsets = np.asarray(breaths.get('onsets', np.array([], dtype=int)), dtype=int)
+        offsets = np.asarray(breaths.get('offsets', np.array([], dtype=int)), dtype=int)
+        expmins = np.asarray(breaths.get('expmins', np.array([], dtype=int)), dtype=int)
+        expoffs = np.asarray(breaths.get('expoffs', np.array([], dtype=int)), dtype=int)
+
+        # Debug: print what's available
+        print(f"[move-point-debug] Available points - peaks: {pks.size}, onsets: {onsets.size}, offsets: {offsets.size}, expmins: {expmins.size}, expoffs: {expoffs.size}")
+
+        # Find closest point (only consider points within 0.5 seconds)
+        max_distance = 0.5  # seconds
+        candidates = []
+
+        if pks.size > 0:
+            dists = np.abs(t_plot[pks] - xdata)
+            min_idx = np.argmin(dists)
+            if dists[min_idx] < max_distance:
+                candidates.append(('peak', pks[min_idx], dists[min_idx]))
+
+        if onsets.size > 0:
+            dists = np.abs(t_plot[onsets] - xdata)
+            min_idx = np.argmin(dists)
+            if dists[min_idx] < max_distance:
+                candidates.append(('onset', onsets[min_idx], dists[min_idx]))
+
+        if offsets.size > 0:
+            dists = np.abs(t_plot[offsets] - xdata)
+            min_idx = np.argmin(dists)
+            if dists[min_idx] < max_distance:
+                candidates.append(('offset', offsets[min_idx], dists[min_idx]))
+
+        if expmins.size > 0:
+            dists = np.abs(t_plot[expmins] - xdata)
+            min_idx = np.argmin(dists)
+            if dists[min_idx] < max_distance:
+                candidates.append(('expmin', expmins[min_idx], dists[min_idx]))
+
+        if expoffs.size > 0:
+            dists = np.abs(t_plot[expoffs] - xdata)
+            min_idx = np.argmin(dists)
+            if dists[min_idx] < max_distance:
+                candidates.append(('expoff', expoffs[min_idx], dists[min_idx]))
+
+        if not candidates:
+            print("[move-point] No points within 0.5s of click location - click closer to a point")
+            return
+
+        # Debug: print all candidates
+        print(f"[move-point-debug] Candidates within range: {[(c[0], f'{c[2]:.3f}s') for c in candidates]}")
+
+        # Select closest
+        point_type, idx, dist = min(candidates, key=lambda x: x[2])
+
+        # Store selection (keep original_index for finding it later)
+        self._selected_point = {'type': point_type, 'index': idx, 'sweep': s, 'original_index': idx}
+
+        # Visual feedback - match point type color and make it larger with yellow outline
+        if self._move_point_artist:
+            try:
+                self._move_point_artist.remove()
+            except:
+                pass
+
+        # Define colors and markers for each point type
+        color_map = {
+            'peak': 'red',
+            'onset': '#2ecc71',    # green
+            'offset': '#f39c12',   # orange
+            'expmin': '#1f78b4',   # blue
+            'expoff': '#9b59b6'    # purple
+        }
+
+        ax = event.inaxes
+        point_color = color_map.get(point_type, 'cyan')
+        self._move_point_artist, = ax.plot([t_plot[idx]], [y[idx]], 'o',
+                                           color=point_color, markersize=18,
+                                           markeredgecolor='yellow', markeredgewidth=3,
+                                           zorder=100)
+        self.plot_host.canvas.draw_idle()
+        print(f"[move-point] Selected {point_type} at index {idx}")
+
+    def _constrain_to_peak_boundaries(self, new_idx, s):
+        """Constrain point movement to stay between adjacent peaks."""
+        if not self._selected_point:
+            return new_idx
+
+        import numpy as np
+        st = self.state
+        point_type = self._selected_point['type']
+        original_idx = self._selected_point['original_index']
+
+        # Only constrain non-peak points
+        if point_type == 'peak':
+            return new_idx
+
+        # Get all peaks
+        pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+        if pks.size < 2:
+            return new_idx
+
+        # Find the breath cycle this point belongs to (between which two peaks)
+        peak_before = pks[pks <= original_idx]
+        peak_after = pks[pks > original_idx]
+
+        min_bound = peak_before[-1] if len(peak_before) > 0 else 0
+        max_bound = peak_after[0] if len(peak_after) > 0 else len(st.sweeps[st.analyze_chan][s]) - 1
+
+        # Constrain new_idx to be within these bounds
+        return int(np.clip(new_idx, min_bound, max_bound))
+
+    def _move_selected_point(self, direction):
+        """Move the selected point left or right by 1 sample (for arrow keys)."""
+        if not self._selected_point:
+            return
+
+        old_idx = self._selected_point['index']
+        new_idx = old_idx + direction
+
+        # Get trace for bounds checking
+        t, y = self._current_trace()
+        if t is None or y is None:
+            return
+
+        if new_idx < 0 or new_idx >= len(t):
+            print("[move-point] Cannot move beyond trace bounds")
+            return
+
+        # Constrain to peak boundaries
+        st = self.state
+        s = self._selected_point['sweep']
+        new_idx = self._constrain_to_peak_boundaries(new_idx, s)
+
+        # Get time basis
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_plot = t - t0
+        else:
+            t_plot = t
+
+        self._update_point_position(new_idx, t_plot, y, s)
+
+    def _update_point_position(self, new_idx, t_plot, y, s):
+        """Update point to new index position (shared by arrow keys and drag)."""
+        if not self._selected_point:
+            return
+
+        st = self.state
+        point_type = self._selected_point['type']
+        old_idx = self._selected_point['index']
+
+        # Update index
+        self._selected_point['index'] = new_idx
+
+        # Update the actual data array
+        import numpy as np
+        if point_type == 'peak':
+            pks = st.peaks_by_sweep.get(s, np.array([], dtype=int))
+            if pks.size > 0:
+                old_idx_estimate = self._selected_point.get('original_index', old_idx)
+                distances = np.abs(pks - old_idx_estimate)
+                replace_idx = np.argmin(distances)
+                pks[replace_idx] = new_idx
+        elif point_type in ('onset', 'offset', 'expmin', 'expoff'):
+            breaths = st.breath_by_sweep.get(s, {})
+            key_map = {'onset': 'onsets', 'offset': 'offsets', 'expmin': 'expmins', 'expoff': 'expoffs'}
+            key = key_map[point_type]
+            if key in breaths:
+                arr = breaths[key]
+                if arr.size > 0:
+                    old_idx_estimate = self._selected_point.get('original_index', old_idx)
+                    distances = np.abs(arr - old_idx_estimate)
+                    replace_idx = np.argmin(distances)
+                    arr[replace_idx] = new_idx
+
+        # Update visual marker
+        if self._move_point_artist:
+            self._move_point_artist.set_data([t_plot[new_idx]], [y[new_idx]])
+
+        # Update scatter plot markers
+        breaths = st.breath_by_sweep.get(s, {})
+        on_idx = breaths.get('onsets', np.array([], dtype=int))
+        off_idx = breaths.get('offsets', np.array([], dtype=int))
+        ex_idx = breaths.get('expmins', np.array([], dtype=int))
+        exoff_idx = breaths.get('expoffs', np.array([], dtype=int))
+
+        t_on = t_plot[on_idx] if len(on_idx) else None
+        y_on = y[on_idx] if len(on_idx) else None
+        t_off = t_plot[off_idx] if len(off_idx) else None
+        y_off = y[off_idx] if len(off_idx) else None
+        t_exp = t_plot[ex_idx] if len(ex_idx) else None
+        y_exp = y[ex_idx] if len(ex_idx) else None
+        t_exof = t_plot[exoff_idx] if len(exoff_idx) else None
+        y_exof = y[exoff_idx] if len(exoff_idx) else None
+
+        self.plot_host.update_breath_markers(
+            t_on=t_on, y_on=y_on,
+            t_off=t_off, y_off=y_off,
+            t_exp=t_exp, y_exp=y_exp,
+            t_exoff=t_exof, y_exoff=y_exof,
+            size=36
+        )
+
+        # Update peaks scatter plot
+        pks = st.peaks_by_sweep.get(s, np.array([], dtype=int))
+        if len(pks) > 0:
+            self.plot_host.update_peaks(t_plot[pks], y[pks], size=50)
+
+        # Just update the canvas
+        self.plot_host.canvas.draw_idle()
+
+    def _save_moved_point(self, recompute_metrics=False):
+        """Save the moved point position and clear selection."""
+        if not self._selected_point:
+            return
+
+        # Point has already been updated during movement, just need to clear selection
+        point_type = self._selected_point['type']
+        new_idx = self._selected_point['index']
+
+        print(f"[move-point] Saved {point_type} at index {new_idx}")
+
+        # Clear selection and glowing marker
+        self._selected_point = None
+        if self._move_point_artist:
+            try:
+                self._move_point_artist.remove()
+            except:
+                pass
+            self._move_point_artist = None
+
+        # Recompute metrics if requested (after drag release)
+        if recompute_metrics:
+            # Trigger eupnea/outlier region recalculation by calling redraw
+            self.redraw_main_plot()
+            # Toolbar stays disabled during move mode
+        else:
+            # Just redraw to remove the glowing marker
+            self.plot_host.canvas.draw_idle()
+
+    def _cancel_move_point(self):
+        """Cancel the point move operation and restore original position."""
+        if not self._selected_point:
+            return
+
+        # Restore original position
+        st = self.state
+        s = self._selected_point['sweep']
+        point_type = self._selected_point['type']
+        original_idx = self._selected_point.get('original_index')
+        current_idx = self._selected_point['index']
+
+        if original_idx != current_idx:
+            import numpy as np
+            # Restore the point to its original position
+            if point_type == 'peak':
+                pks = st.peaks_by_sweep.get(s, np.array([], dtype=int))
+                if pks.size > 0:
+                    distances = np.abs(pks - current_idx)
+                    replace_idx = np.argmin(distances)
+                    pks[replace_idx] = original_idx
+            elif point_type in ('onset', 'offset', 'expmin', 'expoff'):
+                breaths = st.breath_by_sweep.get(s, {})
+                key_map = {'onset': 'onsets', 'offset': 'offsets', 'expmin': 'expmins', 'expoff': 'expoffs'}
+                key = key_map[point_type]
+                if key in breaths:
+                    arr = breaths[key]
+                    if arr.size > 0:
+                        distances = np.abs(arr - current_idx)
+                        replace_idx = np.argmin(distances)
+                        arr[replace_idx] = original_idx
+
+        # Clear selection
+        self._selected_point = None
+        if self._move_point_artist:
+            try:
+                self._move_point_artist.remove()
+            except:
+                pass
+            self._move_point_artist = None
+
+        # Redraw to show restored position
+        self.plot_host.canvas.draw_idle()
+        print("[move-point] Move cancelled, position restored")
+
+    # ========== Sniffing Region Marking ==========
+
+    def on_mark_sniff_toggled(self, checked: bool):
+        """Enter/exit Mark Sniff mode."""
+        self._mark_sniff_mode = checked
+
+        if checked:
+            # Turn off matplotlib toolbar modes (zoom, pan)
+            self.plot_host.turn_off_toolbar_modes()
+
+            # Turn OFF other edit modes
+            if getattr(self, "_add_peaks_mode", False):
+                self._add_peaks_mode = False
+                self.addPeaksButton.blockSignals(True)
+                self.addPeaksButton.setChecked(False)
+                self.addPeaksButton.blockSignals(False)
+                self.addPeaksButton.setText("Add Peaks")
+
+            if getattr(self, "_delete_peaks_mode", False):
+                self._delete_peaks_mode = False
+                self.deletePeaksButton.blockSignals(True)
+                self.deletePeaksButton.setChecked(False)
+                self.deletePeaksButton.blockSignals(False)
+                self.deletePeaksButton.setText("Delete Peaks")
+
+            if getattr(self, "_add_sigh_mode", False):
+                self._add_sigh_mode = False
+                self.addSighButton.blockSignals(True)
+                self.addSighButton.setChecked(False)
+                self.addSighButton.blockSignals(False)
+                self.addSighButton.setText("ADD/DEL Sigh")
+
+            if getattr(self, "_move_point_mode", False):
+                self._move_point_mode = False
+                self.movePointButton.blockSignals(True)
+                self.movePointButton.setChecked(False)
+                self.movePointButton.blockSignals(False)
+                self.movePointButton.setText("Move Point")
+
+            self.markSniffButton.setText("Mark Sniff (ON)")
+            self.plot_host.set_click_callback(self._on_plot_click_mark_sniff)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+
+            # Connect matplotlib events for drag functionality
+            self._motion_cid = self.plot_host.canvas.mpl_connect('motion_notify_event', self._on_sniff_drag)
+            self._release_cid = self.plot_host.canvas.mpl_connect('button_release_event', self._on_sniff_release)
+        else:
+            self.markSniffButton.setText("Mark Sniff")
+
+            # Disconnect matplotlib events
+            if self._motion_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self._motion_cid = None
+            if self._release_cid is not None:
+                self.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self._release_cid = None
+
+            # Clear drag artist
+            if self._sniff_drag_artist:
+                try:
+                    self._sniff_drag_artist.remove()
+                except:
+                    pass
+                self._sniff_drag_artist = None
+                self.plot_host.canvas.draw_idle()
+
+            # Only clear if no other edit mode is active
+            if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False) and not getattr(self, "_move_point_mode", False):
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _on_plot_click_mark_sniff(self, xdata, ydata, event):
+        """Start marking a sniffing region (click-and-drag) or grab an edge to adjust."""
+        if not getattr(self, "_mark_sniff_mode", False):
+            return
+        if event.inaxes is None or xdata is None:
+            return
+
+        # Check if click is near an existing region edge
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._sweep_count() - 1))
+        regions = self.state.sniff_regions_by_sweep.get(s, [])
+
+        # Convert to plot time for comparison
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+        else:
+            t0 = 0.0
+
+        # Edge detection threshold (in plot time units)
+        edge_threshold = 0.3  # seconds
+
+        # Check each region for edge proximity
+        for i, (start_time, end_time) in enumerate(regions):
+            plot_start = start_time - t0
+            plot_end = end_time - t0
+
+            # Check if near start edge
+            if abs(xdata - plot_start) < edge_threshold:
+                self._sniff_edge_mode = 'start'
+                self._sniff_region_index = i
+                self._sniff_start_x = plot_end  # The other edge stays fixed
+                print(f"[mark-sniff] Grabbed START edge of region {i}")
+                return
+
+            # Check if near end edge
+            if abs(xdata - plot_end) < edge_threshold:
+                self._sniff_edge_mode = 'end'
+                self._sniff_region_index = i
+                self._sniff_start_x = plot_start  # The other edge stays fixed
+                print(f"[mark-sniff] Grabbed END edge of region {i}")
+                return
+
+        # Not near any edge - start creating new region
+        self._sniff_edge_mode = None
+        self._sniff_region_index = None
+        self._sniff_start_x = xdata
+        print(f"[mark-sniff] Started new region at x={xdata:.3f}")
+
+    def _on_sniff_drag(self, event):
+        """Update visual indicator while dragging to mark sniffing region."""
+        if not getattr(self, "_mark_sniff_mode", False):
+            return
+        if self._sniff_start_x is None or event.inaxes is None or event.xdata is None:
+            return
+
+        # Get plot axes
+        ax = self.plot_host.ax_main
+        if ax is None:
+            return
+
+        # Remove previous drag indicator
+        if self._sniff_drag_artist:
+            try:
+                self._sniff_drag_artist.remove()
+            except:
+                pass
+
+        # Draw semi-transparent purple rectangle
+        x_start = self._sniff_start_x
+        x_end = event.xdata
+        x_left = min(x_start, x_end)
+        x_right = max(x_start, x_end)
+
+        self._sniff_drag_artist = ax.axvspan(x_left, x_right, alpha=0.3, color='purple', zorder=10)
+        self.plot_host.canvas.draw_idle()
+
+    def _on_sniff_release(self, event):
+        """Finalize the sniffing region when mouse is released."""
+        if not getattr(self, "_mark_sniff_mode", False):
+            return
+        if self._sniff_start_x is None or event.inaxes is None or event.xdata is None:
+            return
+
+        x_start = self._sniff_start_x
+        x_end = event.xdata
+        x_left = min(x_start, x_end)
+        x_right = max(x_start, x_end)
+
+        # Minimum width check (avoid accidental clicks)
+        if abs(x_right - x_left) < 0.1:  # Less than 0.1 seconds
+            print(f"[mark-sniff] Region too small, ignoring")
+            self._sniff_start_x = None
+            self._sniff_edge_mode = None
+            self._sniff_region_index = None
+            if self._sniff_drag_artist:
+                try:
+                    self._sniff_drag_artist.remove()
+                except:
+                    pass
+                self._sniff_drag_artist = None
+                self.plot_host.canvas.draw_idle()
+            return
+
+        # Convert from normalized time back to actual time if needed
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._sweep_count() - 1))
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            # x_left and x_right are in normalized time, convert to actual time
+            actual_start = x_left + t0
+            actual_end = x_right + t0
+        else:
+            actual_start = x_left
+            actual_end = x_right
+
+        # Snap to nearest breath events
+        actual_start, actual_end = self._snap_sniff_to_breath_events(s, actual_start, actual_end)
+
+        # Initialize regions list if needed
+        if s not in self.state.sniff_regions_by_sweep:
+            self.state.sniff_regions_by_sweep[s] = []
+
+        # Handle edge dragging vs new region creation
+        if self._sniff_edge_mode is not None and self._sniff_region_index is not None:
+            # Editing existing region - update it
+            old_start, old_end = self.state.sniff_regions_by_sweep[s][self._sniff_region_index]
+            if self._sniff_edge_mode == 'start':
+                # Update start edge, keep end fixed
+                self.state.sniff_regions_by_sweep[s][self._sniff_region_index] = (actual_start, old_end)
+                print(f"[mark-sniff] Updated START edge of region {self._sniff_region_index}: {actual_start:.3f} - {old_end:.3f} s")
+            else:  # 'end'
+                # Update end edge, keep start fixed
+                self.state.sniff_regions_by_sweep[s][self._sniff_region_index] = (old_start, actual_end)
+                print(f"[mark-sniff] Updated END edge of region {self._sniff_region_index}: {old_start:.3f} - {actual_end:.3f} s")
+        else:
+            # Creating new region - add it
+            self.state.sniff_regions_by_sweep[s].append((actual_start, actual_end))
+            print(f"[mark-sniff] Added new sniff region: {actual_start:.3f} - {actual_end:.3f} s (sweep {s})")
+
+        # Merge overlapping regions
+        self._merge_sniff_regions(s)
+
+        # Clear drag state
+        self._sniff_start_x = None
+        self._sniff_edge_mode = None
+        self._sniff_region_index = None
+        if self._sniff_drag_artist:
+            try:
+                self._sniff_drag_artist.remove()
+            except:
+                pass
+            self._sniff_drag_artist = None
+
+        # Redraw to show permanent overlay
+        self.redraw_main_plot()
+
+    def _snap_sniff_to_breath_events(self, sweep_idx: int, start_time: float, end_time: float):
+        """Snap sniff region edges to nearest breath events.
+
+        Left edge (start) snaps to nearest inspiratory onset.
+        Right edge (end) snaps to nearest expiratory offset.
+        """
+        import numpy as np
+
+        # Get current trace to convert indices to times
+        t, y = self._current_trace()
+        if t is None:
+            print("[mark-sniff] No trace available for snapping")
+            return start_time, end_time
+
+        # Get breath events for this sweep
+        breaths = self.state.breath_by_sweep.get(sweep_idx, {})
+        onsets = np.asarray(breaths.get('onsets', []), dtype=int)
+        expoffs = np.asarray(breaths.get('expoffs', []), dtype=int)
+
+        snapped_start = start_time
+        snapped_end = end_time
+
+        # Snap start to nearest onset
+        if onsets.size > 0:
+            onset_times = t[onsets]
+            distances = np.abs(onset_times - start_time)
+            nearest_idx = np.argmin(distances)
+
+            # Only snap if within reasonable distance (e.g., 1 second)
+            if distances[nearest_idx] < 1.0:
+                snapped_start = onset_times[nearest_idx]
+                print(f"[mark-sniff] Snapped START to onset at {snapped_start:.3f}s (was {start_time:.3f}s)")
+
+        # Snap end to nearest expiratory offset
+        if expoffs.size > 0:
+            expoff_times = t[expoffs]
+            distances = np.abs(expoff_times - end_time)
+            nearest_idx = np.argmin(distances)
+
+            # Only snap if within reasonable distance (e.g., 1 second)
+            if distances[nearest_idx] < 1.0:
+                snapped_end = expoff_times[nearest_idx]
+                print(f"[mark-sniff] Snapped END to expiratory offset at {snapped_end:.3f}s (was {end_time:.3f}s)")
+
+        return snapped_start, snapped_end
+
+    def _merge_sniff_regions(self, sweep_idx: int):
+        """Merge overlapping or adjacent sniffing regions for a given sweep."""
+        regions = self.state.sniff_regions_by_sweep.get(sweep_idx, [])
+        if len(regions) <= 1:
+            return
+
+        # Sort regions by start time
+        regions = sorted(regions, key=lambda x: x[0])
+
+        # Merge overlapping regions
+        merged = []
+        current_start, current_end = regions[0]
+
+        for start, end in regions[1:]:
+            if start <= current_end:  # Overlapping or adjacent
+                # Merge by extending current region
+                current_end = max(current_end, end)
+                print(f"[mark-sniff] Merged overlapping regions into: {current_start:.3f} - {current_end:.3f} s")
+            else:
+                # No overlap - save current and start new
+                merged.append((current_start, current_end))
+                current_start, current_end = start, end
+
+        # Add the last region
+        merged.append((current_start, current_end))
+
+        # Update state
+        self.state.sniff_regions_by_sweep[sweep_idx] = merged
+        print(f"[mark-sniff] After merging: {len(merged)} region(s) on sweep {sweep_idx}")
+
+    def _update_sniff_artists(self, t_plot, sweep_idx: int):
+        """(Re)draw purple overlays for marked sniffing regions (current sweep only)."""
+        # Clear existing artists
+        for art in self._sniff_artists:
+            try:
+                art.remove()
+            except:
+                pass
+        self._sniff_artists = []
+
+        # Get sniff regions for this sweep
+        s = int(sweep_idx)
+        regions = self.state.sniff_regions_by_sweep.get(s, [])
+        if not regions:
+            return
+
+        # Get time offset for normalization (if stim channel)
+        st = self.state
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+        else:
+            t0 = 0.0
+
+        # Draw each region as a semi-transparent purple rectangle
+        ax = self.plot_host.ax_main
+        if ax is None:
+            return
+        for (start_time, end_time) in regions:
+            # Convert to plot time (normalized if stim)
+            plot_start = start_time - t0
+            plot_end = end_time - t0
+
+            # Draw overlay
+            artist = ax.axvspan(plot_start, plot_end, alpha=0.25, color='purple', zorder=5, label='Sniffing')
+            self._sniff_artists.append(artist)
+
+        self.plot_host.canvas.draw_idle()
 
     def on_spectral_analysis_clicked(self):
         """Open spectral analysis dialog and optionally apply notch filter."""
@@ -1917,6 +2873,48 @@ class MainWindow(QMainWindow):
                 print("[notch-filter] No filter applied (lower or upper is None)")
         else:
             print("[spectral-dialog] Dialog was not accepted (user cancelled or closed)")
+
+    def on_outlier_thresh_clicked(self):
+        """Open dialog to select which metrics to use for outlier detection."""
+        # Get all available metrics from core.metrics
+        from core.metrics import METRICS
+
+        # Filter to only numeric metrics (exclude region detection functions)
+        numeric_metrics = {k: v for k, v in METRICS.items()
+                          if k not in ["eupnic", "apnea", "regularity"]}
+
+        # Create and show dialog
+        dlg = self.OutlierMetricsDialog(parent=self,
+                                        available_metrics=list(numeric_metrics.keys()),
+                                        selected_metrics=self.outlier_metrics)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Update selected metrics
+            self.outlier_metrics = dlg.get_selected_metrics()
+            print(f"[outlier-metrics] Updated outlier detection metrics: {self.outlier_metrics}")
+
+            # Redraw to apply new outlier detection
+            self.redraw_main_plot()
+
+    def on_eupnea_thresh_clicked(self):
+        """Open dialog to configure eupnea detection parameters."""
+        # Create and show dialog
+        dlg = self.EupneaParamsDialog(
+            parent=self,
+            freq_threshold=self._parse_float(self.EupneaThresh) or 5.0,
+            min_duration=self.eupnea_min_duration
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Get parameters from dialog
+            freq_thresh, min_dur = dlg.get_params()
+
+            # Update UI and internal state
+            self.EupneaThresh.setText(str(freq_thresh))
+            self.eupnea_min_duration = min_dur
+
+            print(f"[eupnea-params] Updated: freq_threshold={freq_thresh} Hz, min_duration={min_dur} s")
+
+            # Redraw to apply new eupnea detection
+            self.redraw_main_plot()
 
     def _refresh_omit_button_label(self):
         """Update Omit button text based on whether current sweep is omitted."""
@@ -2022,6 +3020,229 @@ class MainWindow(QMainWindow):
 
 
     ##################################################
+    ##Eupnea Parameters Dialog                      ##
+    ##################################################
+    class EupneaParamsDialog(QDialog):
+        def __init__(self, parent=None, freq_threshold=5.0, min_duration=2.0):
+            from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
+                                        QDoubleSpinBox, QPushButton, QGroupBox)
+            from PyQt6.QtCore import Qt
+
+            super().__init__(parent)
+            self.setWindowTitle("Eupnea Detection Parameters")
+            self.resize(450, 300)
+
+            # Main layout
+            main_layout = QVBoxLayout(self)
+
+            # Title
+            title = QLabel("Configure Eupnea Detection")
+            title.setStyleSheet("font-size: 14pt; font-weight: bold; margin-bottom: 10px;")
+            main_layout.addWidget(title)
+
+            # Description
+            desc = QLabel("Eupnea refers to normal, regular breathing patterns. "
+                         "Configure the criteria used to identify eupneic regions:")
+            desc.setWordWrap(True)
+            desc.setStyleSheet("color: #B0B0B0; margin-bottom: 20px;")
+            main_layout.addWidget(desc)
+
+            # Parameters group
+            params_group = QGroupBox("Detection Parameters")
+            params_layout = QVBoxLayout()
+
+            # Frequency threshold
+            freq_layout = QHBoxLayout()
+            freq_layout.addWidget(QLabel("Maximum Frequency (Hz):"))
+            self.freq_spin = QDoubleSpinBox()
+            self.freq_spin.setRange(0.1, 20.0)
+            self.freq_spin.setValue(freq_threshold)
+            self.freq_spin.setDecimals(1)
+            self.freq_spin.setSingleStep(0.5)
+            self.freq_spin.setToolTip("Breathing must be below this frequency to be considered eupneic")
+            freq_layout.addWidget(self.freq_spin)
+            freq_layout.addWidget(QLabel("(typical: 3-5 Hz)"))
+            freq_layout.addStretch()
+            params_layout.addLayout(freq_layout)
+
+            # Min duration
+            dur_layout = QHBoxLayout()
+            dur_layout.addWidget(QLabel("Minimum Duration (s):"))
+            self.dur_spin = QDoubleSpinBox()
+            self.dur_spin.setRange(0.5, 10.0)
+            self.dur_spin.setValue(min_duration)
+            self.dur_spin.setDecimals(1)
+            self.dur_spin.setSingleStep(0.5)
+            self.dur_spin.setToolTip("Region must sustain these criteria for at least this long")
+            dur_layout.addWidget(self.dur_spin)
+            dur_layout.addWidget(QLabel("(typical: 2-3 s)"))
+            dur_layout.addStretch()
+            params_layout.addLayout(dur_layout)
+
+            params_group.setLayout(params_layout)
+            main_layout.addWidget(params_group)
+
+            # Info about visual indicators
+            visual_info = QLabel("Green overlay indicates detected eupneic regions on the main plot.")
+            visual_info.setWordWrap(True)
+            visual_info.setStyleSheet("color: #2ecc71; font-style: italic; margin-top: 15px;")
+            main_layout.addWidget(visual_info)
+
+            main_layout.addStretch()
+
+            # Dialog buttons
+            button_layout = QHBoxLayout()
+
+            reset_btn = QPushButton("Reset to Defaults")
+            reset_btn.clicked.connect(self.reset_to_defaults)
+            button_layout.addWidget(reset_btn)
+
+            button_layout.addStretch()
+
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.clicked.connect(self.reject)
+            button_layout.addWidget(cancel_btn)
+
+            ok_btn = QPushButton("OK")
+            ok_btn.setDefault(True)
+            ok_btn.clicked.connect(self.accept)
+            button_layout.addWidget(ok_btn)
+
+            main_layout.addLayout(button_layout)
+
+        def reset_to_defaults(self):
+            """Reset parameters to default values."""
+            self.freq_spin.setValue(5.0)
+            self.dur_spin.setValue(2.0)
+
+        def get_params(self):
+            """Return (freq_threshold, min_duration) tuple."""
+            return (self.freq_spin.value(), self.dur_spin.value())
+
+
+    ##################################################
+    ##Outlier Metrics Selection Dialog              ##
+    ##################################################
+    class OutlierMetricsDialog(QDialog):
+        def __init__(self, parent=None, available_metrics=None, selected_metrics=None):
+            from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
+                                        QPushButton, QScrollArea, QWidget)
+            from PyQt6.QtCore import Qt
+
+            super().__init__(parent)
+            self.setWindowTitle("Select Outlier Detection Metrics")
+            self.resize(500, 600)
+
+            # Store available metrics
+            self.available_metrics = available_metrics or []
+            self.selected_metrics = set(selected_metrics or [])
+
+            # Metric descriptions
+            self.metric_descriptions = {
+                "if": "Instantaneous Frequency (Hz) - breath rate",
+                "amp_insp": "Inspiratory Amplitude - peak height",
+                "amp_exp": "Expiratory Amplitude - trough depth",
+                "ti": "Inspiratory Time (s) - inhalation duration",
+                "te": "Expiratory Time (s) - exhalation duration",
+                "area_insp": "Inspiratory Area - integral during inhalation",
+                "area_exp": "Expiratory Area - integral during exhalation",
+                "vent_proxy": "Ventilation Proxy - breathing effort estimate",
+                "d1": "D1 - duty cycle (Ti/Ttot)",
+                "d2": "D2 - expiratory fraction (Te/Ttot)"
+            }
+
+            # Main layout
+            main_layout = QVBoxLayout(self)
+
+            # Title label
+            title = QLabel("Select which metrics to use for outlier detection:")
+            title.setStyleSheet("font-size: 12pt; font-weight: bold; margin-bottom: 10px;")
+            main_layout.addWidget(title)
+
+            # Info label
+            info = QLabel("Breaths with values beyond ±N standard deviations (set in SD field) "
+                         "for ANY selected metric will be flagged as outliers.")
+            info.setWordWrap(True)
+            info.setStyleSheet("color: #B0B0B0; margin-bottom: 15px;")
+            main_layout.addWidget(info)
+
+            # Scroll area for checkboxes
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll_content = QWidget()
+            scroll_layout = QVBoxLayout(scroll_content)
+
+            # Create checkboxes
+            self.checkboxes = {}
+            for metric in self.available_metrics:
+                checkbox = QCheckBox(metric)
+                checkbox.setChecked(metric in self.selected_metrics)
+
+                # Add description if available
+                if metric in self.metric_descriptions:
+                    checkbox.setText(f"{metric} - {self.metric_descriptions[metric]}")
+
+                checkbox.setStyleSheet("margin: 5px 0px;")
+                self.checkboxes[metric] = checkbox
+                scroll_layout.addWidget(checkbox)
+
+            scroll_layout.addStretch()
+            scroll.setWidget(scroll_content)
+            main_layout.addWidget(scroll)
+
+            # Quick selection buttons
+            quick_buttons = QHBoxLayout()
+            select_all_btn = QPushButton("Select All")
+            select_all_btn.clicked.connect(self.select_all)
+            quick_buttons.addWidget(select_all_btn)
+
+            deselect_all_btn = QPushButton("Deselect All")
+            deselect_all_btn.clicked.connect(self.deselect_all)
+            quick_buttons.addWidget(deselect_all_btn)
+
+            default_btn = QPushButton("Reset to Default")
+            default_btn.clicked.connect(self.reset_to_default)
+            quick_buttons.addWidget(default_btn)
+
+            main_layout.addLayout(quick_buttons)
+
+            # Dialog buttons
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.clicked.connect(self.reject)
+            button_layout.addWidget(cancel_btn)
+
+            ok_btn = QPushButton("OK")
+            ok_btn.setDefault(True)
+            ok_btn.clicked.connect(self.accept)
+            button_layout.addWidget(ok_btn)
+
+            main_layout.addLayout(button_layout)
+
+        def select_all(self):
+            """Check all metric checkboxes."""
+            for checkbox in self.checkboxes.values():
+                checkbox.setChecked(True)
+
+        def deselect_all(self):
+            """Uncheck all metric checkboxes."""
+            for checkbox in self.checkboxes.values():
+                checkbox.setChecked(False)
+
+        def reset_to_default(self):
+            """Reset to default metric selection."""
+            default_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
+            for metric, checkbox in self.checkboxes.items():
+                checkbox.setChecked(metric in default_metrics)
+
+        def get_selected_metrics(self):
+            """Return list of selected metric keys."""
+            return [metric for metric, checkbox in self.checkboxes.items() if checkbox.isChecked()]
+
+
+    ##################################################
     ##Spectral Analysis Dialog                      ##
     ##################################################
     class SpectralAnalysisDialog(QDialog):
@@ -2047,11 +3268,14 @@ class MainWindow(QMainWindow):
             if stim_spans and len(stim_spans) > 0:
                 self.t_offset = stim_spans[0][0]  # First stim onset
 
-            # Main layout
+            # Main layout with tight spacing
             main_layout = QVBoxLayout(self)
+            main_layout.setSpacing(5)
+            main_layout.setContentsMargins(5, 5, 5, 5)
 
             # Control panel at top
             control_layout = QHBoxLayout()
+            control_layout.setSpacing(5)
 
             # Sweep navigation controls
             if parent_window:
@@ -2060,7 +3284,7 @@ class MainWindow(QMainWindow):
                 control_layout.addWidget(self.prev_sweep_btn)
 
                 self.sweep_label = QLabel(f"Sweep: {getattr(parent_window.state, 'sweep_idx', 0) + 1}")
-                self.sweep_label.setStyleSheet("color: white; font-size: 12pt; font-weight: bold;")
+                self.sweep_label.setStyleSheet("color: black; font-size: 12pt; font-weight: bold; background-color: white; padding: 2px 8px; border-radius: 3px;")
                 control_layout.addWidget(self.sweep_label)
 
                 self.next_sweep_btn = QPushButton("Next Sweep ►")
@@ -2095,6 +3319,26 @@ class MainWindow(QMainWindow):
             self.reset_filter_btn = QPushButton("Reset Filter")
             self.reset_filter_btn.clicked.connect(self.on_reset_filter)
             control_layout.addWidget(self.reset_filter_btn)
+
+            # Add separator
+            control_layout.addWidget(QLabel("  |  "))
+
+            # Mean Subtraction controls
+            from PyQt6.QtWidgets import QCheckBox
+            self.mean_subtract_cb = QCheckBox("Mean Subtraction")
+            self.mean_subtract_cb.setChecked(parent_window.state.use_mean_sub if parent_window else False)
+            self.mean_subtract_cb.toggled.connect(self.on_mean_subtract_toggled)
+            control_layout.addWidget(self.mean_subtract_cb)
+
+            self.mean_window_spin = QDoubleSpinBox()
+            self.mean_window_spin.setRange(0.1, 100.0)
+            # Use mean_val attribute which is the window size in seconds
+            self.mean_window_spin.setValue(parent_window.state.mean_val if (parent_window and parent_window.state.mean_val) else 10.0)
+            self.mean_window_spin.setDecimals(1)
+            self.mean_window_spin.setSuffix(" s")
+            self.mean_window_spin.setEnabled(self.mean_subtract_cb.isChecked())
+            self.mean_window_spin.valueChanged.connect(self.on_mean_window_changed)
+            control_layout.addWidget(self.mean_window_spin)
 
             control_layout.addStretch()
             main_layout.addLayout(control_layout)
@@ -2134,17 +3378,41 @@ class MainWindow(QMainWindow):
             self.figure.clear()
 
             # Create subplots with aligned axes: power spectrum on top, wavelet on bottom
-            # Use gridspec to ensure panels have same width (accounting for colorbar on ax2)
+            # Let matplotlib handle spacing automatically with tight_layout
             from matplotlib.gridspec import GridSpec
-            gs = GridSpec(2, 1, figure=self.figure, hspace=0.3, left=0.08, right=0.88, top=0.95, bottom=0.06)
+            gs = GridSpec(2, 1, figure=self.figure)
             ax1 = self.figure.add_subplot(gs[0])
             ax2 = self.figure.add_subplot(gs[1])
 
             # Power Spectrum (Welch method)
             if self.sr_hz:
-                # Use extremely long nperseg for maximum frequency resolution at low frequencies
-                nperseg = min(32768, len(self.y)//2)  # Quadrupled from 8192 to 32768
-                noverlap = int(nperseg * 0.9)  # 90% overlap for very smooth estimate
+                # Increase resolution 5x: longer nperseg for smoother curves
+                nperseg = min(163840, len(self.y)//2)  # 5x increase from 32768 to 163840
+                noverlap = int(nperseg * 0.90)  # 90% overlap for smooth estimate
+
+                # All sweeps concatenated (if parent window available)
+                if self.parent_window and hasattr(self.parent_window.state, 'sweeps') and self.parent_window.state.analyze_chan:
+                    try:
+                        sweeps_dict = self.parent_window.state.sweeps
+                        analyze_chan = self.parent_window.state.analyze_chan
+
+                        if analyze_chan in sweeps_dict:
+                            sweeps_data = sweeps_dict[analyze_chan]  # Shape: (n_samples, n_sweeps)
+
+                            # Concatenate all sweeps
+                            all_sweeps_concat = []
+                            for sweep_idx in range(sweeps_data.shape[1]):
+                                all_sweeps_concat.append(sweeps_data[:, sweep_idx])
+
+                            if all_sweeps_concat:
+                                concatenated = np.concatenate(all_sweeps_concat)
+
+                                # Compute Welch PSD on concatenated data
+                                freqs_all, psd_all = signal.welch(concatenated, fs=self.sr_hz, nperseg=nperseg, noverlap=noverlap)
+                                mask_all = freqs_all <= 30
+                                ax1.plot(freqs_all[mask_all], psd_all[mask_all], 'magenta', linewidth=2, label='All Sweeps', alpha=0.8)
+                    except Exception as e:
+                        print(f"[spectral] Failed to compute all-sweeps spectrum: {e}")
 
                 # Full trace spectrum
                 freqs, psd = signal.welch(self.y, fs=self.sr_hz, nperseg=nperseg, noverlap=noverlap)
@@ -2154,26 +3422,42 @@ class MainWindow(QMainWindow):
                 freqs_plot = freqs[mask]
                 psd_plot = psd[mask]
 
-                ax1.plot(freqs_plot, psd_plot, 'cyan', linewidth=2, label='Full Trace')
+                ax1.plot(freqs_plot, psd_plot, 'cyan', linewidth=2, label='Current Trace')
 
-                # If stim spans provided, compute spectrum during stim
+                # If stim spans provided, compute spectrum during and after stim
                 if self.stim_spans and len(self.stim_spans) > 0:
-                    # Extract stimulation periods
-                    stim_segments = []
-                    for start, end in self.stim_spans:
-                        # Find indices in time array
-                        start_idx = np.searchsorted(self.t, start)
-                        end_idx = np.searchsorted(self.t, end)
-                        if end_idx > start_idx:
-                            stim_segments.append(self.y[start_idx:end_idx])
+                    # During stim: from first laser onset to last laser offset
+                    first_stim_start = self.stim_spans[0][0]
+                    last_stim_end = self.stim_spans[-1][1]
 
-                    if stim_segments:
-                        # Concatenate all stim segments
-                        stim_data = np.concatenate(stim_segments)
-                        if len(stim_data) > nperseg:
-                            freqs_stim, psd_stim = signal.welch(stim_data, fs=self.sr_hz, nperseg=nperseg, noverlap=noverlap)
-                            mask_stim = freqs_stim <= 30
-                            ax1.plot(freqs_stim[mask_stim], psd_stim[mask_stim], 'orange', linewidth=2, label='During Stim', alpha=0.8)
+                    stim_start_idx = np.searchsorted(self.t, first_stim_start)
+                    stim_end_idx = np.searchsorted(self.t, last_stim_end)
+
+                    stim_data = None
+                    post_stim_data = None
+
+                    if stim_end_idx > stim_start_idx:
+                        stim_data = self.y[stim_start_idx:stim_end_idx]
+
+                    # Post-stim: everything after last laser offset
+                    if stim_end_idx < len(self.y):
+                        post_stim_data = self.y[stim_end_idx:]
+
+                    # During stim spectrum (use adaptive nperseg if data is short)
+                    if stim_data is not None and len(stim_data) > 256:
+                        nperseg_stim = min(nperseg, len(stim_data)//2)
+                        noverlap_stim = int(nperseg_stim * 0.90)
+                        freqs_stim, psd_stim = signal.welch(stim_data, fs=self.sr_hz, nperseg=nperseg_stim, noverlap=noverlap_stim)
+                        mask_stim = freqs_stim <= 30
+                        ax1.plot(freqs_stim[mask_stim], psd_stim[mask_stim], 'orange', linewidth=2, label='During Stim', alpha=0.8)
+
+                    # Post-stim spectrum (use adaptive nperseg if data is short)
+                    if post_stim_data is not None and len(post_stim_data) > 256:
+                        nperseg_post = min(nperseg, len(post_stim_data)//2)
+                        noverlap_post = int(nperseg_post * 0.90)
+                        freqs_post, psd_post = signal.welch(post_stim_data, fs=self.sr_hz, nperseg=nperseg_post, noverlap=noverlap_post)
+                        mask_post = freqs_post <= 30
+                        ax1.plot(freqs_post[mask_post], psd_post[mask_post], 'lime', linewidth=2, label='Post-Stim', alpha=0.8)
 
                 # Add labels with padding to prevent cutoff
                 ax1.set_xlabel('Frequency (Hz)', color='white', fontsize=16, fontweight='bold', labelpad=10)
@@ -2218,7 +3502,7 @@ class MainWindow(QMainWindow):
                     cwtmatr = np.zeros((len(frequencies), len(y_ds)))
 
                     for i, freq in enumerate(frequencies):
-                        # Create complex Morlet wavelet for this frequency
+                        # Create Complex Morlet wavelet for this frequency
                         w = 6.0  # Standard Morlet parameter
                         sigma = w / (2 * np.pi * freq)  # Time domain width
 
@@ -2226,7 +3510,7 @@ class MainWindow(QMainWindow):
                         max_wavelet_samples = min(int(10 * sigma * self.sr_hz / downsample_factor), len(y_ds) // 2)
                         wavelet_time = np.arange(-max_wavelet_samples, max_wavelet_samples) / (self.sr_hz / downsample_factor)
 
-                        # Complex Morlet wavelet
+                        # Complex Morlet wavelet (optimal for oscillatory respiratory signals)
                         wavelet = np.exp(2j * np.pi * freq * wavelet_time) * np.exp(-wavelet_time**2 / (2 * sigma**2))
                         wavelet = wavelet / np.sqrt(sigma * np.sqrt(np.pi))  # Normalize
 
@@ -2298,7 +3582,8 @@ class MainWindow(QMainWindow):
                     spine.set_edgecolor('white')
                     spine.set_linewidth(2)
 
-            # Don't use tight_layout since we're using GridSpec for precise alignment
+            # Use tight_layout with padding to prevent text cutoff
+            self.figure.tight_layout(pad=2.0)
             self.canvas.draw()
 
         def on_apply_filter(self):
@@ -2324,6 +3609,25 @@ class MainWindow(QMainWindow):
             self.lower_freq_spin.setValue(0.0)
             self.upper_freq_spin.setValue(0.0)
             self.update_plots()
+
+        def on_mean_subtract_toggled(self, checked):
+            """Handle mean subtraction checkbox toggle."""
+            if self.parent_window:
+                self.parent_window.state.use_mean_sub = checked
+                self.mean_window_spin.setEnabled(checked)
+                # Update main window and this dialog
+                self.parent_window.update_and_redraw()
+                self._load_sweep_data()
+                self.update_plots()
+
+        def on_mean_window_changed(self, value):
+            """Handle mean subtraction window size change."""
+            if self.parent_window:
+                self.parent_window.state.mean_val = value
+                # Update main window and this dialog
+                self.parent_window.update_and_redraw()
+                self._load_sweep_data()
+                self.update_plots()
 
         def get_filter_params(self):
             """Return the notch filter parameters."""
@@ -4544,9 +5848,13 @@ class MainWindow(QMainWindow):
                 expoffs = np.asarray(br.get("expoffs", []), dtype=int)
 
                 if on.size >= 2:
+                    # Get sniff regions for this sweep
+                    sniff_regions = self.state.sniff_regions_by_sweep.get(s, [])
                     eupnea_mask = metrics.detect_eupnic_regions(
                         st.t, y_proc, st.sr_hz, pks, on, off, expmins, expoffs,
-                        freq_threshold_hz=eupnea_thresh
+                        freq_threshold_hz=eupnea_thresh,
+                        min_duration_sec=self.eupnea_min_duration,
+                        sniff_regions=sniff_regions
                     )
                     eupnea_masks_csv[s] = eupnea_mask
 
@@ -4753,7 +6061,8 @@ class MainWindow(QMainWindow):
                 if on.size >= 2:
                     eupnea_mask = metrics.detect_eupnic_regions(
                         st.t, y_proc, st.sr_hz, pks, on, off, expmins, expoffs,
-                        freq_threshold_hz=eupnea_thresh
+                        freq_threshold_hz=eupnea_thresh,
+                        min_duration_sec=self.eupnea_min_duration
                     )
                     eupnea_masks_by_sweep[s] = eupnea_mask
 
@@ -6226,7 +7535,8 @@ class MainWindow(QMainWindow):
                 if on.size >= 2:
                     eupnea_mask = metrics.detect_eupnic_regions(
                         st.t, y_proc, st.sr_hz, pks, on, off, expmins, expoffs,
-                        freq_threshold_hz=eupnea_thresh
+                        freq_threshold_hz=eupnea_thresh,
+                        min_duration_sec=self.eupnea_min_duration
                     )
                     eupnea_masks_by_sweep[s] = eupnea_mask
 
