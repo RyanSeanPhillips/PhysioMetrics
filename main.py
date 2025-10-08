@@ -289,7 +289,9 @@ class MainWindow(QMainWindow):
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 # Move point left or right
                 direction = -1 if event.key() == Qt.Key.Key_Left else 1
-                self._move_selected_point(direction)
+                # Check if Shift is held for snap-to-zero-crossing
+                shift_held = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                self._move_selected_point(direction, snap_to_zero=shift_held)
                 event.accept()
                 return
             elif event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
@@ -356,6 +358,16 @@ class MainWindow(QMainWindow):
 
         # Constrain movement between adjacent peaks
         new_idx = self._constrain_to_peak_boundaries(new_idx, s)
+
+        # Check if Shift key is held for snap-to-zero-crossing
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if shift_held:
+            dy = np.gradient(y)
+            new_idx = self._find_nearest_zero_crossing(y, dy, new_idx, search_radius=200)
+            new_idx = self._constrain_to_peak_boundaries(new_idx, s)  # Re-constrain after snap
 
         # Update the point to new position
         self._update_point_position(new_idx, t_plot, y, s)
@@ -777,7 +789,8 @@ class MainWindow(QMainWindow):
             self.plot_host.show_trace_with_spans(
                 t_plot, y, spans_plot,
                 title=f"{st.analyze_chan or ''} | sweep {s+1}",
-                max_points=None
+                max_points=None,
+                ylabel=st.analyze_chan or "Signal"
             )
 
             # Clear any existing region overlays (will be recomputed if needed)
@@ -1581,6 +1594,58 @@ class MainWindow(QMainWindow):
 
 
 
+    def _compute_single_breath_events(self, y, peak_idx, prev_peak_idx, next_peak_idx, sr_hz):
+        """
+        Compute breath events for a single peak.
+
+        Args:
+            y: Signal array
+            peak_idx: Index of the peak to compute events for
+            prev_peak_idx: Index of previous peak (or 0 if first)
+            next_peak_idx: Index of next peak (or len(y)-1 if last)
+            sr_hz: Sample rate
+
+        Returns:
+            dict with keys: onset, offset, expmin, expoff (single values, not arrays)
+        """
+        import numpy as np
+        from core import peaks as peakdet
+
+        # Use the same logic as compute_breath_events but for a single peak
+        # Call compute_breath_events with a 3-peak array (prev, current, next)
+        # and extract the middle result
+
+        # Build a minimal peaks array with context
+        temp_peaks = []
+        indices_map = {}  # Map temp array index to which peak it is
+
+        if prev_peak_idx is not None and prev_peak_idx != peak_idx:
+            temp_peaks.append(prev_peak_idx)
+            indices_map[len(temp_peaks)-1] = 'prev'
+
+        temp_peaks.append(peak_idx)
+        target_idx = len(temp_peaks) - 1  # Index of our peak in temp array
+        indices_map[target_idx] = 'target'
+
+        if next_peak_idx is not None and next_peak_idx != peak_idx:
+            temp_peaks.append(next_peak_idx)
+            indices_map[len(temp_peaks)-1] = 'next'
+
+        temp_peaks = np.array(temp_peaks, dtype=int)
+
+        # Compute breath events for this minimal set
+        breaths = peakdet.compute_breath_events(y, temp_peaks, sr_hz)
+
+        # Extract the events for the target peak
+        result = {}
+        for key in ['onsets', 'offsets', 'expmins', 'expoffs']:
+            if key in breaths and target_idx < len(breaths[key]):
+                result[key] = int(breaths[key][target_idx])
+            else:
+                result[key] = None
+
+        return result
+
     def _on_plot_click_add_peak(self, xdata, ydata, event, _force_mode=None):
         # Only when "Add Peaks (ON)" or force mode is 'add'
         if _force_mode != 'add' and not getattr(self, "_add_peaks_mode", False):
@@ -1656,11 +1721,37 @@ class MainWindow(QMainWindow):
 
         # Insert, sort, and store
         pks_new = np.sort(np.append(pks, i_peak))
+        new_idx = np.where(pks_new == i_peak)[0][0]  # Find index of newly added peak
         st.peaks_by_sweep[s] = pks_new
 
-        # Recompute breath markers with the updated peaks
-        breaths = peakdet.compute_breath_events(y, pks_new, st.sr_hz)  # uses default deadband
+        # Surgically compute breath events for just this new peak
+        prev_peak = pks_new[new_idx - 1] if new_idx > 0 else None
+        next_peak = pks_new[new_idx + 1] if new_idx < len(pks_new) - 1 else None
+
+        new_events = self._compute_single_breath_events(
+            y, i_peak, prev_peak, next_peak, st.sr_hz
+        )
+
+        # Insert the new breath events at the correct position
+        breaths = st.breath_by_sweep.get(s, {})
+        if not breaths:
+            # Initialize empty breath dict if it doesn't exist
+            breaths = {'onsets': np.array([], dtype=int),
+                      'offsets': np.array([], dtype=int),
+                      'expmins': np.array([], dtype=int),
+                      'expoffs': np.array([], dtype=int)}
+
+        for key in ['onsets', 'offsets', 'expmins', 'expoffs']:
+            arr = np.asarray(breaths.get(key, []), dtype=int)
+            if new_events.get(key) is not None:
+                # Insert at the correct position
+                breaths[key] = np.insert(arr, new_idx, new_events[key])
+            else:
+                # Insert placeholder if computation failed
+                breaths[key] = np.insert(arr, new_idx, 0)
+
         st.breath_by_sweep[s] = breaths
+        print(f"[add-peak] Surgically added breath events at index {new_idx}")
 
         # Recompute Y2 metric if selected
         if getattr(st, "y2_metric_key", None):
@@ -1813,13 +1904,17 @@ class MainWindow(QMainWindow):
         print(f"[delete-peak] Deleted peak at index {closest_peak} (distance: {distances[closest_idx]} samples)")
         st.peaks_by_sweep[s] = pks_new
 
-        # Recompute breaths with updated peaks (fallback to your available signature)
-        try:
-            breaths = peakdet.compute_breath_events(y, pks_new, st.sr_hz)
-        except TypeError:
-            breaths = peakdet.compute_breath_events(y, pks_new)  # older signature
-
-        st.breath_by_sweep[s] = breaths
+        # Surgically delete corresponding breath events (no recomputation needed)
+        breaths = st.breath_by_sweep.get(s, {})
+        if breaths:
+            # Delete entries at closest_idx from all breath event arrays
+            for key in ['onsets', 'offsets', 'expmins', 'expoffs']:
+                if key in breaths:
+                    arr = np.asarray(breaths[key], dtype=int)
+                    if closest_idx < len(arr):
+                        breaths[key] = np.delete(arr, closest_idx)
+            st.breath_by_sweep[s] = breaths
+            print(f"[delete-peak] Surgically removed breath events at index {closest_idx}")
 
         # If a Y2 metric is selected, recompute
         if getattr(st, "y2_metric_key", None):
@@ -2125,7 +2220,7 @@ class MainWindow(QMainWindow):
                 self.markSniffButton.blockSignals(False)
                 self.markSniffButton.setText("Mark Sniff")
 
-            self.movePointButton.setText("Move Point (ON)")
+            self.movePointButton.setText("Move Point (ON) [Shift=Snap]")
             self.plot_host.set_click_callback(self._on_plot_click_move_point)
             self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
 
@@ -2164,13 +2259,7 @@ class MainWindow(QMainWindow):
 
             # Clear selected point
             self._selected_point = None
-            if self._move_point_artist:
-                try:
-                    self._move_point_artist.remove()
-                except:
-                    pass
-                self._move_point_artist = None
-                self.plot_host.canvas.draw_idle()
+
             # Only clear if no other edit mode is active
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.plot_host.clear_click_callback()
@@ -2265,33 +2354,50 @@ class MainWindow(QMainWindow):
         # Store selection (keep original_index for finding it later)
         self._selected_point = {'type': point_type, 'index': idx, 'sweep': s, 'original_index': idx}
 
-        # Visual feedback - match point type color and make it larger with yellow outline
-        if self._move_point_artist:
-            try:
-                self._move_point_artist.remove()
-            except:
-                pass
+        # No visual feedback marker needed - the existing point markers are sufficient
+        print(f"[move-point] Selected {point_type} at index {idx} - use arrow keys to move (Shift=snap)")
 
-        # Define colors and markers for each point type
-        color_map = {
-            'peak': 'red',
-            'onset': '#2ecc71',    # green
-            'offset': '#f39c12',   # orange
-            'expmin': '#1f78b4',   # blue
-            'expoff': '#9b59b6'    # purple
-        }
+    def _find_nearest_zero_crossing(self, y, dy, current_idx, search_radius=200):
+        """
+        Find nearest zero crossing in signal y or derivative dy.
 
-        ax = event.inaxes
-        point_color = color_map.get(point_type, 'cyan')
-        self._move_point_artist, = ax.plot([t_plot[idx]], [y[idx]], 'o',
-                                           color=point_color, markersize=18,
-                                           markeredgecolor='yellow', markeredgewidth=3,
-                                           zorder=100)
-        self.plot_host.canvas.draw_idle()
-        print(f"[move-point] Selected {point_type} at index {idx}")
+        Args:
+            y: Raw signal array
+            dy: First derivative of signal
+            current_idx: Current index position
+            search_radius: Search window in samples (default 200)
+
+        Returns:
+            Index of nearest zero crossing, or current_idx if none found
+        """
+        import numpy as np
+
+        # Define search window
+        start = max(0, current_idx - search_radius)
+        end = min(len(y), current_idx + search_radius)
+
+        # Find zero crossings in y (sign changes)
+        y_segment = y[start:end]
+        y_crossings = np.where(np.diff(np.sign(y_segment)))[0] + start
+
+        # Find zero crossings in dy (sign changes)
+        dy_segment = dy[start:end]
+        dy_crossings = np.where(np.diff(np.sign(dy_segment)))[0] + start
+
+        # Combine all candidates
+        all_crossings = np.concatenate([y_crossings, dy_crossings]) if len(y_crossings) or len(dy_crossings) else np.array([])
+
+        if len(all_crossings) == 0:
+            return current_idx
+
+        # Find closest to current position
+        distances = np.abs(all_crossings - current_idx)
+        closest_idx = all_crossings[np.argmin(distances)]
+
+        return int(closest_idx)
 
     def _constrain_to_peak_boundaries(self, new_idx, s):
-        """Constrain point movement to stay between adjacent peaks."""
+        """Constrain point movement to respect breath event structure."""
         if not self._selected_point:
             return new_idx
 
@@ -2300,29 +2406,89 @@ class MainWindow(QMainWindow):
         point_type = self._selected_point['type']
         original_idx = self._selected_point['original_index']
 
-        # Only constrain non-peak points
+        # Peaks can move freely within trace bounds
         if point_type == 'peak':
             return new_idx
 
-        # Get all peaks
-        pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
-        if pks.size < 2:
+        # Get breath events for this sweep
+        breaths = st.breath_by_sweep.get(s, {})
+        if not breaths:
             return new_idx
 
-        # Find the breath cycle this point belongs to (between which two peaks)
-        peak_before = pks[pks <= original_idx]
-        peak_after = pks[pks > original_idx]
+        # Get all breath event arrays
+        onsets = np.asarray(breaths.get('onsets', []), dtype=int)
+        offsets = np.asarray(breaths.get('offsets', []), dtype=int)
+        expmins = np.asarray(breaths.get('expmins', []), dtype=int)
+        expoffs = np.asarray(breaths.get('expoffs', []), dtype=int)
+        pks = np.asarray(st.peaks_by_sweep.get(s, []), dtype=int)
 
-        min_bound = peak_before[-1] if len(peak_before) > 0 else 0
-        max_bound = peak_after[0] if len(peak_after) > 0 else len(st.sweeps[st.analyze_chan][s]) - 1
+        # Find which breath index this point belongs to
+        # Use original_idx to find the breath cycle
+        if point_type == 'onset' and len(onsets):
+            breath_idx = np.argmin(np.abs(onsets - original_idx))
+        elif point_type == 'offset' and len(offsets):
+            breath_idx = np.argmin(np.abs(offsets - original_idx))
+        elif point_type == 'expmin' and len(expmins):
+            breath_idx = np.argmin(np.abs(expmins - original_idx))
+        elif point_type == 'expoff' and len(expoffs):
+            breath_idx = np.argmin(np.abs(expoffs - original_idx))
+        else:
+            # Fallback to peak-based constraints
+            if pks.size < 2:
+                return new_idx
+            peak_before = pks[pks <= original_idx]
+            peak_after = pks[pks > original_idx]
+            min_bound = peak_before[-1] if len(peak_before) > 0 else 0
+            max_bound = peak_after[0] if len(peak_after) > 0 else len(st.sweeps[st.analyze_chan][:, s])
+            return int(np.clip(new_idx, min_bound, max_bound))
 
-        # Constrain new_idx to be within these bounds
+        # Define tighter constraints based on breath event structure
+        # Structure: onset[i] -> peak[i] -> offset[i] -> expmin[i] -> expoff[i] -> onset[i+1]
+
+        min_bound = 0
+        max_bound = len(st.sweeps[st.analyze_chan][:, s])
+
+        if point_type == 'onset':
+            # Onset must be before its peak and after previous expoff
+            if breath_idx < len(pks):
+                max_bound = pks[breath_idx]
+            if breath_idx > 0 and breath_idx - 1 < len(expoffs):
+                min_bound = expoffs[breath_idx - 1]
+
+        elif point_type == 'offset':
+            # Offset must be after its peak and before its expmin
+            if breath_idx < len(pks):
+                min_bound = pks[breath_idx]
+            if breath_idx < len(expmins):
+                max_bound = expmins[breath_idx]
+
+        elif point_type == 'expmin':
+            # Expmin must be after offset and before expoff
+            if breath_idx < len(offsets):
+                min_bound = offsets[breath_idx]
+            if breath_idx < len(expoffs):
+                max_bound = expoffs[breath_idx]
+
+        elif point_type == 'expoff':
+            # Expoff must be after expmin and before next onset
+            if breath_idx < len(expmins):
+                min_bound = expmins[breath_idx]
+            if breath_idx + 1 < len(onsets):
+                max_bound = onsets[breath_idx + 1]
+
         return int(np.clip(new_idx, min_bound, max_bound))
 
-    def _move_selected_point(self, direction):
-        """Move the selected point left or right by 1 sample (for arrow keys)."""
+    def _move_selected_point(self, direction, snap_to_zero=False):
+        """Move the selected point left or right by 1 sample (for arrow keys).
+
+        Args:
+            direction: -1 for left, 1 for right
+            snap_to_zero: If True, snap to nearest zero crossing in y or dy/dt
+        """
         if not self._selected_point:
             return
+
+        import numpy as np
 
         old_idx = self._selected_point['index']
         new_idx = old_idx + direction
@@ -2340,6 +2506,13 @@ class MainWindow(QMainWindow):
         st = self.state
         s = self._selected_point['sweep']
         new_idx = self._constrain_to_peak_boundaries(new_idx, s)
+
+        # Apply zero-crossing snap if Shift is held
+        if snap_to_zero:
+            dy = np.gradient(y)
+            new_idx = self._find_nearest_zero_crossing(y, dy, new_idx, search_radius=200)
+            new_idx = self._constrain_to_peak_boundaries(new_idx, s)  # Re-constrain after snap
+            print(f"[move-point] Snapped to zero crossing at index {new_idx}")
 
         # Get time basis
         spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
@@ -2384,10 +2557,6 @@ class MainWindow(QMainWindow):
                     replace_idx = np.argmin(distances)
                     arr[replace_idx] = new_idx
 
-        # Update visual marker
-        if self._move_point_artist:
-            self._move_point_artist.set_data([t_plot[new_idx]], [y[new_idx]])
-
         # Update scatter plot markers
         breaths = st.breath_by_sweep.get(s, {})
         on_idx = breaths.get('onsets', np.array([], dtype=int))
@@ -2431,14 +2600,8 @@ class MainWindow(QMainWindow):
 
         print(f"[move-point] Saved {point_type} at index {new_idx}")
 
-        # Clear selection and glowing marker
+        # Clear selection
         self._selected_point = None
-        if self._move_point_artist:
-            try:
-                self._move_point_artist.remove()
-            except:
-                pass
-            self._move_point_artist = None
 
         # Recompute metrics if requested (after drag release)
         if recompute_metrics:
@@ -2446,7 +2609,7 @@ class MainWindow(QMainWindow):
             self.redraw_main_plot()
             # Toolbar stays disabled during move mode
         else:
-            # Just redraw to remove the glowing marker
+            # Just redraw
             self.plot_host.canvas.draw_idle()
 
     def _cancel_move_point(self):
@@ -2483,12 +2646,6 @@ class MainWindow(QMainWindow):
 
         # Clear selection
         self._selected_point = None
-        if self._move_point_artist:
-            try:
-                self._move_point_artist.remove()
-            except:
-                pass
-            self._move_point_artist = None
 
         # Redraw to show restored position
         self.plot_host.canvas.draw_idle()

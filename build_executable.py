@@ -14,10 +14,12 @@ import shutil
 from pathlib import Path
 
 def clean_build_artifacts():
-    """Remove previous build artifacts."""
-    print("Cleaning previous builds...")
+    """Clean build artifacts but preserve versioned dist/ folders."""
+    print("Cleaning build artifacts...")
 
-    directories_to_clean = ['dist', 'build', '__pycache__']
+    # Only clean the temporary build directory and __pycache__
+    # Keep dist/ folder to preserve version history
+    directories_to_clean = ['build', '__pycache__']
     for dir_name in directories_to_clean:
         if os.path.exists(dir_name):
             try:
@@ -25,9 +27,13 @@ def clean_build_artifacts():
                 print(f"  Removed {dir_name}/")
             except PermissionError:
                 print(f"  Warning: Could not remove {dir_name}/ (files in use)")
-                print(f"  PyInstaller will overwrite existing files...")
+                print(f"  PyInstaller will clean it automatically...")
             except Exception as e:
                 print(f"  Warning: Error removing {dir_name}/: {e}")
+
+    # Note: dist/ folder is NOT cleaned to preserve version history
+    if os.path.exists('dist'):
+        print(f"  Keeping dist/ folder (contains previous versions)")
 
     # Clean Python cache files recursively
     for root, dirs, files in os.walk('.'):
@@ -96,6 +102,13 @@ def build_executable():
     print("\nStarting PyInstaller build...")
     print("This may take several minutes...")
 
+    # Get version string for output path
+    try:
+        from version_info import VERSION_STRING
+        version = VERSION_STRING
+    except ImportError:
+        version = "unknown"
+
     try:
         # Run PyInstaller with the spec file
         result = subprocess.run([
@@ -109,13 +122,20 @@ def build_executable():
             print("BUILD SUCCESSFUL!")
             print("="*60)
 
-            exe_path = Path('dist/PlethApp.exe')
+            # Check for versioned directory output
+            dist_dir = Path(f'dist/PlethApp_v{version}')
+            exe_path = dist_dir / f'PlethApp_v{version}.exe'
+
             if exe_path.exists():
                 file_size = exe_path.stat().st_size
                 print(f"\nExecutable created: {exe_path}")
                 print(f"File size: {file_size:,} bytes ({file_size / (1024*1024):.1f} MB)")
-                print("\nYou can now distribute the exe file to users.")
+                print(f"\nBuild directory: {dist_dir}")
+                print("\nYou can now distribute the entire folder to users.")
                 print("The executable is self-contained and doesn't require Python installation.")
+            else:
+                print(f"\nWarning: Could not find executable at expected path: {exe_path}")
+                print("Check the dist/ folder for build output.")
 
             return True
         else:

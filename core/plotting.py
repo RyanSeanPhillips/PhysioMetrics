@@ -259,7 +259,7 @@ class PlotHost(QWidget):
     #     self._store_from_axes(mode="single")
     #     self.canvas.draw_idle()
 
-    def show_trace_with_spans(self, t, y, spans_s, title: str = "", max_points: int = 2000):
+    def show_trace_with_spans(self, t, y, spans_s, title: str = "", max_points: int = 2000, ylabel: str = "Signal"):
         prev_xlim = self._last_single["xlim"] if self._preserve_x else None
         prev_ylim = self._last_single["ylim"] if self._preserve_y else None
 
@@ -288,7 +288,7 @@ class PlotHost(QWidget):
         if title:
             self.ax_main.set_title(title)
         self.ax_main.set_xlabel("Time (s)")
-        self.ax_main.set_ylabel("Signal")
+        self.ax_main.set_ylabel(ylabel)
 
         # Single-panel: no grid
         self.ax_main.grid(False)

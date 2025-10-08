@@ -22,11 +22,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Clean previous builds
-echo Cleaning previous builds...
-if exist "dist" rmdir /s /q "dist"
+REM Clean previous builds (keep dist/ for version history)
+echo Cleaning build artifacts...
 if exist "build" rmdir /s /q "build"
 if exist "__pycache__" rmdir /s /q "__pycache__"
+if exist "dist" (
+    echo Keeping dist\ folder to preserve version history
+) else (
+    echo Creating dist\ folder...
+    mkdir "dist"
+)
 
 REM Clean Python cache files
 for /r %%i in (*.pyc) do del "%%i" 2>nul
@@ -37,22 +42,28 @@ echo Starting PyInstaller build...
 echo This may take several minutes...
 echo.
 
+REM Get version string from version_info.py
+for /f "tokens=*" %%i in ('python -c "from version_info import VERSION_STRING; print(VERSION_STRING)"') do set VERSION=%%i
+
 REM Build the executable using the spec file
 pyinstaller --clean pleth_app.spec
 
-REM Check if build was successful
-if exist "dist\PlethApp.exe" (
+REM Check if build was successful (looking for versioned output)
+if exist "dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe" (
     echo.
     echo ====================================================================
     echo BUILD SUCCESSFUL!
     echo ====================================================================
     echo.
-    echo Executable created: dist\PlethApp.exe
+    echo Executable created: dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe
+    echo Build directory: dist\PlethApp_v%VERSION%\
     echo File size:
-    for %%A in ("dist\PlethApp.exe") do echo %%~zA bytes
+    for %%A in ("dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe") do echo %%~zA bytes
     echo.
-    echo You can now distribute the exe file to users.
+    echo You can now distribute the entire folder to users.
     echo The executable is self-contained and doesn't require Python installation.
+    echo.
+    echo Previous versions are preserved in the dist\ folder.
     echo.
 ) else (
     echo.
