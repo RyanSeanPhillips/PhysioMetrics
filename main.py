@@ -30,6 +30,7 @@ from core.plotting import PlotHost
 from core import stim as stimdet   # stim detection
 from core import peaks as peakdet   # peak detection
 from core import metrics  # calculation of breath metrics
+from core.navigation_manager import NavigationManager
 
 
 # Import editing modes
@@ -79,9 +80,6 @@ class MainWindow(QMainWindow):
 
         # GMM clustering cache (for fast dialog loading)
         self._cached_gmm_results = None
-
-        # Navigation mode: "sweep" or "window"
-        self.navigation_mode = "sweep"  # Default to sweep view
 
         # Outlier detection metrics (default set)
         self.outlier_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
@@ -152,16 +150,9 @@ class MainWindow(QMainWindow):
         # Auto-Update GMM checkbox
         self.AutoUpdateGMMCheckbox.toggled.connect(self.on_auto_update_gmm_toggled)
 
-        # --- Wire unified navigation ---
-        self.PrevButton.clicked.connect(self.on_unified_prev)
-        self.NextButton.clicked.connect(self.on_unified_next)
-        self.ViewModeToggleButton.clicked.connect(self.on_toggle_view_mode)
-        self.WindowRangeValue.setText("20")# Default window length
-        # overlap settings for window stepping
-        self._win_overlap_frac = 0.10   # 10% of the window length
-        self._win_min_overlap_s = 0.50  # but at least 0.5 s overlap
-
-        self._win_left = None# Track current window left edge (in "display time" coordinates)
+        # --- Initialize Navigation Manager ---
+        self.navigation_manager = NavigationManager(self)
+        self.WindowRangeValue.setText("20")  # Default window length
 
 
         # --- Peak-detect UI wiring ---
@@ -252,13 +243,7 @@ class MainWindow(QMainWindow):
         # Enable multiple selection for both list widgets
         self.FileList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.FilestoConsolidateList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        # --- Curation: move buttons ---
-        self.moveAllRight.clicked.connect(self.on_move_all_right)
-        self.moveSingleRight.clicked.connect(self.on_move_selected_right)
-        self.moveSingleLeft.clicked.connect(self.on_move_selected_left)
-        self.moveAllLeft.clicked.connect(self.on_move_all_left)
-        # Wire up search/filter for the detected files list
-        self.FileListSearchBox.textChanged.connect(self._filter_file_list)
+        # Note: Move buttons and search filter are connected in NavigationManager
         self.FileListSearchBox.setPlaceholderText("Filter by keywords (e.g., 'gfp 2.5mW' or 'gfp, chr2')...")
         # Wire consolidate button
         self.ConsolidateSaveDataButton.clicked.connect(self.on_consolidate_save_data_clicked)
@@ -446,7 +431,7 @@ class MainWindow(QMainWindow):
         st.channel_names = ch_names
         st.t = t
         st.sweep_idx = 0
-        self._win_left = None
+        self.navigation_manager.reset_window_state()
 
         # Reset peak results and trace cache
         if not hasattr(st, "peaks_by_sweep"):
@@ -587,7 +572,7 @@ class MainWindow(QMainWindow):
         st.channel_names = ch_names
         st.t = t
         st.sweep_idx = 0
-        self._win_left = None
+        self.navigation_manager.reset_window_state()
 
         # Reset peak results and trace cache
         if not hasattr(st, "peaks_by_sweep"):
@@ -1377,243 +1362,6 @@ class MainWindow(QMainWindow):
         canvas.draw_idle()
 
 
-    ##################################################
-    ##Sweep navigation                              ##
-    ##################################################
-    def _num_sweeps(self) -> int:
-        """Return total sweep count from the first channel (0 if no data)."""
-        st = self.state
-        if not st.sweeps:
-            return 0
-        first = next(iter(st.sweeps.values()))
-        return int(first.shape[1]) if first is not None else 0
-
-    def on_prev_sweep(self):
-        st = self.state
-        n = self._num_sweeps()
-        if n == 0:
-            return
-        if st.sweep_idx > 0:
-            st.sweep_idx -= 1
-            # recompute stim spans for this sweep if a stim channel is selected
-            if st.stim_chan:
-                self._compute_stim_for_current_sweep()
-            self._refresh_omit_button_label()
-            self.redraw_main_plot()
-
-    def on_next_sweep(self):
-        st = self.state
-        n = self._num_sweeps()
-        if n == 0:
-            return
-        if st.sweep_idx < n - 1:
-            st.sweep_idx += 1
-            if st.stim_chan:
-                self._compute_stim_for_current_sweep()
-            self._refresh_omit_button_label()
-            self.redraw_main_plot()
-
-    def on_snap_to_sweep(self):
-        # clear saved zoom so the next draw autoscales to full sweep range
-        self.plot_host.clear_saved_view("single" if self.single_panel_mode else "grid")
-        self._refresh_omit_button_label()
-        self.redraw_main_plot()
-
-    ##################################################
-    ##Window navigation (relative to current window)##
-    ##################################################
-    def _parse_window_seconds(self) -> float:
-        """Read WindowRangeValue (seconds). Returns a positive float, default 20."""
-        try:
-            val = float(self.WindowRangeValue.text().strip())
-            if val > 0:
-                return val
-        except Exception:
-            pass
-        return 20.0
-
-    def _window_step(self, W: float) -> float:
-        """
-        Step size when paging windows: W - overlap,
-        where overlap is max(min_overlap, frac * W).
-        """
-        overlap = max(self._win_min_overlap_s, self._win_overlap_frac * W)
-        step = max(0.0, W - overlap)
-        # avoid zero step for tiny windows
-        if step <= 0:
-            step = 0.9 * W
-        return step
-
-    def on_snap_to_window(self):
-        """Jump to start of current sweep (normalized domain if applicable)."""
-        t = self._current_t_plot()
-        if t is None or t.size == 0:
-            return
-        W = self._parse_window_seconds()
-        left = float(t[0])
-        self._set_window(left=left, width=W)
-
-    def on_next_window(self):
-        """Step forward; if stepping past end, first show the last full window once,
-        then on the next press hop to the first window of the next sweep."""
-        t = self._current_t_plot()
-        if t is None or t.size == 0:
-            return
-
-        W = self._parse_window_seconds()
-        step = self._window_step(W)
-
-        # Initialize left edge if needed
-        if self._win_left is None:
-            ax = self.plot_host.fig.axes[0] if self.plot_host.fig.axes else None
-            self._win_left = float(ax.get_xlim()[0]) if ax else float(t[0])
-
-        # Use an effective width that never exceeds this sweep's duration
-        dur = float(t[-1] - t[0])
-        W_eff = min(W, max(1e-6, dur))
-        max_left = float(t[-1]) - W_eff
-        eps = 1e-9
-
-        # Normal step within this sweep?
-        if self._win_left + step <= max_left + eps:
-            self._set_window(left=self._win_left + step, width=W_eff)
-            return
-
-        # Not enough room for a full step:
-        # 1) If we're not yet at the last full window, show it once.
-        if self._win_left < max_left - eps:
-            self._set_window(left=max_left, width=W_eff)
-            return
-
-        # 2) Already at last full window -> hop to next sweep if possible
-        s_count = self._sweep_count()
-        if self.state.sweep_idx < s_count - 1:
-            self.state.sweep_idx += 1
-            if self.state.stim_chan:
-                self._compute_stim_for_current_sweep()
-            self.redraw_main_plot()
-
-            t2 = self._current_t_plot()
-            if t2 is None or t2.size == 0:
-                return
-            dur2 = float(t2[-1] - t2[0])
-            W_eff2 = min(W, max(1e-6, dur2))
-            self._set_window(left=float(t2[0]), width=W_eff2)
-        else:
-            # No next sweep: stay clamped at the last full window
-            self._set_window(left=max_left, width=W_eff)
-
-    def on_prev_window(self):
-        """Step backward; if stepping before start, first show the first full window once,
-        then on the next press hop to the last window of the previous sweep."""
-        t = self._current_t_plot()
-        if t is None or t.size == 0:
-            return
-
-        W = self._parse_window_seconds()
-        step = self._window_step(W)
-
-        if self._win_left is None:
-            ax = self.plot_host.fig.axes[0] if self.plot_host.fig.axes else None
-            self._win_left = float(ax.get_xlim()[0]) if ax else float(t[0])
-
-        dur = float(t[-1] - t[0])
-        W_eff = min(W, max(1e-6, dur))
-        min_left = float(t[0])
-        eps = 1e-9
-
-        # Normal step within this sweep?
-        if self._win_left - step >= min_left - eps:
-            self._set_window(left=self._win_left - step, width=W_eff)
-            return
-
-        # Not enough room for a full step:
-        # 1) If we're not yet at the first full window, show it once.
-        if self._win_left > min_left + eps:
-            self._set_window(left=min_left, width=W_eff)
-            return
-
-        # 2) Already at first window -> hop to previous sweep if possible
-        if self.state.sweep_idx > 0:
-            self.state.sweep_idx -= 1
-            if self.state.stim_chan:
-                self._compute_stim_for_current_sweep()
-            self.redraw_main_plot()
-
-            t2 = self._current_t_plot()
-            if t2 is None or t2.size == 0:
-                return
-            dur2 = float(t2[-1] - t2[0])
-            W_eff2 = min(W, max(1e-6, dur2))
-            last_left = max(float(t2[0]), float(t2[-1]) - W_eff2)
-            self._set_window(left=last_left, width=W_eff2)
-        else:
-            # No previous sweep: stay clamped at the first window
-            self._set_window(left=min_left, width=W_eff)
-
-    ##################################################
-    ## Unified Navigation (Sweep/Window Toggle)    ##
-    ##################################################
-    def on_toggle_view_mode(self):
-        """Toggle between sweep and window navigation modes."""
-        if self.navigation_mode == "sweep":
-            self.navigation_mode = "window"
-            self.ViewModeToggleButton.setText("Mode: Window View")
-            self.PrevButton.setToolTip("Move to the previous time window")
-            self.NextButton.setToolTip("Move to the next time window")
-            # Snap to window view (show current position as windowed)
-            self.on_snap_to_window()
-        else:
-            self.navigation_mode = "sweep"
-            self.ViewModeToggleButton.setText("Mode: Sweep View")
-            self.PrevButton.setToolTip("Navigate to the previous sweep")
-            self.NextButton.setToolTip("Navigate to the next sweep")
-            # Snap to sweep view (show full sweep)
-            self.on_snap_to_sweep()
-
-    def on_unified_prev(self):
-        """Unified previous button: dispatches to sweep or window based on mode."""
-        if self.navigation_mode == "sweep":
-            self.on_prev_sweep()
-        else:
-            self.on_prev_window()
-
-    def on_unified_next(self):
-        """Unified next button: dispatches to sweep or window based on mode."""
-        if self.navigation_mode == "sweep":
-            self.on_next_sweep()
-        else:
-            self.on_next_window()
-
-    def _sweep_count(self) -> int:
-        st = self.state
-        if not st.sweeps:
-            return 0
-        any_ch = next(iter(st.sweeps.values()))
-        return any_ch.shape[1]
-
-    def _current_t_plot(self):
-        """Time axis exactly like the one used in redraw (normalized if stim spans exist)."""
-        st = self.state
-        if st.t is None:
-            return None
-        s = max(0, min(st.sweep_idx, self._sweep_count()-1))
-        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
-        if st.stim_chan and spans:
-            t0 = spans[0][0]
-            return st.t - t0
-        return st.t
-
-    def _set_window(self, left: float, width: float):
-        """Apply x-limits and remember left edge for subsequent steps."""
-        ax = self.plot_host.fig.axes[0] if self.plot_host.fig.axes else None
-        if ax is None:
-            return
-        right = left + max(0.01, float(width))
-        ax.set_xlim(left, right)
-        self._win_left = float(left)
-        self.plot_host.fig.tight_layout()
-        self.plot_host.canvas.draw_idle()
 
     ##################################################
     ##Peak detection parameters                     ##
@@ -2325,7 +2073,7 @@ class MainWindow(QMainWindow):
             return
 
         # Get stimulation spans for current sweep if available
-        s = max(0, min(st.sweep_idx, self._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.navigation_manager._sweep_count() - 1))
         stim_spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
 
         # Open dialog
@@ -2401,7 +2149,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_omit_button_label(self):
         """Update Omit button text based on whether current sweep is omitted."""
-        s = max(0, min(self.state.sweep_idx, self._sweep_count() - 1))
+        s = max(0, min(self.state.sweep_idx, self.navigation_manager._sweep_count() - 1))
         if s in self.state.omitted_sweeps:
             self.OmitSweepButton.setText("Un-omit Sweep")
             self.OmitSweepButton.setToolTip("This sweep will be excluded from saving and stats.")
@@ -2412,9 +2160,9 @@ class MainWindow(QMainWindow):
     def on_omit_sweep_clicked(self):
         """Toggle omission for the current sweep and refresh plot/label."""
         st = self.state
-        if self._sweep_count() == 0:
+        if self.navigation_manager._sweep_count() == 0:
             return
-        s = max(0, min(st.sweep_idx, self._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.navigation_manager._sweep_count() - 1))
         if s in st.omitted_sweeps:
             st.omitted_sweeps.remove(s)
             try: self.statusbar.showMessage(f"Sweep {s+1}: included", 3000)
@@ -2766,7 +2514,7 @@ class MainWindow(QMainWindow):
         if not preview_only:
             # --- Build an auto stim string from current sweep metrics, if available ---
             def _auto_stim_from_metrics() -> str:
-                s = max(0, min(getattr(st, "sweep_idx", 0), self._sweep_count()-1))
+                s = max(0, min(getattr(st, "sweep_idx", 0), self.navigation_manager._sweep_count()-1))
                 m = st.stim_metrics_by_sweep.get(s, {}) if getattr(st, "stim_metrics_by_sweep", None) else {}
                 if not m:
                     return ""
@@ -4911,52 +4659,6 @@ class MainWindow(QMainWindow):
         # Optional: sort visually
         self.FileList.sortItems()
 
-    def _filter_file_list(self, text: str):
-        """Show/hide items in FileList based on search text.
-
-        Supports multiple search modes:
-        - Single keyword: 'gfp' - shows files containing 'gfp'
-        - Multiple keywords (AND): 'gfp 2.5mW' - shows files containing BOTH 'gfp' AND '2.5mW'
-        - Multiple keywords (OR): 'gfp, chr2' - shows files containing EITHER 'gfp' OR 'chr2'
-        """
-        search_text = text.strip().lower()
-
-        # Determine search mode
-        if ',' in search_text:
-            # OR mode: split by comma
-            keywords = [k.strip() for k in search_text.split(',') if k.strip()]
-            search_mode = 'OR'
-        else:
-            # AND mode: split by whitespace
-            keywords = [k.strip() for k in search_text.split() if k.strip()]
-            search_mode = 'AND'
-
-        for i in range(self.FileList.count()):
-            item = self.FileList.item(i)
-            if not item:
-                continue
-
-            # Get the display text
-            item_text = item.text().lower()
-
-            # Also search in tooltip (which contains full path)
-            tooltip = (item.toolTip() or "").lower()
-            combined_text = f"{item_text} {tooltip}"
-
-            # Show item if search text is empty
-            if not keywords:
-                item.setHidden(False)
-                continue
-
-            # Apply search logic
-            if search_mode == 'AND':
-                # ALL keywords must be present
-                matches = all(kw in combined_text for kw in keywords)
-            else:  # OR mode
-                # ANY keyword must be present
-                matches = any(kw in combined_text for kw in keywords)
-
-            item.setHidden(not matches)
 
     def _curation_scan_and_fill(self, root: Path):
         """Scan for matching CSVs and fill FileList with filenames (store full paths in item data)."""
@@ -5015,112 +4717,6 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
-    def _list_has_key(self, lw, key: str) -> bool:
-        """True if any item in lw has the same group key."""
-        from PyQt6.QtCore import Qt
-        for i in range(lw.count()):
-            it = lw.item(i)
-            if not it:
-                continue
-            meta = it.data(Qt.ItemDataRole.UserRole) or {}
-            if isinstance(meta, dict) and meta.get("key", "").lower() == key.lower():
-                return True
-        return False
-
-
-    def _move_items(self, src_lw, dst_lw, rows_to_move: list[int]):
-        """
-        Move grouped items by root from src_lw to dst_lw.
-        Duplicate check is by 'key' (dir+root), not by file path.
-        """
-        from PyQt6.QtCore import Qt
-        if not rows_to_move:
-            return 0, 0
-
-        plan = []
-        for r in rows_to_move:
-            it = src_lw.item(r)
-            if it is None:
-                continue
-            meta = it.data(Qt.ItemDataRole.UserRole) or {}
-            key = (meta.get("key") or "").lower()
-            is_dup = self._list_has_key(dst_lw, key)
-            plan.append((r, is_dup))
-
-        taken = []
-        skipped_dups = 0
-        for r, is_dup in sorted(plan, key=lambda x: x[0], reverse=True):
-            if is_dup:
-                skipped_dups += 1
-                continue
-            it = src_lw.takeItem(r)
-            if it is not None:
-                taken.append((r, it))
-
-        moved = 0
-        for _, it in sorted(taken, key=lambda x: x[0]):
-            dst_lw.addItem(it)
-            moved += 1
-
-        src_lw.sortItems()
-        dst_lw.sortItems()
-        return moved, skipped_dups
-
-
-  
-
-    def on_move_selected_right(self):
-        """Move selected from left (FileList) to right (FilestoConsolidateList)."""
-        src = self.FileList
-        dst = self.FilestoConsolidateList
-        rows = [src.row(it) for it in src.selectedItems()]
-        moved, skipped = self._move_items(src, dst, rows)
-        try:
-            if moved or skipped:
-                self.statusbar.showMessage(f"Moved {moved} item(s) to right. Skipped {skipped} duplicate(s).", 3000)
-        except Exception:
-            pass
-
-    def on_move_all_right(self):
-        """Move ALL VISIBLE from left to right."""
-        src = self.FileList
-        dst = self.FilestoConsolidateList
-        # Only move visible (non-hidden) items
-        rows = [i for i in range(src.count()) if not src.item(i).isHidden()]
-        moved, skipped = self._move_items(src, dst, rows)
-        try:
-            if moved or skipped:
-                self.statusbar.showMessage(f"Moved {moved} visible item(s) to right. Skipped {skipped} duplicate(s).", 3000)
-        except Exception:
-            pass
-
-    def on_move_selected_left(self):
-        """Move selected from right back to left."""
-        src = self.FilestoConsolidateList
-        dst = self.FileList
-        rows = [src.row(it) for it in src.selectedItems()]
-        moved, skipped = self._move_items(src, dst, rows)
-        try:
-            if moved or skipped:
-                self.statusbar.showMessage(f"Moved {moved} item(s) to left. Skipped {skipped} duplicate(s).", 3000)
-        except Exception:
-            pass
-
-    def on_move_all_left(self):
-        """Move ALL VISIBLE from right back to left."""
-        src = self.FilestoConsolidateList
-        dst = self.FileList
-        # Only move visible (non-hidden) items
-        rows = [i for i in range(src.count()) if not src.item(i).isHidden()]
-        moved, skipped = self._move_items(src, dst, rows)
-        try:
-            if moved or skipped:
-                self.statusbar.showMessage(f"Moved {moved} visible item(s) to left. Skipped {skipped} duplicate(s).", 3000)
-        except Exception:
-            pass
-
-
-   
 
     def _propose_consolidated_filename(self, files: list) -> tuple[str, list[str]]:
         """Generate a descriptive filename based on the files being consolidated.
