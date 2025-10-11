@@ -362,7 +362,7 @@ class EditingModes:
             return
 
         # Current sweep + processed trace (what user sees)
-        s = max(0, min(st.sweep_idx, self.window._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -531,7 +531,7 @@ class EditingModes:
             return
 
         # Current sweep & processed trace
-        s = max(0, min(st.sweep_idx, self.window._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -660,7 +660,7 @@ class EditingModes:
             return
 
         # Current sweep + processed trace (what you're seeing)
-        s = max(0, min(st.sweep_idx, self.window._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -795,7 +795,7 @@ class EditingModes:
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
-        s = max(0, min(st.sweep_idx, self.window._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -1244,7 +1244,7 @@ class EditingModes:
 
         # Check if click is near an existing region edge
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
         regions = self.window.state.sniff_regions_by_sweep.get(s, [])
 
         # Convert to plot time for comparison
@@ -1355,7 +1355,7 @@ class EditingModes:
 
         # Convert from normalized time back to actual time if needed
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
         spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
 
         if st.stim_chan and spans:

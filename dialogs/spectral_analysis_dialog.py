@@ -434,7 +434,7 @@ class SpectralAnalysisDialog(QDialog):
             return
 
         # Move to next sweep
-        sweep_count = self.parent_window._sweep_count()
+        sweep_count = self.parent_window.navigation_manager._sweep_count()
         if self.parent_window.state.sweep_idx < sweep_count - 1:
             self.parent_window.state.sweep_idx += 1
             # Re-extract data for new sweep
