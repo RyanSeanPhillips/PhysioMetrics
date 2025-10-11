@@ -54,6 +54,14 @@ class EditingModes:
 
     def _connect_buttons(self):
         """Connect all editing mode button signals."""
+        # Set buttons as checkable
+        self.window.addPeaksButton.setCheckable(True)
+        self.window.deletePeaksButton.setCheckable(True)
+        self.window.addSighButton.setCheckable(True)
+        self.window.movePointButton.setCheckable(True)
+        self.window.markSniffButton.setCheckable(True)
+
+        # Connect signals
         self.window.addPeaksButton.toggled.connect(self.on_add_peaks_toggled)
         self.window.deletePeaksButton.toggled.connect(self.on_delete_peaks_toggled)
         self.window.addSighButton.toggled.connect(self.on_add_sigh_toggled)
