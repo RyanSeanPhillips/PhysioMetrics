@@ -1650,12 +1650,38 @@ class ExportManager:
             else:
                 print(f"[PDF] ✓ PDF saved in {t_elapsed:.2f}s")
 
+            # -------------------- Event-aligned CTA PDF (if event channel selected) --------------------
+            event_cta_pdf_path = None
+            if not preview_only and st.event_channel and st.bout_annotations:
+                # Check if any sweeps actually have event annotations
+                has_events = any(st.bout_annotations.get(s, []) for s in kept_sweeps)
+
+                if has_events:
+                    event_cta_pdf_path = base.with_name(base.name + "_event_cta.pdf")
+                    try:
+                        self._save_event_aligned_cta_pdf(
+                            out_path=event_cta_pdf_path,
+                            kept_sweeps=kept_sweeps,
+                            cached_traces_by_sweep=cached_traces_by_sweep,
+                            keys_for_csv=keys_for_timeplots,
+                            label_by_key=label_by_key,
+                        )
+                    except Exception as e:
+                        print(f"[save][event-cta-pdf] skipped: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        event_cta_pdf_path = None
+
             # -------------------- done --------------------
             if progress_dialog:
                 progress_dialog.setValue(100)
                 QApplication.processEvents()
 
-            msg = f"Saved:\n- {npz_path.name}\n- {csv_time_path.name}\n- {breaths_path.name}\n- {events_path.name}\n- {pdf_path.name}"
+            # Build success message
+            file_list = [npz_path.name, csv_time_path.name, breaths_path.name, events_path.name, pdf_path.name]
+            if event_cta_pdf_path:
+                file_list.append(event_cta_pdf_path.name)
+            msg = "Saved:\n" + "\n".join(f"- {name}" for name in file_list)
             print("[save]", msg)
             try:
                 self.window.statusbar.showMessage(msg, 6000)
@@ -2250,6 +2276,229 @@ class ExportManager:
             plt.close(fig2)
             plt.close(fig3)
 
+    def _save_event_aligned_cta_pdf(self, out_path, kept_sweeps, cached_traces_by_sweep, keys_for_csv, label_by_key):
+        """
+        Generate PDF with cycle-triggered averages (CTAs) aligned to event onsets/offsets.
+
+        PDF Layout (3 columns per row, one row per metric):
+        - Column 1: CTA around event onsets (-2s to +2s)
+        - Column 2: CTA around event offsets (-2s to +2s)
+        - Column 3: Histograms comparing during events vs outside events
+
+        Args:
+            out_path: Path to save PDF
+            kept_sweeps: List of sweep indices to include
+            cached_traces_by_sweep: Dict of {sweep: {metric: trace_array}}
+            keys_for_csv: List of metric keys to plot
+            label_by_key: Dict of {metric: display_label}
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        from scipy import stats
+
+        st = self.window.state
+
+        # Check if event channel exists and has annotations
+        if not st.event_channel or not st.bout_annotations:
+            print("[CTA PDF] No event channel or annotations found, skipping event-aligned PDF")
+            return
+
+        print(f"[CTA PDF] Generating event-aligned CTA PDF for {len(kept_sweeps)} sweeps...")
+
+        # Parameters
+        WINDOW_BEFORE = 2.0  # seconds before event
+        WINDOW_AFTER = 2.0   # seconds after event
+
+        # Collect all event-aligned windows
+        onset_windows = {k: [] for k in keys_for_csv}  # List of (time, values) tuples
+        offset_windows = {k: [] for k in keys_for_csv}
+
+        # Collect breath values for histogram comparison
+        during_event_vals = {k: [] for k in keys_for_csv}
+        outside_event_vals = {k: [] for k in keys_for_csv}
+
+        for s in kept_sweeps:
+            traces = cached_traces_by_sweep.get(s, {})
+            bout_list = st.bout_annotations.get(s, [])
+
+            if not bout_list or not traces:
+                continue
+
+            # For each metric
+            for k in keys_for_csv:
+                trace = traces.get(k, None)
+                if trace is None or len(trace) != len(st.t):
+                    continue
+
+                # Extract breath events for this sweep
+                br = st.breath_by_sweep.get(s, None)
+                if br is None:
+                    continue
+                on = np.asarray(br.get("onsets", []), dtype=int)
+                if on.size < 2:
+                    continue
+
+                mids = (on[:-1] + on[1:]) // 2  # Breath midpoints
+
+                # For each event bout
+                for bout in bout_list:
+                    onset_time = bout['start_time']
+                    offset_time = bout['end_time']
+
+                    # === CTA around ONSET ===
+                    # Find time indices in window [onset-WINDOW_BEFORE, onset+WINDOW_AFTER]
+                    mask_onset = (st.t >= onset_time - WINDOW_BEFORE) & (st.t <= onset_time + WINDOW_AFTER)
+                    if np.any(mask_onset):
+                        t_window = st.t[mask_onset] - onset_time  # Align to t=0 at onset
+                        vals_window = trace[mask_onset]
+                        onset_windows[k].append((t_window, vals_window))
+
+                    # === CTA around OFFSET ===
+                    mask_offset = (st.t >= offset_time - WINDOW_BEFORE) & (st.t <= offset_time + WINDOW_AFTER)
+                    if np.any(mask_offset):
+                        t_window = st.t[mask_offset] - offset_time  # Align to t=0 at offset
+                        vals_window = trace[mask_offset]
+                        offset_windows[k].append((t_window, vals_window))
+
+                    # === Histogram: Collect breath values during vs outside events ===
+                    for i, mid_idx in enumerate(mids):
+                        t_mid = st.t[int(mid_idx)]
+                        val = trace[int(mid_idx)]
+
+                        if not np.isfinite(val):
+                            continue
+
+                        if onset_time <= t_mid <= offset_time:
+                            during_event_vals[k].append(val)
+                        else:
+                            outside_event_vals[k].append(val)
+
+        # === Create PDF ===
+        n_metrics = len(keys_for_csv)
+        fig_height = 3 * n_metrics  # 3 inches per metric row
+        fig = plt.figure(figsize=(15, fig_height))
+
+        for idx, k in enumerate(keys_for_csv):
+            label = label_by_key.get(k, k)
+
+            # === Column 1: CTA around ONSETS ===
+            ax1 = plt.subplot(n_metrics, 3, idx*3 + 1)
+
+            if onset_windows[k]:
+                # Overlay all trials (faint lines)
+                for t_win, vals_win in onset_windows[k]:
+                    ax1.plot(t_win, vals_win, 'b-', alpha=0.15, linewidth=0.5)
+
+                # Compute mean ± SEM
+                # Interpolate all trials to common time grid
+                t_common = np.linspace(-WINDOW_BEFORE, WINDOW_AFTER, 200)
+                interp_traces = []
+                for t_win, vals_win in onset_windows[k]:
+                    if len(t_win) > 1:
+                        interp_vals = np.interp(t_common, t_win, vals_win, left=np.nan, right=np.nan)
+                        interp_traces.append(interp_vals)
+
+                if interp_traces:
+                    trace_matrix = np.array(interp_traces)  # (n_trials, n_timepoints)
+                    mean_trace = np.nanmean(trace_matrix, axis=0)
+                    sem_trace = stats.sem(trace_matrix, axis=0, nan_policy='omit')
+
+                    ax1.plot(t_common, mean_trace, 'b-', linewidth=2, label=f'Mean (n={len(interp_traces)})')
+                    ax1.fill_between(t_common, mean_trace - sem_trace, mean_trace + sem_trace,
+                                     alpha=0.3, color='blue', label='SEM')
+
+                ax1.axvline(0, color='red', linestyle='--', linewidth=1, label='Event Onset')
+                ax1.set_xlabel('Time from Event Onset (s)')
+                ax1.set_ylabel(label)
+                ax1.set_title(f'{label} - Event Onset CTA')
+                ax1.legend(fontsize=8, loc='best')
+                ax1.grid(True, alpha=0.3)
+            else:
+                ax1.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax1.transAxes)
+                ax1.set_title(f'{label} - Event Onset CTA')
+
+            # === Column 2: CTA around OFFSETS ===
+            ax2 = plt.subplot(n_metrics, 3, idx*3 + 2)
+
+            if offset_windows[k]:
+                # Overlay all trials
+                for t_win, vals_win in offset_windows[k]:
+                    ax2.plot(t_win, vals_win, 'g-', alpha=0.15, linewidth=0.5)
+
+                # Compute mean ± SEM
+                t_common = np.linspace(-WINDOW_BEFORE, WINDOW_AFTER, 200)
+                interp_traces = []
+                for t_win, vals_win in offset_windows[k]:
+                    if len(t_win) > 1:
+                        interp_vals = np.interp(t_common, t_win, vals_win, left=np.nan, right=np.nan)
+                        interp_traces.append(interp_vals)
+
+                if interp_traces:
+                    trace_matrix = np.array(interp_traces)
+                    mean_trace = np.nanmean(trace_matrix, axis=0)
+                    sem_trace = stats.sem(trace_matrix, axis=0, nan_policy='omit')
+
+                    ax2.plot(t_common, mean_trace, 'g-', linewidth=2, label=f'Mean (n={len(interp_traces)})')
+                    ax2.fill_between(t_common, mean_trace - sem_trace, mean_trace + sem_trace,
+                                     alpha=0.3, color='green', label='SEM')
+
+                ax2.axvline(0, color='red', linestyle='--', linewidth=1, label='Event Offset')
+                ax2.set_xlabel('Time from Event Offset (s)')
+                ax2.set_ylabel(label)
+                ax2.set_title(f'{label} - Event Offset CTA')
+                ax2.legend(fontsize=8, loc='best')
+                ax2.grid(True, alpha=0.3)
+            else:
+                ax2.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax2.transAxes)
+                ax2.set_title(f'{label} - Event Offset CTA')
+
+            # === Column 3: Histograms (During vs Outside Events) ===
+            ax3 = plt.subplot(n_metrics, 3, idx*3 + 3)
+
+            during = np.array(during_event_vals[k])
+            outside = np.array(outside_event_vals[k])
+
+            if during.size > 0 and outside.size > 0:
+                # Compute bins covering both datasets
+                all_vals = np.concatenate([during, outside])
+                bins = np.histogram_bin_edges(all_vals[np.isfinite(all_vals)], bins=30)
+
+                ax3.hist(outside, bins=bins, alpha=0.6, color='blue', label=f'Outside Events (n={len(outside)})', density=True)
+                ax3.hist(during, bins=bins, alpha=0.6, color='orange', label=f'During Events (n={len(during)})', density=True)
+
+                # Compute stats
+                if len(during) > 1 and len(outside) > 1:
+                    t_stat, p_val = stats.ttest_ind(during, outside, nan_policy='omit')
+                    mean_during = np.nanmean(during)
+                    mean_outside = np.nanmean(outside)
+                    std_during = np.nanstd(during)
+                    std_outside = np.nanstd(outside)
+
+                    stats_text = (f'During: {mean_during:.2f} ± {std_during:.2f}\n'
+                                  f'Outside: {mean_outside:.2f} ± {std_outside:.2f}\n'
+                                  f'p = {p_val:.4f}')
+                    ax3.text(0.98, 0.98, stats_text, transform=ax3.transAxes,
+                            fontsize=8, verticalalignment='top', horizontalalignment='right',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+                ax3.set_xlabel(label)
+                ax3.set_ylabel('Density')
+                ax3.set_title(f'{label} - During vs Outside Events')
+                ax3.legend(fontsize=8, loc='upper left')
+                ax3.grid(True, alpha=0.3)
+            else:
+                ax3.text(0.5, 0.5, 'Insufficient data', ha='center', va='center', transform=ax3.transAxes)
+                ax3.set_title(f'{label} - During vs Outside Events')
+
+        plt.tight_layout()
+
+        # Save to PDF
+        with PdfPages(out_path) as pdf:
+            pdf.savefig(fig, dpi=150)
+        plt.close(fig)
+
+        print(f"[CTA PDF] ✓ Event-aligned CTA PDF saved to {out_path.name}")
 
 
     def _show_summary_preview_dialog(self, t_ds_csv, y2_ds_by_key, keys_for_csv, label_by_key, stim_zero, stim_dur):
