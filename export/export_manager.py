@@ -626,10 +626,12 @@ class ExportManager:
 
         # -------------------- Build cached traces (needed for preview and save) --------------------
         # For event-aligned CTA, we need metric traces. Build them here if needed.
+        # Use the same filtered keys that will be used for plots/CSV
+        keys_for_cta = [k for k in all_keys if k not in self._EXCLUDE_FOR_CSV]
+
         def _build_cached_traces_if_needed():
             """Build cached metric traces for CTA preview/export if not already cached."""
             cached = {}
-            need_keys = ["if", "amp_insp", "amp_exp", "area_insp", "area_exp", "ti", "te", "vent_proxy"]
 
             for s in kept_sweeps:
                 y_proc = self.window._get_processed_for(st.analyze_chan, s)
@@ -642,7 +644,7 @@ class ExportManager:
                     continue
 
                 traces_for_sweep = {}
-                for k in need_keys:
+                for k in keys_for_cta:
                     if k in metrics.METRICS:
                         traces_for_sweep[k] = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br)
                 cached[s] = traces_for_sweep
@@ -2477,7 +2479,7 @@ class ExportManager:
 
         # Create figure
         n_metrics = len(keys_for_csv)
-        fig_height = 3 * n_metrics
+        fig_height = 5 * n_metrics  # 5 inches per metric row for better visibility
         fig = plt.figure(figsize=(15, fig_height))
 
         for idx, k in enumerate(keys_for_csv):
@@ -2566,9 +2568,12 @@ class ExportManager:
                     std_during = np.nanstd(during)
                     std_outside = np.nanstd(outside)
 
+                    # Format p-value: use scientific notation for very small values
+                    p_str = f'{p_val:.4f}' if p_val >= 0.001 else f'{p_val:.2e}'
+
                     stats_text = (f'During: {mean_during:.2f} ± {std_during:.2f}\n'
                                   f'Outside: {mean_outside:.2f} ± {std_outside:.2f}\n'
-                                  f'p = {p_val:.4f}')
+                                  f'p = {p_str}')
                     ax3.text(0.98, 0.98, stats_text, transform=ax3.transAxes,
                             fontsize=8, verticalalignment='top', horizontalalignment='right',
                             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
