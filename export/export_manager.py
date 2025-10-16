@@ -22,7 +22,7 @@ class ExportManager:
     """Manages all data export operations for the main window."""
 
     # metrics we won't include in CSV exports and PDFs
-    _EXCLUDE_FOR_CSV = {"d1", "d2", "eupnic", "apnea", "regularity"}
+    _EXCLUDE_FOR_CSV = {"d1", "d2", "eupnic", "apnea"}
 
     def __init__(self, main_window):
         """
@@ -257,7 +257,7 @@ class ExportManager:
 
 
     # metrics we won't include in CSV exports and PDFs
-    _EXCLUDE_FOR_CSV = {"d1", "d2", "eupnic", "apnea", "regularity"}
+    _EXCLUDE_FOR_CSV = {"d1", "d2", "eupnic", "apnea"}
 
 
     def _metric_keys_in_order(self):
