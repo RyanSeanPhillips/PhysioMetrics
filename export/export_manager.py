@@ -2528,10 +2528,10 @@ class ExportManager:
                         else:
                             outside_event_vals[k].append(val)
 
-        # Create figure (2.5x taller than standard PDF for better detail)
+        # Create figure (reduced height by 1/3 from 2.5x standard)
         n_metrics = len(keys_for_csv)
         fig_w = 13
-        fig_h = max(10.0, 6.5 * n_metrics)  # 6.5 inches per row (2.5x standard PDF)
+        fig_h = max(6.67, 4.33 * n_metrics)  # 4.33 inches per row (~1.67x standard PDF)
         fig = plt.figure(figsize=(fig_w, fig_h))
 
         for idx, k in enumerate(keys_for_csv):
