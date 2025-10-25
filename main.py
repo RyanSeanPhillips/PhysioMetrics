@@ -1124,14 +1124,11 @@ class MainWindow(QMainWindow):
             # Restore navigation and plot
             self.navigation_manager.reset_window_state()
 
-            # Plot based on mode
-            if self.single_panel_mode and st.analyze_chan:
-                self.plot_current_data()
-            else:
-                self.plot_all_channels()
+            # Redraw plot (will use single_panel_mode to determine layout)
+            self.redraw_main_plot()
 
             # Restore navigation position (after plotting)
-            # Note: Window position is restored in plot_current_data via state.window_start_s
+            # Note: Window position is restored in redraw_main_plot via state.window_start_s
 
             progress.setValue(100)
             progress.close()
