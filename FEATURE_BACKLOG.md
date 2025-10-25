@@ -273,14 +273,21 @@ Number of Peaks
          Auto-selected
 ```
 
-**ML Training Data Export**:
+**ML Training Data Export** (Deep Learning Ready):
 ```python
-# Saved in NPZ file
+# Saved in NPZ file - INCLUDES RAW WAVEFORMS for future deep learning!
 ml_training_data = {
-    "all_peaks": all_peaks,              # 4500 peak indices
+    # Peak locations
+    "peaks": all_peaks,                  # 4500 peak indices
+    "onsets": onset_indices,             # Onset indices
+    "offsets": offset_indices,           # Offset indices
     "auto_threshold": 0.12,              # Detected elbow
+
+    # Labels
     "labels": auto_labels,               # ["breath", "not_breath", ...]
-    "label_source": label_sources,       # ["auto", "auto", "user_corrected", ...]
+    "label_sources": label_sources,      # ["auto", "user_corrected", ...]
+
+    # Basic features (8) - for current Random Forest ML
     "features": {
         "ti": ti_values,                 # Inspiratory time
         "te": te_values,                 # Expiratory time
@@ -289,10 +296,55 @@ ml_training_data = {
         "max_dinsp": max_dinsp_values,   # Max inspiratory derivative
         "max_dexp": max_dexp_values,     # Max expiratory derivative
         "prominence": prominence_values, # Peak prominence
-        "freq": freq_values              # Instantaneous frequency
-    }
+        "freq": freq_values,             # Instantaneous frequency
+
+        # Half-width features (4) - Phase 2.1
+        "fwhm": fwhm_values,             # Full width at half max (robust!)
+        "width_25": width_25_values,     # Width at 25% of peak
+        "width_75": width_75_values,     # Width at 75% of peak
+        "width_ratio": width_ratio_vals, # Shape ratio (75%/25%)
+
+        # Sigh detection features (9) - Phase 2.2
+        "n_inflections": n_inflect_vals, # Inflection point count (double-hump)
+        "rise_variability": rise_var,    # Derivative variability
+        "n_shoulder_peaks": n_shoulder,  # Secondary peak count
+        "shoulder_prominence": sh_prom,  # Shoulder peak size
+        "rise_autocorr": rise_autocorr,  # Oscillation detection
+        "peak_sharpness": peak_sharp,    # Curvature at peak
+        "trough_sharpness": trough_sharp,# Curvature at trough
+        "skewness": skewness_vals,       # Statistical asymmetry
+        "kurtosis": kurtosis_vals        # Statistical peakedness
+    },
+    # Total: 21 features for Random Forest
+
+    # RAW WAVEFORMS (for future deep learning) - Phase 3
+    "waveforms": {
+        "breath_segments": breath_waveforms,   # (4500, 300) array
+        "context_segments": context_waveforms, # (4500, 500) array (wider context)
+        "sample_rate": 1000.0,                 # Hz
+        "normalization": "minmax"              # How waveforms were normalized
+    },
+    # Storage: ~15 MB per file (very reasonable!)
+
+    # Metadata
+    "file_id": "20241024_mouse05.abf",
+    "timestamp": "2025-01-15 14:32:01",
+    "plethapp_version": "1.0.8"
 }
 ```
+
+**Feature Evolution Roadmap**:
+- **Phase 1** (Now): 8 basic features → 85-90% accuracy
+- **Phase 2.1** (+4 half-width): 12 features → 90-92% accuracy (more robust)
+- **Phase 2.2** (+9 sigh detection): 21 features → 93-95% accuracy (excellent!)
+- **Phase 3** (Future): Deep learning on waveforms → 96-98% accuracy
+
+**Why Save Waveforms Now**:
+- ✅ Future-proof for deep learning (when you have 50+ files)
+- ✅ Only 15 MB per file (totally reasonable)
+- ✅ Can always revisit with better models later
+- ✅ No regrets - waveforms already extracted during analysis
+- ✅ Enables CNN/LSTM approaches without re-analyzing files
 
 **User Workflow**:
 1. Load file → Run peak detection with auto-threshold
@@ -327,10 +379,41 @@ ml_training_data = {
 
 **Effort**: 3-4 hours
 
-**Follow-up Features**:
-- ML-ready data export format (2-3 hours) - export auto-labeled data
-- ML breath classifier (12-20 hours) - train Random Forest/XGBoost on auto-labeled data
-- Active learning integration (4-6 hours) - retrain on user corrections
+**Follow-up Features (Phased Implementation)**:
+
+**Phase 1: Basic ML** (3-4 hours)
+- Implement auto-threshold with elbow detection
+- Auto-label all peaks (breath vs not_breath)
+- Save 8 basic features + waveforms to NPZ
+- Export ML training data format
+- Expected accuracy: 85-90%
+
+**Phase 2.1: Half-Width Features** (2-3 hours)
+- Add FWHM (full width at half maximum) - robust to noise
+- Add width at 25%, 75% of peak amplitude
+- Add width ratio (shape descriptor)
+- Total features: 8 + 4 = 12
+- Expected accuracy: 90-92%
+
+**Phase 2.2: Sigh Detection Features** (3-4 hours)
+- Add inflection point counting (detects double-hump)
+- Add shoulder peak detection (local maxima in rising phase)
+- Add rise-phase autocorrelation (detects oscillations)
+- Add curvature features (peak/trough sharpness)
+- Add statistical shape features (skewness, kurtosis)
+- Total features: 12 + 9 = 21
+- Expected accuracy: 93-95%
+
+**Phase 3: ML Classifier** (12-20 hours)
+- Train Random Forest on 21 features
+- Implement XGBoost for comparison
+- Active learning integration
+- Expected accuracy: 95-97%
+
+**Phase 4: Deep Learning** (Optional, 20-30 hours, when you have 50+ files)
+- Load saved waveforms from NPZ
+- Train CNN on raw breath segments
+- Expected accuracy: 96-98%
 
 **Training Data Requirements** (see below for details):
 - **Minimum viable**: 5-10 files (~20,000-40,000 peaks, ~15,000-30,000 breaths)
@@ -771,6 +854,206 @@ def set_dark_plot_theme(ax, dark_mode: bool):
 **See PUBLICATION_ROADMAP.md for complete implementation plan (Week 3-6 of v1.0 timeline).**
 
 **Effort**: 18-24 hours (phased implementation)
+
+---
+
+## Advanced ML Features (Phase 2)
+
+### Half-Width Features - Robust to Noise
+
+**Problem**: Onset/offset detection can be noisy at breath boundaries
+**Solution**: Measure breath width at fixed amplitude percentages (more stable)
+
+```python
+def compute_half_width_features(signal, onset_idx, peak_idx, offset_idx):
+    """Compute width at various amplitude percentages."""
+
+    baseline = signal[onset_idx]
+    peak_amp = signal[peak_idx]
+    amplitude_range = peak_amp - baseline
+
+    # Full Width at Half Maximum (FWHM) - most robust!
+    half_height = baseline + 0.5 * amplitude_range
+    rising = signal[onset_idx:peak_idx]
+    falling = signal[peak_idx:offset_idx]
+
+    # Find crossings
+    cross_rising = np.where(rising >= half_height)[0]
+    cross_falling = np.where(falling >= half_height)[0]
+
+    t_half_rising = onset_idx + cross_rising[0] if len(cross_rising) > 0 else onset_idx
+    t_half_falling = peak_idx + cross_falling[-1] if len(cross_falling) > 0 else offset_idx
+
+    fwhm = t_half_falling - t_half_rising
+
+    # Also at 25% and 75% for shape description
+    width_25 = compute_width_at_percent(signal, onset_idx, peak_idx, offset_idx, 0.25)
+    width_75 = compute_width_at_percent(signal, onset_idx, peak_idx, offset_idx, 0.75)
+
+    return {
+        "fwhm": fwhm,                    # Key feature - robust!
+        "width_25": width_25,            # Wider, captures base
+        "width_75": width_75,            # Narrower, captures peak
+        "width_ratio": width_75 / width_25  # Shape descriptor
+    }
+```
+
+**Why Better Than On/Offset**:
+- ✅ Less sensitive to baseline drift
+- ✅ Robust to noise at breath boundaries
+- ✅ Threshold-independent (uses relative amplitude)
+- ✅ Works even if onset/offset detection is imperfect
+- ✅ Standard metric in signal processing (used in neuroscience, cardiology)
+
+**Expected Impact**: +2-3% accuracy improvement (87-90% → 90-92%)
+
+---
+
+### Sigh Detection Features - Capturing the Double-Hump
+
+**Problem**: Sighs have characteristic "shoulder" on inspiratory upstroke - how to quantify?
+**Solution**: Multiple complementary approaches detect waveform irregularities
+
+#### Method 1: Inflection Point Counting
+
+```python
+def detect_inflection_points(signal, onset_idx, peak_idx):
+    """Count inflection points in rising phase (sigh signature)."""
+
+    rising = signal[onset_idx:peak_idx]
+
+    # First derivative (velocity)
+    dy = np.gradient(rising)
+
+    # Second derivative (acceleration/curvature)
+    d2y = np.gradient(dy)
+
+    # Find zero crossings of d2y (inflection points)
+    sign_changes = np.diff(np.sign(d2y))
+    inflection_points = np.where(sign_changes != 0)[0]
+
+    n_inflections = len(inflection_points)
+
+    # Derivative variability
+    dy_variability = np.std(dy) / (np.mean(dy) + 1e-9)
+
+    return {
+        "n_inflections": n_inflections,      # Normal: 0-1, Sigh: 2-3
+        "rise_variability": dy_variability   # Higher for double-hump
+    }
+```
+
+**Typical Values**:
+- Normal breath: 0-1 inflection points, low variability
+- Sigh with shoulder: 2-3 inflection points, high variability
+- Artifact: 4+ inflection points (reject as noise)
+
+#### Method 2: Shoulder Peak Detection
+
+```python
+def detect_shoulder_peaks(signal, onset_idx, peak_idx, min_prominence=0.1):
+    """Detect secondary peaks (shoulders) in rising phase."""
+
+    from scipy.signal import find_peaks
+
+    rising = signal[onset_idx:peak_idx]
+
+    # Find local maxima
+    peaks, properties = find_peaks(
+        rising,
+        prominence=min_prominence * np.ptp(rising),  # 10% of range
+        distance=10  # At least 10 samples apart
+    )
+
+    # Exclude main peak at end
+    shoulder_peaks = peaks[peaks < len(rising) - 5]
+
+    return {
+        "n_shoulder_peaks": len(shoulder_peaks),  # 0 for normal, 1+ for sighs
+        "shoulder_prominence": np.max(properties["prominences"]) if len(peaks) > 0 else 0
+    }
+```
+
+#### Method 3: Rise-Phase Autocorrelation
+
+```python
+def compute_rise_autocorr(signal, onset_idx, peak_idx):
+    """Detect oscillations using autocorrelation."""
+
+    rising = signal[onset_idx:peak_idx]
+    rising_norm = (rising - np.mean(rising)) / (np.std(rising) + 1e-9)
+
+    # Autocorrelation
+    autocorr = np.correlate(rising_norm, rising_norm, mode='full')
+    autocorr = autocorr[len(autocorr)//2:]  # Positive lags only
+    autocorr = autocorr / autocorr[0]  # Normalize
+
+    # Secondary peak indicates periodicity (double-hump oscillation)
+    secondary_peak = np.max(autocorr[5:20]) if len(autocorr) > 20 else 0
+
+    return {
+        "rise_autocorr_peak": secondary_peak  # High for oscillating sighs
+    }
+```
+
+#### Method 4: Curvature Features
+
+```python
+def compute_curvature_features(signal, onset_idx, peak_idx, offset_idx):
+    """Measure sharpness at peak and trough."""
+
+    # Second derivative at peak
+    window = 5
+    peak_segment = signal[peak_idx-window:peak_idx+window]
+    d2y_peak = np.gradient(np.gradient(peak_segment))
+    peak_sharpness = np.abs(d2y_peak[window])  # At center
+
+    # Second derivative at trough (expiratory minimum)
+    trough_idx = np.argmin(signal[peak_idx:offset_idx]) + peak_idx
+    trough_segment = signal[trough_idx-window:trough_idx+window]
+    d2y_trough = np.gradient(np.gradient(trough_segment))
+    trough_sharpness = np.abs(d2y_trough[window])
+
+    return {
+        "peak_sharpness": peak_sharpness,    # Sharp peaks = normal
+        "trough_sharpness": trough_sharpness # Sharp troughs = normal
+    }
+```
+
+#### Method 5: Statistical Shape Features
+
+```python
+def compute_statistical_shape(signal, onset_idx, offset_idx):
+    """Statistical descriptors of waveform shape."""
+
+    from scipy.stats import skew, kurtosis
+
+    breath = signal[onset_idx:offset_idx]
+    breath_norm = (breath - np.mean(breath)) / (np.std(breath) + 1e-9)
+
+    return {
+        "skewness": skew(breath_norm),    # Asymmetry
+        "kurtosis": kurtosis(breath_norm) # Peakedness
+    }
+```
+
+**Combined Sigh Detection**: 9 features total
+1. n_inflections
+2. rise_variability
+3. n_shoulder_peaks
+4. shoulder_prominence
+5. rise_autocorr_peak
+6. peak_sharpness
+7. trough_sharpness
+8. skewness
+9. kurtosis
+
+**Expected Impact**: +3-5% accuracy improvement (90-92% → 93-95%)
+
+**Files to Add/Modify**:
+- Create `core/advanced_features.py` - all advanced feature functions
+- Modify `core/metrics.py` - integrate advanced features
+- Modify `export/export_manager.py` - export all 21 features
 
 ---
 
