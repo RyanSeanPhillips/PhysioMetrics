@@ -2,12 +2,53 @@
 
 This document tracks planned features, enhancements, and long-term development goals.
 
+**📍 Quick Reference**: See checklist below for current status of all features.
+
+---
+
+## Current Status Checklist
+
+### ✅ Completed Features (v1.0.8)
+- [x] High-resolution splash screen replacement
+- [x] Cache eupnea masks for 4× export speedup (changed approach: calculate means during GMM)
+- [x] Add optional auto-GMM checkbox to eliminate editing lag
+- [x] Multi-file ABF concatenation support
+- [x] Move point editing mode (drag peaks to reposition)
+- [x] Enhanced eupnea threshold controls dialog
+- [x] Enhanced outlier threshold controls dialog
+- [x] Sniffing bout detection and annotation
+- [x] Higher-level modularization (editing_modes, export_manager)
+- [x] Status bar message window with timing and warnings
+- [x] Setup line_profiler with @profile decorators and run_profiling.bat
+- [x] Export optimization: searchsorted + mask_to_intervals - 49% speedup!
+- [x] Add checkboxes to SaveMetaDialog for optional file exports
+
+### 🎯 High Priority (Next Up)
+- [ ] **NPZ file save/load with full state restoration** (4-6 hours) ← RECOMMENDED NEXT
+- [ ] Help button with app usage guide and typical workflow (3-4 hours)
+- [ ] Display mode toggles for breathing states - background vs line (4-5 hours)
+
+### 📋 Medium Priority (Scientific Features)
+- [ ] 25ms stim analysis: phase response curves, airflow CTA, firing rate (10-15 hours)
+- [ ] Omit region mode - exclude artifact sections within sweep (2-3 hours)
+- [ ] Idealized breath template overlay for move point mode (3-4 hours)
+- [ ] CSV/text time-series import with preview dialog (6-7 hours)
+- [ ] Statistical significance in consolidated data (Cohen's d, p-values) (4-5 hours)
+- [ ] Expiratory onset detection (separate from insp offset) (3-4 hours)
+
+### 🔮 Long-Term Features (Post v1.0)
+- [ ] Dark mode toggle for main plot (2-3 hours)
+- [ ] ML-ready data export format (CSV, HDF5, JSON) (3-4 hours)
+- [ ] ML breath classifier (Random Forest + XGBoost) (12-20 hours in phases)
+
+---
+
 ## Current Development Phase
 
 **Active**: v0.9.x → v1.0.0 (Pre-release to Public Release)
 
 **Focus Areas**:
-1. Performance optimization (see PERFORMANCE_OPTIMIZATION_PLAN.md)
+1. Performance optimization (see PERFORMANCE_OPTIMIZATION_PLAN.md) ✅ Phase 2 Complete
 2. ML breath classifier implementation (see PUBLICATION_ROADMAP.md)
 3. Documentation and examples for JOSS publication
 

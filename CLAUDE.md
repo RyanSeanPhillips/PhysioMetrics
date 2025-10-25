@@ -172,6 +172,7 @@ plethapp/
 | How does peak detection work? | **ALGORITHMS.md** |
 | How do I add support for a new file format? | **FILE_FORMATS.md** |
 | What's the UI architecture? | **ARCHITECTURE.md** |
+| **What should I work on next? (Todo list)** | **FEATURE_BACKLOG.md** ← Checklist at top! |
 | What features are planned? | **FEATURE_BACKLOG.md** |
 | What was recently added? | **RECENT_FEATURES.md** |
 | When will v1.0 be released? | **PUBLICATION_ROADMAP.md** |
