@@ -1033,6 +1033,12 @@ class MainWindow(QMainWindow):
             self.state = new_state
             st = self.state
 
+            # Update manager references to new state
+            self.plot_manager.state = new_state
+            self.navigation_manager.state = new_state
+            self.editing_modes.state = new_state
+            self.export_manager.state = new_state
+
             # ===== RESTORE UI ELEMENTS =====
 
             # Update file path display
