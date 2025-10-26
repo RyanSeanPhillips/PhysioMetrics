@@ -890,7 +890,7 @@ class MainWindow(QMainWindow):
 
     def save_session_state(self):
         """Save current analysis state to .pleth.npz file (Ctrl+S)."""
-        from core.npz_io import save_state_to_npz, get_npz_path_for_channel
+        from core.npz_io import save_state_to_npz
 
         # Check if we have data loaded
         if not self.state.in_path:
@@ -907,8 +907,14 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Auto-generate default filename with channel name
-        default_path = get_npz_path_for_channel(self.state.in_path, self.state.analyze_chan)
+        # Default to analysis folder with simple naming (no metadata required for quick save)
+        analysis_folder = self.state.in_path.parent / "Pleth_App_Analysis"
+        analysis_folder.mkdir(exist_ok=True)
+
+        # Use simple default name: {datafile}_{channel}_session.npz
+        safe_channel = self.state.analyze_chan.replace(' ', '_').replace('/', '_').replace('\\', '_')
+        default_filename = f"{self.state.in_path.stem}_{safe_channel}_session.npz"
+        default_path = analysis_folder / default_filename
 
         # Let user modify path if desired
         save_path, _ = QFileDialog.getSaveFileName(
@@ -1311,13 +1317,28 @@ class MainWindow(QMainWindow):
             # Switch to single channel view
             new_chan = st.channel_names[idx - 1]  # -1 because idx 0 is "All Channels"
             if new_chan != st.analyze_chan or not self.single_panel_mode:
-                # Check if NPZ file exists for this channel (auto-load prompt)
+                # Check if session files exist for this channel in analysis folder
                 if st.in_path and new_chan:
-                    from core.npz_io import get_npz_path_for_channel, get_npz_metadata
+                    from core.npz_io import get_npz_metadata
+                    from datetime import datetime
 
-                    npz_path = get_npz_path_for_channel(st.in_path, new_chan)
+                    # Search analysis folder for session files matching this channel
+                    analysis_folder = st.in_path.parent / "Pleth_App_Analysis"
+                    session_files = []
 
-                    if npz_path.exists():
+                    if analysis_folder.exists():
+                        safe_channel = new_chan.replace(' ', '_').replace('/', '_').replace('\\', '_')
+                        data_stem = st.in_path.stem
+                        pattern = f"*_{data_stem}_{safe_channel}_session.npz"
+                        session_files = list(analysis_folder.glob(pattern))
+
+                        # Sort by modification time (newest first)
+                        session_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+                    if session_files:
+                        # Found session file(s) - use most recent
+                        npz_path = session_files[0]
+
                         # Get metadata for display
                         metadata = get_npz_metadata(npz_path)
 
