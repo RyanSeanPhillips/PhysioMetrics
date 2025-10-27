@@ -193,22 +193,29 @@ class MainWindow(QMainWindow):
         self.export_manager = ExportManager(self)
 
         # --- Peak-detect UI wiring ---
-        self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until threshold typed
+        self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until prominence set
         self.ApplyPeakFindPushButton.clicked.connect(self.on_apply_peak_find_clicked)
-        # --- live threshold line on the main plot ---
-        self._threshold_value = None
-        self._thresh_line_artists = []
-        self.ThreshVal.textChanged.connect(self._on_thresh_text_changed)
 
-
-        self.ThreshVal.textChanged.connect(self._maybe_enable_peak_apply)
+        # Connect parameter changes to enable Apply button
         self.PeakPromValue.textChanged.connect(self._maybe_enable_peak_apply)
         self.MinPeakDistValue.textChanged.connect(self._maybe_enable_peak_apply)
 
         # Default values for peak detection
-        self.ThreshVal.setText("0.4")         # threshold
         self.PeakPromValue.setText("0.4")     # prominence
         self.MinPeakDistValue.setText("0.05") # min peak distance (seconds)
+
+        # Add "advanced options..." link button for peak detection dialog
+        # (Add programmatically for now - can move to UI file later)
+        from PyQt6.QtWidgets import QLabel
+        self.peak_advanced_link = QLabel(
+            '<a href="#" style="text-decoration:none; color:#4a9eff; font-size:8pt;">advanced options...</a>',
+            self.PeakDetection  # Parent it to the PeakDetection groupbox
+        )
+        self.peak_advanced_link.setOpenExternalLinks(False)
+        self.peak_advanced_link.linkActivated.connect(self._open_peak_detection_options)
+        self.peak_advanced_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Position below the Prom field (adjust coordinates as needed after testing)
+        self.peak_advanced_link.setGeometry(10, 65, 100, 15)
 
         # Default values for eupnea and apnea thresholds
         self.ApneaThresh.setText("0.5")   # seconds - gaps longer than this are apnea
@@ -1615,31 +1622,25 @@ class MainWindow(QMainWindow):
 
     def _maybe_enable_peak_apply(self):
         """
-        Enable ApplyPeakFindPushButton if there's a numeric threshold AND we have data.
-        We keep it simple: whenever user edits any peak param, allow pressing Apply again.
+        Enable ApplyPeakFindPushButton if there's a numeric prominence AND we have data.
+        Prominence is now the primary parameter (threshold is optional).
         """
         st = self.state
         has_data = bool(st.channel_names)
-        txt = self.ThreshVal.text().strip()
+
+        # Check if prominence is valid (required parameter)
+        prom_txt = self.PeakPromValue.text().strip()
         try:
-            float(txt)
-            ok_thresh = True
+            float(prom_txt)
+            ok_prom = True
         except Exception:
-            ok_thresh = False
+            ok_prom = False
 
-        self.ApplyPeakFindPushButton.setEnabled(has_data and ok_thresh)
+        self.ApplyPeakFindPushButton.setEnabled(has_data and ok_prom)
 
     ##################################################
-    ##threshold plotting                            ##
+    ##Region threshold visualization                ##
     ##################################################
-    def _on_thresh_text_changed(self, *_):
-        """
-        Called whenever the ThreshVal text changes.
-        Parses the float (or clears if invalid) and refreshes the dashed line(s).
-        """
-        self._threshold_value = self._parse_float(self.ThreshVal)  # None if invalid/empty
-        self._refresh_threshold_lines()
-
     def _on_region_threshold_changed(self, *_):
         """
         Called whenever eupnea or apnea threshold values change.
@@ -1647,12 +1648,6 @@ class MainWindow(QMainWindow):
         """
         # Simply redraw current sweep, which will use the new threshold values
         self.redraw_main_plot()
-
-    def _refresh_threshold_lines(self):
-        """Delegate to PlotManager."""
-        self.plot_manager.refresh_threshold_lines()
-
-
 
     ##################################################
     ##Peak detection parameters                     ##
@@ -1666,14 +1661,6 @@ class MainWindow(QMainWindow):
             return float(txt)
         except ValueError:
             return None
-
-    def _on_peak_param_changed(self, *args):
-        """Enable Apply if threshold is a valid number and we have data."""
-        th = self._parse_float(self.ThreshVal)
-        has_data = (self.state.t is not None) and (self.state.analyze_chan in (self.state.sweeps or {}))
-        self.ApplyPeakFindPushButton.setEnabled(th is not None and has_data)
-
-
 
     def _get_processed_for(self, chan: str, sweep_idx: int):
         """Return processed y for (channel, sweep_idx) using the same cache key logic."""
@@ -1738,6 +1725,58 @@ class MainWindow(QMainWindow):
             print(f"[notch-filter] Error applying filter: {e}")
             return y
 
+    def _open_peak_detection_options(self):
+        """Open the Prominence Threshold Detection dialog."""
+        from dialogs.prominence_threshold_dialog import ProminenceThresholdDialog
+
+        # Get current data for analysis
+        st = self.state
+        if not st.analyze_chan or st.analyze_chan not in st.sweeps:
+            self._show_warning("No Data", "Load and select a channel first.")
+            return
+
+        # Concatenate ALL sweeps for representative auto-threshold calculation
+        print("[Peak Options] Concatenating all sweeps for auto-threshold analysis...")
+        all_sweeps_data = []
+        n_sweeps = st.sweeps[st.analyze_chan].shape[1]
+
+        for sweep_idx in range(n_sweeps):
+            # Skip omitted sweeps
+            if sweep_idx in st.omitted_sweeps:
+                continue
+
+            y_sweep = self._get_processed_for(st.analyze_chan, sweep_idx)
+            all_sweeps_data.append(y_sweep)
+
+        if not all_sweeps_data:
+            self._show_warning("No Data", "All sweeps are omitted.")
+            return
+
+        # Concatenate all sweeps
+        y_data = np.concatenate(all_sweeps_data)
+        print(f"[Peak Options] Concatenated {len(all_sweeps_data)} sweeps, total length: {len(y_data)} samples")
+
+        # Get current parameters
+        current_prom = self._parse_float(self.PeakPromValue)
+        current_min_dist = self._parse_float(self.MinPeakDistValue)
+
+        # Open dialog
+        dialog = ProminenceThresholdDialog(
+            parent=self,
+            y_data=y_data,
+            sr_hz=st.sr_hz,
+            current_prom=current_prom,
+            current_min_dist=current_min_dist
+        )
+
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            # Apply selected values
+            vals = dialog.get_values()
+            self.PeakPromValue.setText(f"{vals['prominence']:.4f}")
+            self.MinPeakDistValue.setText(str(vals['min_dist']))
+
+            print(f"[Peak Options] Updated: prominence={vals['prominence']:.4f}, min_dist={vals['min_dist']:.4f}")
+            print(f"[Peak Options] Quality: {vals['quality_score']:.1f}/10, Bimodal: {vals['is_bimodal']}")
 
     def on_apply_peak_find_clicked(self):
         """
@@ -1759,10 +1798,15 @@ class MainWindow(QMainWindow):
             txt = line.text().strip()
             return float(txt) if txt else None
 
-        thresh = _num(self.ThreshVal)                 # required (button enabled only if valid)
-        prom   = _num(self.PeakPromValue)             # optional
+        prom   = _num(self.PeakPromValue)             # Primary parameter (required)
+        thresh = None                                 # Threshold removed from main UI (optional in dialog)
         min_d  = _num(self.MinPeakDistValue)          # seconds
         direction = "up"  # Always detect peaks above threshold for breathing signals
+
+        # Prominence is now the primary parameter
+        if prom is None:
+            self._show_warning("No Prominence", "Please set a prominence value or use 'advanced options...' to auto-detect.")
+            return
 
         min_dist_samples = None
         if min_d is not None and min_d > 0:
