@@ -193,29 +193,16 @@ class MainWindow(QMainWindow):
         self.export_manager = ExportManager(self)
 
         # --- Peak-detect UI wiring ---
-        self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until prominence set
-        self.ApplyPeakFindPushButton.clicked.connect(self.on_apply_peak_find_clicked)
+        # Apply button opens dialog to auto-detect optimal prominence
+        self.ApplyPeakFindPushButton.setText("Auto-Detect && Apply Peaks")
+        self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until data loaded
+        self.ApplyPeakFindPushButton.clicked.connect(self._auto_detect_and_apply_peaks)
 
-        # Connect parameter changes to enable Apply button
-        self.PeakPromValue.textChanged.connect(self._maybe_enable_peak_apply)
-        self.MinPeakDistValue.textChanged.connect(self._maybe_enable_peak_apply)
-
-        # Default values for peak detection
-        self.PeakPromValue.setText("0.4")     # prominence
-        self.MinPeakDistValue.setText("0.05") # min peak distance (seconds)
-
-        # Add "advanced options..." link button for peak detection dialog
-        # (Add programmatically for now - can move to UI file later)
-        from PyQt6.QtWidgets import QLabel
-        self.peak_advanced_link = QLabel(
-            '<a href="#" style="text-decoration:none; color:#4a9eff; font-size:8pt;">advanced options...</a>',
-            self.PeakDetection  # Parent it to the PeakDetection groupbox
-        )
-        self.peak_advanced_link.setOpenExternalLinks(False)
-        self.peak_advanced_link.linkActivated.connect(self._open_peak_detection_options)
-        self.peak_advanced_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Position below the Prom field (adjust coordinates as needed after testing)
-        self.peak_advanced_link.setGeometry(10, 65, 100, 15)
+        # Store peak detection parameters (auto-populated from dialog)
+        self.peak_prominence = None
+        self.peak_min_dist = 0.05  # Default minimum peak distance in seconds
+        self.peak_quality_score = None
+        self.peak_is_bimodal = None
 
         # Default values for eupnea and apnea thresholds
         self.ApneaThresh.setText("0.5")   # seconds - gaps longer than this are apnea
@@ -1415,8 +1402,8 @@ class MainWindow(QMainWindow):
                 self.plot_host.clear_saved_view("single")
                 self.plot_host.clear_saved_view("grid")
 
-                self.ApplyPeakFindPushButton.setEnabled(False)
-                self._maybe_enable_peak_apply()
+                # Enable auto-detect button now that we have data
+                self.ApplyPeakFindPushButton.setEnabled(True)
                 self.redraw_main_plot()
 
     def on_stim_channel_changed(self, idx: int):
@@ -1620,24 +1607,6 @@ class MainWindow(QMainWindow):
         self.plot_manager.redraw_main_plot()
 
 
-    def _maybe_enable_peak_apply(self):
-        """
-        Enable ApplyPeakFindPushButton if there's a numeric prominence AND we have data.
-        Prominence is now the primary parameter (threshold is optional).
-        """
-        st = self.state
-        has_data = bool(st.channel_names)
-
-        # Check if prominence is valid (required parameter)
-        prom_txt = self.PeakPromValue.text().strip()
-        try:
-            float(prom_txt)
-            ok_prom = True
-        except Exception:
-            ok_prom = False
-
-        self.ApplyPeakFindPushButton.setEnabled(has_data and ok_prom)
-
     ##################################################
     ##Region threshold visualization                ##
     ##################################################
@@ -1725,18 +1694,21 @@ class MainWindow(QMainWindow):
             print(f"[notch-filter] Error applying filter: {e}")
             return y
 
-    def _open_peak_detection_options(self):
-        """Open the Prominence Threshold Detection dialog."""
+    def _auto_detect_and_apply_peaks(self):
+        """
+        Open auto-detection dialog to determine optimal prominence,
+        then immediately apply peak detection to all sweeps.
+        """
         from dialogs.prominence_threshold_dialog import ProminenceThresholdDialog
+        import time
 
-        # Get current data for analysis
         st = self.state
         if not st.analyze_chan or st.analyze_chan not in st.sweeps:
             self._show_warning("No Data", "Load and select a channel first.")
             return
 
         # Concatenate ALL sweeps for representative auto-threshold calculation
-        print("[Peak Options] Concatenating all sweeps for auto-threshold analysis...")
+        print("[Auto-Detect] Concatenating all sweeps for auto-threshold analysis...")
         all_sweeps_data = []
         n_sweeps = st.sweeps[st.analyze_chan].shape[1]
 
@@ -1754,33 +1726,34 @@ class MainWindow(QMainWindow):
 
         # Concatenate all sweeps
         y_data = np.concatenate(all_sweeps_data)
-        print(f"[Peak Options] Concatenated {len(all_sweeps_data)} sweeps, total length: {len(y_data)} samples")
+        print(f"[Auto-Detect] Concatenated {len(all_sweeps_data)} sweeps, total length: {len(y_data)} samples")
 
-        # Get current parameters
-        current_prom = self._parse_float(self.PeakPromValue)
-        current_min_dist = self._parse_float(self.MinPeakDistValue)
-
-        # Open dialog
+        # Open dialog with current parameters
         dialog = ProminenceThresholdDialog(
             parent=self,
             y_data=y_data,
             sr_hz=st.sr_hz,
-            current_prom=current_prom,
-            current_min_dist=current_min_dist
+            current_prom=self.peak_prominence,
+            current_min_dist=self.peak_min_dist
         )
 
         if dialog.exec() == dialog.DialogCode.Accepted:
-            # Apply selected values
+            # Store auto-detected values
             vals = dialog.get_values()
-            self.PeakPromValue.setText(f"{vals['prominence']:.4f}")
-            self.MinPeakDistValue.setText(str(vals['min_dist']))
+            self.peak_prominence = vals['prominence']
+            self.peak_min_dist = vals['min_dist']
+            self.peak_quality_score = vals['quality_score']
+            self.peak_is_bimodal = vals['is_bimodal']
 
-            print(f"[Peak Options] Updated: prominence={vals['prominence']:.4f}, min_dist={vals['min_dist']:.4f}")
-            print(f"[Peak Options] Quality: {vals['quality_score']:.1f}/10, Bimodal: {vals['is_bimodal']}")
+            print(f"[Auto-Detect] prominence={self.peak_prominence:.4f}, min_dist={self.peak_min_dist:.4f}")
+            print(f"[Auto-Detect] Quality: {self.peak_quality_score:.1f}/10, Bimodal: {self.peak_is_bimodal}")
 
-    def on_apply_peak_find_clicked(self):
+            # Now apply peak detection with auto-detected parameters
+            self._apply_peak_detection()
+
+    def _apply_peak_detection(self):
         """
-        Run peak detection on the ANALYZE channel for ALL sweeps,
+        Run peak detection on the ANALYZE channel for ALL sweeps using auto-detected parameters,
         store indices per sweep, and redraw current sweep with peaks + breath markers.
         """
         import time
@@ -1788,24 +1761,18 @@ class MainWindow(QMainWindow):
 
         st = self.state
         if not st.channel_names or not st.analyze_chan or st.analyze_chan not in st.sweeps:
-            self.ApplyPeakFindPushButton.setEnabled(False)
             return
 
         self._log_status_message("Detecting peaks and breath features...")
 
-        # Parse UI parameters
-        def _num(line):
-            txt = line.text().strip()
-            return float(txt) if txt else None
-
-        prom   = _num(self.PeakPromValue)             # Primary parameter (required)
-        thresh = None                                 # Threshold removed from main UI (optional in dialog)
-        min_d  = _num(self.MinPeakDistValue)          # seconds
+        # Use auto-detected parameters
+        prom = self.peak_prominence
+        thresh = None  # Height threshold not used (prominence-based detection only)
+        min_d = self.peak_min_dist
         direction = "up"  # Always detect peaks above threshold for breathing signals
 
-        # Prominence is now the primary parameter
         if prom is None:
-            self._show_warning("No Prominence", "Please set a prominence value or use 'advanced options...' to auto-detect.")
+            self._show_warning("No Prominence", "Run auto-detection first.")
             return
 
         min_dist_samples = None
@@ -1831,9 +1798,6 @@ class MainWindow(QMainWindow):
             )
             st.peaks_by_sweep[s] = pks
             st.breath_by_sweep[s] = breaths  # dict with 'onsets', 'offsets', 'expmins'
-
-        # Disable until parameters change again
-        self.ApplyPeakFindPushButton.setEnabled(False)
 
         # If a Y2 metric is selected, recompute it now that peaks/breaths changed
         if getattr(self.state, "y2_metric_key", None):
