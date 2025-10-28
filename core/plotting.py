@@ -78,6 +78,9 @@ class PlotHost(QWidget):
         self.scatter_expoffs = None
         self._sigh_artist = None
 
+        # Line for height threshold visualization
+        self.threshold_line = None
+
         #Continuious Breath metrics
         self.ax_y2 = None
         self.line_y2 = None
@@ -337,6 +340,9 @@ class PlotHost(QWidget):
         self.scatter_offsets = None
         self.scatter_expmins = None
 
+        # Clear threshold line
+        self.threshold_line = None
+
         # IMPORTANT: Clear Y2 axis references after fig.clear()
         # This ensures that when Y2 is recreated, it properly sets up mouse event blocking
         self.ax_y2 = None
@@ -425,6 +431,10 @@ class PlotHost(QWidget):
         if n == 0:
             return
         self.fig.clear()
+
+        # Clear threshold line when switching to multi-plot view
+        self.threshold_line = None
+
         axes = self.fig.subplots(n, 1, sharex=True)
         if n == 1:
             axes = [axes]
@@ -486,6 +496,44 @@ class PlotHost(QWidget):
             except Exception:
                 pass
             self.scatter_peaks = None
+            self.canvas.draw_idle()
+
+    def update_threshold_line(self, threshold_value):
+        """Draw/update a red dashed horizontal line at the height threshold."""
+        if not self.fig.axes:
+            return
+        ax = self.fig.axes[0]
+
+        if threshold_value is None:
+            # Remove threshold line if no value
+            self.clear_threshold_line()
+            return
+
+        if self.threshold_line is None or self.threshold_line.axes is not ax:
+            # Create new line
+            self.threshold_line = ax.axhline(
+                threshold_value,
+                linestyle="--",
+                linewidth=1.2,
+                color="red",
+                alpha=0.7,
+                zorder=2,
+                label="Height Threshold"
+            )
+        else:
+            # Update existing line
+            self.threshold_line.set_ydata([threshold_value, threshold_value])
+
+        self.canvas.draw_idle()
+
+    def clear_threshold_line(self):
+        """Remove the threshold line from the plot."""
+        if self.threshold_line is not None:
+            try:
+                self.threshold_line.remove()
+            except Exception:
+                pass
+            self.threshold_line = None
             self.canvas.draw_idle()
 
     #                         t_on=None, y_on=None,

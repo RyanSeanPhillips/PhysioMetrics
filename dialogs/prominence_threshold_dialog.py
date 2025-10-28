@@ -1,18 +1,14 @@
 """
 Prominence Threshold Detection Dialog
 
-Simplified dialog using Otsu's method to auto-detect optimal prominence threshold
-with interactive adjustment and quality scoring.
+Interactive dialog using Otsu's method to auto-detect optimal prominence threshold.
+Provides histogram visualization and manual threshold adjustment via draggable line.
 
-Quality Score Formula:
-    1. Split peaks at threshold: below = "noise", above = "breaths"
-    2. Separation ratio = mean(breaths) / mean(noise)
-       - Example: 0.8 / 0.2 = 4.0x separation
-    3. Overlap penalty = (std_breaths + std_noise) / (mean_breaths - mean_noise)
-       - Low overlap = distinct populations
-    4. Quality score (0-10) = (separation/2) - overlap + 5
-       - High separation + low overlap = high score
-       - 8-10: Excellent, 6-8: Good, 4-6: Fair, <4: Poor
+Otsu's Method:
+    - Detects all peaks with minimal prominence
+    - Calculates histogram of peak prominences
+    - Finds threshold that maximizes inter-class variance
+    - Separates "noise peaks" from "breath peaks" optimally
 """
 
 import numpy as np
@@ -24,7 +20,6 @@ from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from scipy.signal import find_peaks
-from scipy.stats import kurtosis, skew
 
 
 class ProminenceThresholdDialog(QDialog):
@@ -49,10 +44,8 @@ class ProminenceThresholdDialog(QDialog):
         self.current_threshold = None  # User-adjusted value
         self.inter_class_variance_curve = None  # For plotting
 
-        # Quality metrics
-        self.is_bimodal = False
-        self.quality_score = 0.0
-        self.separation_metric = 0.0
+        # Separation metric for display
+        self.separation_metric = 1.0
 
         # Draggable line (only vertical, no horizontal to avoid obscuring labels)
         self.threshold_vline = None
@@ -70,8 +63,15 @@ class ProminenceThresholdDialog(QDialog):
         if y_data is not None and len(y_data) > 0:
             self._detect_all_peaks()
             self._calculate_otsu_threshold()
-            self._assess_quality()
+
+            # Ensure canvas is sized before plotting
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+
             self._plot_histogram()
+
+            # Process events again to ensure plot is rendered
+            QApplication.processEvents()
 
     def _apply_dark_theme(self):
         """Apply dark theme styling to match main application."""
@@ -149,28 +149,7 @@ class ProminenceThresholdDialog(QDialog):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        # Quality metrics display
-        metrics_group = QGroupBox("Recording Quality Assessment")
-        metrics_layout = QHBoxLayout()
-
-        self.lbl_quality = QLabel("Quality: Calculating...")
-        self.lbl_quality.setStyleSheet("font-weight: bold; font-size: 12pt;")
-        metrics_layout.addWidget(self.lbl_quality)
-
-        metrics_layout.addStretch()
-
-        self.lbl_distribution = QLabel("Distribution: Unknown")
-        metrics_layout.addWidget(self.lbl_distribution)
-
-        metrics_layout.addStretch()
-
-        self.lbl_peak_count = QLabel("Peaks detected: 0")
-        metrics_layout.addWidget(self.lbl_peak_count)
-
-        metrics_group.setLayout(metrics_layout)
-        layout.addWidget(metrics_group)
-
-        # Threshold display and controls
+        # Threshold display and controls with peak count
         threshold_group = QGroupBox("Detected Threshold")
         threshold_layout = QHBoxLayout()
 
@@ -181,6 +160,9 @@ class ProminenceThresholdDialog(QDialog):
         threshold_layout.addWidget(self.lbl_threshold)
 
         threshold_layout.addStretch()
+
+        self.lbl_peak_count = QLabel("Peaks detected: 0")
+        threshold_layout.addWidget(self.lbl_peak_count)
 
         self.btn_reset = QPushButton("Reset to Auto")
         self.btn_reset.setToolTip("Reset threshold to auto-detected value")
@@ -193,7 +175,7 @@ class ProminenceThresholdDialog(QDialog):
 
         # Interactive plot with toggle
         plot_header = QHBoxLayout()
-        plot_label = QLabel("<b>Interactive Histogram</b> - Drag the red lines to adjust threshold")
+        plot_label = QLabel("<b>Interactive Histogram</b> - <span style='color: #ff6666;'>Drag the red line to adjust threshold</span>")
         plot_label.setStyleSheet("color: #666; font-size: 10pt;")
         plot_header.addWidget(plot_label)
 
@@ -219,22 +201,19 @@ class ProminenceThresholdDialog(QDialog):
         self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
         self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
 
-        # Advanced parameters
-        params_group = QGroupBox("Advanced Parameters (Optional)")
+        # Advanced parameters (always visible)
+        params_group = QGroupBox("Advanced Parameters")
         params_layout = QFormLayout()
 
         self.le_min_dist = QLineEdit(str(self.current_min_dist))
         self.le_min_dist.setToolTip("Minimum time between peaks (seconds)")
         params_layout.addRow("Min Peak Distance (s):", self.le_min_dist)
 
-        self.le_threshold_height = QLineEdit("")
-        self.le_threshold_height.setPlaceholderText("(optional - leave empty)")
-        self.le_threshold_height.setToolTip("Absolute height threshold - only use if prominence alone is insufficient")
-        params_layout.addRow("Fallback Height Threshold:", self.le_threshold_height)
+        self.le_threshold_height = QLineEdit("")  # Will be populated after threshold calculation
+        self.le_threshold_height.setToolTip("Absolute height threshold - auto-populated from Otsu's method")
+        params_layout.addRow("Height Threshold:", self.le_threshold_height)
 
         params_group.setLayout(params_layout)
-        params_group.setCheckable(True)
-        params_group.setChecked(False)
         layout.addWidget(params_group)
 
         # Dialog buttons
@@ -318,91 +297,14 @@ class ProminenceThresholdDialog(QDialog):
             print(f"[Otsu] Auto-detected prominence threshold: {self.auto_threshold:.4f}")
             self.lbl_threshold.setText(f"{self.auto_threshold:.4f}")
 
+            # Also populate the height threshold field with the same value
+            self.le_threshold_height.setText(f"{self.auto_threshold:.4f}")
+
         except Exception as e:
             print(f"[Otsu] Error: {e}")
             import traceback
             traceback.print_exc()
 
-    def _assess_quality(self):
-        """Assess recording quality and detect bimodality."""
-        if self.all_prominences is None or len(self.all_prominences) < 10:
-            return
-
-        try:
-            prominences = self.all_prominences
-
-            # 1. Bimodality detection using bimodality coefficient
-            # BC = (skewness^2 + 1) / kurtosis
-            # BC > 0.555 suggests bimodal distribution
-            kurt = kurtosis(prominences, fisher=False)  # Use Pearson's definition
-            skewness = skew(prominences)
-
-            if kurt > 0:  # Avoid division by zero
-                bimodality_coeff = (skewness**2 + 1) / kurt
-                self.is_bimodal = bimodality_coeff > 0.555
-            else:
-                self.is_bimodal = False
-                bimodality_coeff = 0
-
-            # 2. Separation metric: How well-separated are the peaks?
-            # Split prominences at threshold
-            below_thresh = prominences[prominences < self.current_threshold]
-            above_thresh = prominences[prominences >= self.current_threshold]
-
-            if len(below_thresh) > 0 and len(above_thresh) > 0:
-                # Calculate separation as ratio of means
-                mean_signal = np.mean(above_thresh)
-                mean_noise = np.mean(below_thresh)
-                separation_ratio = mean_signal / (mean_noise + 1e-10)
-
-                # Calculate overlap using standard deviations
-                std_signal = np.std(above_thresh)
-                std_noise = np.std(below_thresh)
-
-                # Gap between distributions
-                gap = mean_signal - mean_noise
-                overlap = (std_signal + std_noise) / (gap + 1e-10)
-
-                # Quality score (0-10)
-                # High separation ratio + low overlap = high quality
-                self.separation_metric = separation_ratio
-                base_quality = min(separation_ratio / 2, 5)  # Cap at 5
-                overlap_penalty = min(overlap, 5)  # Max penalty of 5
-                self.quality_score = max(0, base_quality - overlap_penalty + 5)
-
-            else:
-                self.separation_metric = 1.0
-                self.quality_score = 5.0  # Neutral
-
-            # 3. Update UI
-            quality_text = f"Quality: {self.quality_score:.1f}/10"
-            if self.quality_score >= 8:
-                color = "#00aa00"  # Green
-                rating = "Excellent"
-            elif self.quality_score >= 6:
-                color = "#ccaa00"  # Yellow
-                rating = "Good"
-            elif self.quality_score >= 4:
-                color = "#ff8800"  # Orange
-                rating = "Fair"
-            else:
-                color = "#cc0000"  # Red
-                rating = "Poor"
-
-            self.lbl_quality.setText(f"{quality_text} - {rating}")
-            self.lbl_quality.setStyleSheet(f"font-weight: bold; font-size: 12pt; color: {color};")
-
-            dist_type = "Bimodal" if self.is_bimodal else "Unimodal"
-            confidence = "good separation" if self.is_bimodal else "single population"
-            self.lbl_distribution.setText(f"Distribution: {dist_type} ({confidence})")
-
-            print(f"[Quality] Score: {self.quality_score:.1f}/10, Separation: {self.separation_metric:.2f}x, "
-                  f"Bimodal: {self.is_bimodal}, BC: {bimodality_coeff:.3f}")
-
-        except Exception as e:
-            print(f"[Quality] Error: {e}")
-            import traceback
-            traceback.print_exc()
 
     def _toggle_y2_axis(self):
         """Toggle between peak count and inter-class variance on y2 axis."""
@@ -480,7 +382,7 @@ class ProminenceThresholdDialog(QDialog):
 
                 ax2.plot(thresh_range, peak_counts, color='#66cc66', linewidth=2, alpha=0.6,
                         label='Peaks Above Threshold')
-                ax2.set_ylabel('Number of Peaks Above Threshold', fontsize=11, color='#66cc66')
+                ax2.set_ylabel('Peaks Above Threshold', fontsize=11, color='#66cc66')
                 ax2.tick_params(axis='y', labelcolor='#66cc66')
 
                 # Mark current peak count (no horizontal line to avoid obscuring label)
@@ -522,7 +424,11 @@ class ProminenceThresholdDialog(QDialog):
             for text in legend.get_texts():
                 text.set_color('#d4d4d4')
 
-            self.fig.tight_layout()
+            # Use tight_layout with extra padding to ensure labels are visible
+            # This gets called on every redraw, so labels become visible when dragging
+            self.fig.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+            # Draw the canvas
             self.canvas.draw()
 
         except Exception as e:
@@ -561,11 +467,11 @@ class ProminenceThresholdDialog(QDialog):
             else:
                 self.btn_reset.setEnabled(False)
 
+            # Update height threshold field to match dragged threshold
+            self.le_threshold_height.setText(f"{self.current_threshold:.4f}")
+
             # Redraw plot
             self._plot_histogram()
-
-            # Re-assess quality with new threshold
-            self._assess_quality()
 
     def _on_mouse_release(self, event):
         """Handle mouse release after drag."""
@@ -577,9 +483,9 @@ class ProminenceThresholdDialog(QDialog):
         """Reset threshold to auto-detected value."""
         self.current_threshold = self.auto_threshold
         self.lbl_threshold.setText(f"{self.auto_threshold:.4f}")
+        self.le_threshold_height.setText(f"{self.auto_threshold:.4f}")  # Reset height threshold too
         self.btn_reset.setEnabled(False)
         self._plot_histogram()
-        self._assess_quality()
 
     def get_values(self):
         """Get the current parameter values."""
@@ -597,7 +503,5 @@ class ProminenceThresholdDialog(QDialog):
         return {
             'prominence': self.current_threshold if self.current_threshold else self.auto_threshold,
             'min_dist': min_dist,
-            'height_threshold': height_thresh,  # Optional fallback
-            'quality_score': self.quality_score,
-            'is_bimodal': self.is_bimodal
+            'height_threshold': height_thresh  # Now always populated from Otsu's method
         }

@@ -517,6 +517,31 @@ QPushButton#BrowseButton:disabled {
               </property>
              </spacer>
             </item>
+            <item>
+             <widget class="QPushButton" name="helpbutton">
+              <property name="font">
+               <font>
+                <pointsize>8</pointsize>
+                <underline>true</underline>
+               </font>
+              </property>
+              <property name="styleSheet">
+               <string notr="true">QPushButton {
+    text-align: left;
+    border: none;
+    background: transparent;
+    text-decoration: underline;
+    color: #4A9EFF;
+}
+QPushButton:hover {
+    color: #6BB6FF;
+}</string>
+              </property>
+              <property name="text">
+               <string>Help</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </item>
           <item>
@@ -564,7 +589,7 @@ QPushButton#BrowseButton:disabled {
               <property name="title">
                <string>Channel Selection</string>
               </property>
-              <widget class="QWidget" name="">
+              <widget class="QWidget" name="layoutWidget">
                <property name="geometry">
                 <rect>
                  <x>11</x>
@@ -1147,64 +1172,30 @@ Options</string>
               <property name="title">
                <string>Peak Detection</string>
               </property>
-              <widget class="QLabel" name="ThresholdLabel">
-               <property name="geometry">
-                <rect>
-                 <x>12</x>
-                 <y>23</y>
-                 <width>41</width>
-                 <height>20</height>
-                </rect>
-               </property>
-               <property name="sizePolicy">
-                <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
-                 <horstretch>0</horstretch>
-                 <verstretch>0</verstretch>
-                </sizepolicy>
-               </property>
-               <property name="maximumSize">
-                <size>
-                 <width>75</width>
-                 <height>16777215</height>
-                </size>
-               </property>
-               <property name="font">
-                <font>
-                 <pointsize>9</pointsize>
-                 <bold>false</bold>
-                </font>
-               </property>
-               <property name="toolTip">
-                <string>Minimum signal amplitude required to detect a peak (absolute value)</string>
-               </property>
-               <property name="text">
-                <string>Thresh:</string>
-               </property>
-              </widget>
               <widget class="QLineEdit" name="PeakPromValue">
                <property name="geometry">
                 <rect>
-                 <x>51</x>
-                 <y>43</y>
-                 <width>30</width>
+                 <x>90</x>
+                 <y>20</y>
+                 <width>54</width>
                  <height>18</height>
                 </rect>
                </property>
                <property name="sizePolicy">
-                <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
                  <horstretch>0</horstretch>
                  <verstretch>0</verstretch>
                 </sizepolicy>
                </property>
                <property name="minimumSize">
                 <size>
-                 <width>0</width>
+                 <width>54</width>
                  <height>18</height>
                 </size>
                </property>
                <property name="maximumSize">
                 <size>
-                 <width>30</width>
+                 <width>51</width>
                  <height>16</height>
                 </size>
                </property>
@@ -1217,7 +1208,7 @@ Options</string>
               <widget class="QPushButton" name="ApplyPeakFindPushButton">
                <property name="geometry">
                 <rect>
-                 <x>100</x>
+                 <x>20</x>
                  <y>40</y>
                  <width>100</width>
                  <height>25</height>
@@ -1272,50 +1263,17 @@ QPushButton:disabled {
                 <string>Apply</string>
                </property>
               </widget>
-              <widget class="QLineEdit" name="ThreshVal">
+              <widget class="QLabel" name="PeakProminenceLabel">
                <property name="geometry">
                 <rect>
-                 <x>51</x>
-                 <y>21</y>
-                 <width>30</width>
-                 <height>18</height>
+                 <x>10</x>
+                 <y>20</y>
+                 <width>71</width>
+                 <height>16</height>
                 </rect>
                </property>
                <property name="sizePolicy">
                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                 <horstretch>0</horstretch>
-                 <verstretch>0</verstretch>
-                </sizepolicy>
-               </property>
-               <property name="minimumSize">
-                <size>
-                 <width>30</width>
-                 <height>18</height>
-                </size>
-               </property>
-               <property name="maximumSize">
-                <size>
-                 <width>30</width>
-                 <height>16</height>
-                </size>
-               </property>
-               <property name="font">
-                <font>
-                 <pointsize>8</pointsize>
-                </font>
-               </property>
-              </widget>
-              <widget class="QLabel" name="PeakProminenceLabel">
-               <property name="geometry">
-                <rect>
-                 <x>20</x>
-                 <y>45</y>
-                 <width>31</width>
-                 <height>16</height>
-                </rect>
-               </property>
-               <property name="sizePolicy">
-                <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
                  <horstretch>0</horstretch>
                  <verstretch>0</verstretch>
                 </sizepolicy>
@@ -1336,74 +1294,44 @@ QPushButton:disabled {
                 <string>Minimum vertical distance between peak and surrounding baseline required to detect a breath</string>
                </property>
                <property name="text">
-                <string>Prom:</string>
+                <string>Prom/Thresh:</string>
                </property>
               </widget>
-              <widget class="QLineEdit" name="MinPeakDistValue">
+              <widget class="QPushButton" name="ThreshOptions">
                <property name="geometry">
                 <rect>
-                 <x>200</x>
-                 <y>20</y>
-                 <width>30</width>
-                 <height>18</height>
+                 <x>150</x>
+                 <y>40</y>
+                 <width>91</width>
+                 <height>24</height>
                 </rect>
-               </property>
-               <property name="sizePolicy">
-                <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                 <horstretch>0</horstretch>
-                 <verstretch>0</verstretch>
-                </sizepolicy>
                </property>
                <property name="minimumSize">
                 <size>
-                 <width>30</width>
-                 <height>18</height>
-                </size>
-               </property>
-               <property name="maximumSize">
-                <size>
-                 <width>30</width>
-                 <height>16</height>
-                </size>
-               </property>
-               <property name="font">
-                <font>
-                 <pointsize>8</pointsize>
-                </font>
-               </property>
-              </widget>
-              <widget class="QLabel" name="PeakDistanceLabel">
-               <property name="geometry">
-                <rect>
-                 <x>101</x>
-                 <y>21</y>
                  <width>91</width>
-                 <height>16</height>
-                </rect>
-               </property>
-               <property name="sizePolicy">
-                <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
-                 <horstretch>0</horstretch>
-                 <verstretch>0</verstretch>
-                </sizepolicy>
+                 <height>24</height>
+                </size>
                </property>
                <property name="maximumSize">
                 <size>
-                 <width>150</width>
-                 <height>16777215</height>
+                 <width>91</width>
+                 <height>24</height>
                 </size>
                </property>
-               <property name="font">
-                <font>
-                 <pointsize>9</pointsize>
-                 <bold>false</bold>
-                </font>
-               </property>
-               <property name="toolTip">
-                <string>Minimum time interval between consecutive breath peaks (prevents detecting multiple peaks per breath)</string>
+               <property name="styleSheet">
+                <string notr="true">QPushButton {
+    text-align: left;
+    border: none;
+    background: transparent;
+    text-decoration: underline;
+    color: #4A9EFF;
+}
+QPushButton:hover {
+    color: #6BB6FF;
+}</string>
                </property>
                <property name="text">
-                <string>Min Peak Dist (s):</string>
+                <string>More Options</string>
                </property>
               </widget>
              </widget>
@@ -1496,7 +1424,7 @@ QPushButton:hover {
 }</string>
                    </property>
                    <property name="text">
-                    <string>Eupnea/Sniffing Detection</string>
+                    <string>Eup./Sniff Detection</string>
                    </property>
                   </widget>
                  </item>
@@ -1504,9 +1432,17 @@ QPushButton:hover {
                   <widget class="QPushButton" name="UpdateEupneaSniffingButton">
                    <property name="minimumSize">
                     <size>
-                     <width>120</width>
+                     <width>125</width>
                      <height>0</height>
                     </size>
+                   </property>
+                   <property name="font">
+                    <font>
+                     <bold>true</bold>
+                    </font>
+                   </property>
+                   <property name="toolTip">
+                    <string>Manually update eupnea/sniffing detection (rerun GMM clustering and apply results to plot)</string>
                    </property>
                    <property name="styleSheet">
                     <string notr="true">QPushButton {
@@ -1523,9 +1459,6 @@ QPushButton:hover {
 QPushButton:pressed {
     background-color: #0a58ca;
 }</string>
-                   </property>
-                   <property name="toolTip">
-                    <string>Manually update eupnea/sniffing detection (rerun GMM clustering and apply results to plot)</string>
                    </property>
                    <property name="text">
                     <string>Update Eup./Sniff</string>
@@ -2548,6 +2481,9 @@ QPushButton:pressed {
                       <bold>true</bold>
                      </font>
                     </property>
+                    <property name="toolTip">
+                     <string>Preview the PDF summary of analyzed metrics</string>
+                    </property>
                     <property name="styleSheet">
                      <string notr="true">QPushButton {
     border: 2px solid #1976d2;
@@ -2558,9 +2494,6 @@ QPushButton:hover {
     border: 2px solid #4A9EFF;
     background-color: rgba(25, 118, 210, 0.1);
 }</string>
-                    </property>
-                    <property name="toolTip">
-                     <string>Preview the PDF summary of analyzed metrics</string>
                     </property>
                     <property name="text">
                      <string>View Summary</string>
@@ -3195,9 +3128,7 @@ QPushButton:disabled {
   <tabstop>LowPassVal</tabstop>
   <tabstop>HighPassVal</tabstop>
   <tabstop>InvertSignal_checkBox</tabstop>
-  <tabstop>ThreshVal</tabstop>
   <tabstop>PeakPromValue</tabstop>
-  <tabstop>MinPeakDistValue</tabstop>
   <tabstop>ApplyPeakFindPushButton</tabstop>
   <tabstop>PrevButton</tabstop>
   <tabstop>ViewModeToggleButton</tabstop>

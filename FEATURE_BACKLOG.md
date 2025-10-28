@@ -22,14 +22,18 @@ This document tracks planned features, enhancements, and long-term development g
 - [x] Setup line_profiler with @profile decorators and run_profiling.bat
 - [x] Export optimization: searchsorted + mask_to_intervals - 49% speedup!
 - [x] Add checkboxes to SaveMetaDialog for optional file exports
+- [x] **NPZ file save/load with full state restoration** (.pleth.npz sessions)
+- [x] **Auto-prominence threshold detection using Otsu's method** (interactive histogram dialog)
+- [x] **Help button with comprehensive usage guide** (3 tabs: workflow, exported files, about) - *NOTE: Update as features are added*
 
 ### 🎯 High Priority (Next Up)
-- [ ] **NPZ file save/load with full state restoration** (4-6 hours) ← RECOMMENDED NEXT
+- [ ] **Anonymous usage tracking and telemetry** (4-6 hours) ← USAGE STATISTICS
+- [ ] **Relative metrics (z-scores) for ML features** (2-3 hours) ← ML FOUNDATION
 - [ ] **Auto-threshold selection with ML auto-labeling** (3-4 hours) ← ML FOUNDATION
-- [ ] Help button with app usage guide and typical workflow (3-4 hours)
 - [ ] Display mode toggles for breathing states - background vs line (4-5 hours)
 
 ### 📋 Medium Priority (Scientific Features)
+- [ ] **Project Builder - Batch processing workflow** (6-8 hours) ← PRODUCTIVITY BOOST
 - [ ] 25ms stim analysis: phase response curves, airflow CTA, firing rate (10-15 hours)
 - [ ] Omit region mode - exclude artifact sections within sweep (2-3 hours)
 - [ ] Idealized breath template overlay for move point mode (3-4 hours)
@@ -41,6 +45,7 @@ This document tracks planned features, enhancements, and long-term development g
 - [ ] Dark mode toggle for main plot (2-3 hours)
 - [ ] ML-ready data export format (CSV, HDF5, JSON) (3-4 hours)
 - [ ] ML breath classifier (Random Forest + XGBoost) (12-20 hours in phases)
+- [ ] **LLM-assisted metadata extraction from experiment notes** (8-12 hours) ← AI ENHANCEMENT
 
 ---
 
@@ -729,6 +734,348 @@ def compute_statistical_significance(
 
 ---
 
+### 10. Anonymous Usage Tracking and Telemetry
+**Description**: Privacy-first telemetry system to track adoption, feature usage, and errors
+
+**Motivation**:
+- **Track adoption**: How many users are actively using PlethApp?
+- **Prioritize features**: Which features are most/least used?
+- **Find bugs faster**: Which operations crash most frequently?
+- **Publication metrics**: Report usage statistics in future papers
+- **Grant justification**: Demonstrate research impact with usage data
+
+**Implementation Strategy: Opt-Out by Default (Academic Software Model)**
+
+**First-Launch Dialog**:
+```
+PlethApp - First Time Setup
+
+Help improve PlethApp by sharing anonymous usage statistics.
+
+☑ Share anonymous usage data
+  • Number of files analyzed (no file names or paths)
+  • Features used (GMM, manual editing, etc.)
+  • App version, OS, and Python version
+  • Anonymous user ID (random UUID)
+
+☑ Send crash reports
+  • Error stack traces to help fix bugs
+  • No personal or experimental data
+
+[Learn More...]  [Continue]
+```
+
+**What Gets Collected**:
+```python
+telemetry_event = {
+    "user_id": "a3f2e8c9-4b7d-...",  # Random UUID, generated once
+    "version": "1.0.8",
+    "os": "Windows 10",
+    "python_version": "3.11.5",
+    "timestamp": "2025-10-28T14:32:01Z",
+
+    "session_data": {
+        "files_analyzed": 3,
+        "file_types": {"abf": 2, "smrx": 1, "edf": 0},
+        "total_breaths": 1247,
+        "total_sweeps": 30,
+        "session_duration_minutes": 45,
+
+        "features_used": [
+            "gmm_clustering",
+            "manual_editing_add_peak",
+            "manual_editing_delete_peak",
+            "mark_sniff",
+            "spectral_analysis"
+        ],
+
+        "exports": {
+            "summary_pdf": 1,
+            "breaths_csv": 1,
+            "timeseries_csv": 1,
+            "npz_session": 1
+        }
+    }
+}
+```
+
+**What NEVER Gets Collected**:
+- File names, paths, or directory structure
+- Animal metadata (strain, virus, injection site, etc.)
+- Actual breathing data (frequencies, amplitudes, metrics)
+- User's name, email, or institution
+- Computer name or network information
+
+**Technical Implementation**:
+
+**Option 1: Sentry (Recommended for v1.0)**
+```python
+import sentry_sdk
+
+# On app startup (if user has opted in)
+if config.get('telemetry_enabled', True):  # Default True = opt-out
+    sentry_sdk.init(
+        dsn="https://your-project@sentry.io/...",
+        traces_sample_rate=0.0,  # No performance tracing
+        send_default_pii=False,  # Never send personal info
+        before_send=sanitize_event  # Strip any paths/filenames
+    )
+
+    # Set custom user ID
+    sentry_sdk.set_user({"id": config.get('user_id')})
+```
+
+**Option 2: Custom Simple Server**
+```python
+import requests
+import json
+from datetime import datetime
+
+def send_telemetry(event_data):
+    """Send telemetry event to server."""
+    if not config.get('telemetry_enabled', True):
+        return
+
+    try:
+        response = requests.post(
+            'https://your-server.com/api/telemetry',
+            json=event_data,
+            timeout=5  # Don't block UI
+        )
+        response.raise_for_status()
+    except Exception:
+        # Silently fail - never interrupt user workflow
+        pass
+```
+
+**Settings UI** (in Help dialog About tab):
+```python
+# Add to help_dialog.py About tab:
+telemetry_group = QGroupBox("Usage Statistics")
+telemetry_layout = QVBoxLayout()
+
+self.telemetry_checkbox = QCheckBox("Share anonymous usage statistics")
+self.telemetry_checkbox.setChecked(config.get('telemetry_enabled', True))
+self.telemetry_checkbox.toggled.connect(self.on_telemetry_changed)
+
+crash_checkbox = QCheckBox("Send crash reports")
+crash_checkbox.setChecked(config.get('crash_reports_enabled', True))
+
+learn_more_link = QLabel('<a href="#details">What data is collected?</a>')
+learn_more_link.linkActivated.connect(self.show_telemetry_details)
+
+telemetry_layout.addWidget(self.telemetry_checkbox)
+telemetry_layout.addWidget(crash_checkbox)
+telemetry_layout.addWidget(learn_more_link)
+telemetry_group.setLayout(telemetry_layout)
+```
+
+**Files to modify**:
+- `main.py` (first-launch dialog, telemetry event tracking)
+- `dialogs/help_dialog.py` (add opt-out checkbox to About tab)
+- `core/state.py` or new `core/telemetry.py` (telemetry manager)
+- `core/config.py` (new file - persistent config with user_id, telemetry settings)
+
+**Dependencies**:
+- `sentry-sdk` (Option 1, recommended)
+- OR `requests` (Option 2, already included in requirements)
+
+**Effort**: 4-6 hours
+- UUID generation and config storage: 30 min
+- First-launch dialog: 1.5 hours
+- Telemetry event tracking: 2 hours
+- Settings UI in Help dialog: 1 hour
+- Sentry setup or custom server: 1-2 hours
+
+**Ethical Considerations**:
+✅ **Opt-out default is acceptable because**:
+- Only academic/research software (not commercial)
+- Clear disclosure on first launch (not hidden)
+- No personal/identifying data collected
+- Easy to disable (one checkbox)
+- Benefits the research community (better software through usage data)
+
+✅ **Precedents**: Many academic tools use opt-out telemetry:
+- VS Code (Microsoft)
+- Anaconda Navigator
+- JupyterLab
+- Many PyPI packages with `pip` install analytics
+
+⚠️ **Alternative: Opt-in** if you prefer maximum privacy:
+- Set `telemetry_enabled` default to `False`
+- First-launch dialog has checkboxes unchecked
+- User must actively choose to share data
+- **Trade-off**: ~10-20% participation rate vs. 80-90% with opt-out
+
+**Recommendation for PlethApp**: **Opt-out** with clear disclosure
+- You're releasing academic software, not commercial product
+- Usage data will help justify future grants/publications
+- Easy for privacy-conscious users to disable
+- Follows VS Code model (trusted by researchers)
+
+---
+
+### 11. Relative Metrics (Z-scores) for ML Features
+**Description**: Calculate z-score normalized metrics for each breath relative to baseline population
+
+**Motivation**:
+- **Normalize across animals**: Different mice have different baseline breathing rates
+- **Robust ML features**: Machine learning models perform better with normalized data
+- **Automatic outlier detection**: High z-scores (>2.5 SD) indicate unusual breaths (sighs, gasps)
+- **Interpretable results**: "This breath is 3.2 standard deviations above baseline"
+- **Publication-ready**: Z-scores are standard in neuroscience papers
+
+**Example Workflow**:
+```
+Normal breath: IF=2.1 Hz, baseline μ=2.0 Hz, σ=0.3 Hz
+→ IF_zscore = (2.1 - 2.0) / 0.3 = 0.33
+
+Sigh: IF=0.8 Hz, baseline μ=2.0 Hz, σ=0.3 Hz
+→ IF_zscore = (0.8 - 2.0) / 0.3 = -4.0  (4 SD below normal)
+
+Gasp: amp=8.2 mV, baseline μ=3.1 mV, σ=0.9 mV
+→ amp_zscore = (8.2 - 3.1) / 0.9 = 5.67  (5.67 SD above normal)
+```
+
+**Features to Add**:
+
+For each existing breath metric, calculate z-score:
+- `if_zscore`: Instantaneous frequency relative to baseline
+- `amp_insp_zscore`: Inspiratory amplitude
+- `amp_exp_zscore`: Expiratory amplitude
+- `ti_zscore`: Inspiratory time
+- `te_zscore`: Expiratory time
+- `ttot_zscore`: Total breath duration
+- `vent_proxy_zscore`: Ventilation proxy (amp × freq)
+
+**Baseline Calculation Options**:
+
+**Option 1: Eupnea Baseline (Recommended)**
+```python
+def calculate_zscores_eupnea_baseline(breaths_df):
+    """Calculate z-scores relative to eupnea breaths only."""
+
+    # Filter to eupnea breaths only (exclude sighs, sniffing)
+    eupnea_mask = (breaths_df['is_eupnea'] == 1) & (breaths_df['is_sigh'] == 0)
+    eupnea_breaths = breaths_df[eupnea_mask]
+
+    # Calculate baseline statistics from eupnea
+    baseline_stats = {
+        'if_mean': eupnea_breaths['if'].mean(),
+        'if_std': eupnea_breaths['if'].std(),
+        'amp_insp_mean': eupnea_breaths['amp_insp'].mean(),
+        'amp_insp_std': eupnea_breaths['amp_insp'].std(),
+        # ... for each metric
+    }
+
+    # Calculate z-scores for ALL breaths (including sighs, sniffs)
+    breaths_df['if_zscore'] = (
+        (breaths_df['if'] - baseline_stats['if_mean']) /
+        baseline_stats['if_std']
+    )
+    breaths_df['amp_insp_zscore'] = (
+        (breaths_df['amp_insp'] - baseline_stats['amp_insp_mean']) /
+        baseline_stats['amp_insp_std']
+    )
+    # ... for each metric
+
+    return breaths_df, baseline_stats
+```
+
+**Option 2: Pre-Stimulus Baseline**
+```python
+def calculate_zscores_prestim_baseline(breaths_df, stim_start_time):
+    """Calculate z-scores relative to pre-stimulus period."""
+
+    # Filter to pre-stimulus breaths only
+    prestim_mask = breaths_df['t'] < stim_start_time
+    prestim_breaths = breaths_df[prestim_mask]
+
+    # Calculate baseline from pre-stim period
+    baseline_stats = {
+        'if_mean': prestim_breaths['if'].mean(),
+        'if_std': prestim_breaths['if'].std(),
+        # ... etc.
+    }
+
+    # Calculate z-scores for all breaths
+    # (same as Option 1)
+```
+
+**Option 3: Rolling Window Baseline**
+```python
+def calculate_zscores_rolling(breaths_df, window_size=30):
+    """Calculate z-scores relative to rolling window (e.g., last 30 breaths)."""
+
+    for metric in ['if', 'amp_insp', 'ti', 'te']:
+        rolling_mean = breaths_df[metric].rolling(window=window_size).mean()
+        rolling_std = breaths_df[metric].rolling(window=window_size).std()
+
+        breaths_df[f'{metric}_zscore'] = (
+            (breaths_df[metric] - rolling_mean) / rolling_std
+        )
+
+    return breaths_df
+```
+
+**Recommended Implementation**: **Option 1 (Eupnea Baseline)**
+- Most robust (excludes transient events like sighs)
+- Biologically meaningful (normal breathing is the reference)
+- Stable baseline (not affected by brief perturbations)
+
+**UI Integration**:
+- No UI changes needed - automatically calculated during metrics computation
+- Exported in breaths CSV as additional columns
+- Used as features for ML classifier
+
+**CSV Export Format**:
+```csv
+sweep,breath,t,region,if,amp_insp,ti,te,if_zscore,amp_insp_zscore,ti_zscore,te_zscore,...
+1,1,-26.09,all,7.27,3.21,0.053,0.085,2.41,0.87,-0.45,1.32,...
+1,2,-25.95,all,2.13,3.05,0.048,0.092,-0.21,0.15,-1.12,1.88,...
+```
+
+**Performance Considerations**:
+- Minimal overhead (just numpy mean/std calculation)
+- ~1ms per 1000 breaths
+- No impact on UI responsiveness
+
+**Files to modify**:
+- `core/metrics.py` (add `calculate_breath_zscores()` function)
+- `export/export_manager.py` (include z-score columns in breaths CSV)
+- `core/robust_metrics.py` (call z-score calculation after metrics)
+
+**Dependencies**: None (just numpy, already included)
+
+**Effort**: 2-3 hours
+- Implement z-score calculation: 1 hour
+- Integrate into metrics pipeline: 30 min
+- Add to CSV export: 30 min
+- Testing with example data: 1 hour
+
+**Future ML Integration**:
+```python
+# In ML breath classifier:
+feature_columns = [
+    'if', 'amp_insp', 'ti', 'te', 'vent_proxy',  # Raw features
+    'if_zscore', 'amp_insp_zscore', 'ti_zscore', 'te_zscore',  # Z-score features
+]
+
+X = breaths_df[feature_columns]
+y = breaths_df['breath_type']  # eupnea, sigh, sniff, gasp
+
+# Train model with both raw and normalized features
+rf_model.fit(X, y)
+```
+
+**Benefits for ML**:
+- Improves model generalization across animals
+- Reduces overfitting to specific animals in training set
+- Enables detection of outliers (z-score > 2.5 = likely sigh/gasp)
+- Standard practice in neuroscience ML
+
+---
+
 ## Medium Priority Features
 
 ### 10. Sniffing Bout Detection and Annotation
@@ -1309,6 +1656,366 @@ retrain_model(
 **Alternative**: Install from GitHub (`pip install git+https://github.com/user/plethapp.git`)
 
 **Effort**: 4-6 hours (first-time setup)
+
+---
+
+## LLM-Assisted Metadata Extraction from Experiment Notes
+
+**Status**: 🔮 Long-term (Post v1.0) - Not high priority
+
+**Description**: Integrate LLM (Claude, ChatGPT, or local model) to intelligently extract experimental metadata from lab notes, Excel files, Word documents, and text files located near data files.
+
+**Motivation**:
+- Researchers often keep experiment notes in various formats alongside data files
+- Manually entering metadata (animal ID, sex, experimental parameters) is tedious and error-prone
+- Notes contain rich contextual information that could auto-populate save dialogs
+- Would significantly speed up data organization and reduce manual data entry
+
+**Use Cases**:
+1. **Auto-populate Save Metadata Dialog**:
+   - LLM scans folder for `.xlsx`, `.docx`, `.txt` files near the `.abf`/`.smrx` file
+   - Extracts: Animal ID, sex, genotype, experimental conditions (e.g., "30Hz stim"), channel assignments
+   - Pre-fills SaveMetaDialog fields with extracted information
+   - User reviews and confirms/edits before saving
+
+2. **Build Internal Metadata Database**:
+   - Maintain a JSON/SQLite database mapping each data file to extracted metadata
+   - Cache LLM responses to avoid re-processing same notes
+   - Enable search/filter by experiment parameters across all recordings
+
+3. **Smart Channel Detection**:
+   - Parse notes like "Ch0 = Mouse1 Pleth, Ch1 = Mouse2 Pleth, Ch2 = Stim"
+   - Auto-assign channel names based on experiment notes
+   - Detect multi-animal recordings and suggest channel groupings
+
+**Implementation Approach**:
+
+**Phase 1: Local File Discovery** (2-3 hours)
+- Scan directory and parent directories for common note formats
+- Priority order: `.xlsx` > `.docx` > `.txt` (most structured to least)
+- File name matching heuristics (e.g., notes with same date/animal ID as data file)
+
+**Phase 2: LLM Integration** (3-4 hours)
+- Support multiple backends:
+  - **Anthropic Claude API** (recommended - excellent at structured extraction)
+  - **OpenAI ChatGPT API** (alternative)
+  - **Local LLM** (llama.cpp, Ollama) for offline/privacy-sensitive use
+- Structured prompt engineering:
+  ```
+  Extract experimental metadata from these notes:
+  - Animal ID(s)
+  - Sex (M/F/Unknown)
+  - Genotype (WT, KO, Cre, etc.)
+  - Experimental condition (frequency, drug, etc.)
+  - Channel assignments (which channel = which animal/signal)
+
+  Notes: [extracted text from files]
+
+  Return JSON: {"animal_id": "...", "sex": "...", ...}
+  ```
+
+**Phase 3: UI Integration** (2-3 hours)
+- Add "Extract from Notes..." button to SaveMetaDialog
+- Progress indicator during LLM processing
+- Review dialog showing extracted metadata with confidence scores
+- Option to cache/save associations for future use
+
+**Phase 4: Database & Search** (3-4 hours)
+- SQLite database: `plethapp_metadata.db`
+- Schema: `file_path, animal_id, sex, genotype, condition, channel_map, notes_source, timestamp`
+- Search interface: Filter recordings by any metadata field
+- Export filtered dataset for batch analysis
+
+**Technical Considerations**:
+- **API Costs**: Claude/ChatGPT charges per token - need cost controls and caching
+- **Privacy**: Option to use local LLM for sensitive animal data
+- **Accuracy**: LLM may hallucinate - always require user review
+- **Rate Limits**: Implement queuing for batch processing
+- **File Parsing**: Use `openpyxl` (Excel), `python-docx` (Word), built-in for text
+
+**Configuration**:
+```python
+# In settings or config file
+LLM_CONFIG = {
+    "backend": "claude",  # or "chatgpt", "local"
+    "api_key": "sk-...",  # stored securely
+    "model": "claude-3-sonnet-20240229",
+    "max_tokens": 500,
+    "cache_responses": True,
+    "auto_extract": False,  # Manual trigger only by default
+}
+```
+
+**Example Workflow**:
+1. User loads `VgatCre_M25121004_20Hz10s.abf`
+2. User clicks "Save Data..." → SaveMetaDialog opens
+3. Click "Extract from Notes..." button
+4. App finds `Experiment_Notes_Dec2024.xlsx` in same folder
+5. LLM extracts: `{"animal_id": "M25121004", "sex": "M", "genotype": "VgatCre", "condition": "20Hz_10s_8mW"}`
+6. Fields auto-populate, user confirms and saves
+
+**Risks & Mitigations**:
+- **Risk**: LLM extracts wrong information → **Mitigation**: Always show review dialog, never auto-save
+- **Risk**: API costs accumulate → **Mitigation**: Aggressive caching, user opt-in, cost tracking
+- **Risk**: Privacy concerns → **Mitigation**: Support local LLM, document data handling
+- **Risk**: LLM unavailable/slow → **Mitigation**: Timeout, fallback to manual entry
+
+**Dependencies**:
+- Anthropic or OpenAI Python SDK
+- Optional: `llama-cpp-python` for local models
+- `openpyxl`, `python-docx` for file parsing
+
+**Effort Estimate**: 8-12 hours total
+- Phase 1: 2-3 hours
+- Phase 2: 3-4 hours
+- Phase 3: 2-3 hours
+- Phase 4 (optional): 3-4 hours
+
+**Priority**: Low (nice-to-have enhancement, not critical for publication)
+
+**Related Features**:
+- Could integrate with ML training data preparation
+- Metadata database enables better experiment organization
+- Foundation for future collaborative/cloud features
+
+---
+
+## Project Builder - Batch Processing Workflow
+
+### Overview
+**Description**: Auto-discover and batch process related ABF files based on experiment metadata filters
+
+**Motivation**:
+- Speed up repetitive workflows (analyzing dozens of similar experiments)
+- Reduce manual file browsing and loading time
+- Enable systematic processing of complete datasets
+- Auto-advance to next file after saving analysis
+
+**User Story**:
+> "I have 47 VgatCre+RVM+ChR2 recordings from the past 3 months. Instead of manually finding and loading each file, I want to define the project once, then step through all files sequentially with auto-advance."
+
+---
+
+### Core Features
+
+#### 1. Project Definition
+Define a project with metadata filters to auto-discover matching files:
+
+```python
+project_config = {
+    "name": "VgatCre_RVM_ChR2_2024",
+    "description": "ChR2 activation in RVM Vgat neurons",
+
+    "filters": {
+        "strain": "VgatCre",           # Match mouse strain
+        "virus": "ChR2",               # Match virus type
+        "location": "RVM",             # Match injection site
+        "date_range": ("2024-01-01", "2024-12-31"),  # Date range
+        "stim_pattern": "30Hz_15s"     # Match stimulus protocol (optional)
+    },
+
+    "search_paths": [
+        "D:/Experiments/2024/",
+        "E:/Backup/VgatCre/",
+        "//NetworkDrive/LabData/"     # Network paths supported
+    ],
+
+    "file_pattern": "*.abf",           # File extension
+    "recursive": True                   # Search subdirectories
+}
+```
+
+#### 2. File Discovery & Validation
+
+**Auto-discover files**:
+- Scan all search paths recursively
+- Parse ABF metadata and filenames
+- Match against filter criteria
+- Validate file integrity (readable, not corrupted)
+
+**Example discovered files**:
+```
+Found 47 matching files:
+✓ 2024_03_15_0003.abf  VgatCre, ChR2, RVM, 30Hz_15s
+✓ 2024_03_15_0004.abf  VgatCre, ChR2, RVM, 30Hz_15s
+✓ 2024_03_22_0001.abf  VgatCre, ChR2, RVM, 30Hz_15s
+...
+✓ 2024_11_10_0012.abf  VgatCre, ChR2, RVM, 30Hz_15s
+```
+
+**Metadata extraction sources**:
+1. **Filename parsing**: Extract date, animal ID from standard formats
+   - `YYYYMMDD_####.abf` → Date extraction
+   - `VgatCre_M25121004_*.abf` → Strain, animal ID
+2. **ABF file metadata**: Sample rate, channels, protocol name
+3. **Companion files**: Look for `.txt`, `.xlsx` notes files with metadata
+4. **Previous analysis**: Load metadata from existing `.pleth.npz` session files
+
+#### 3. Project Browser UI
+
+**Main project window**:
+```
+┌────────────────────────────────────────────────────┐
+│ Project: VgatCre_RVM_ChR2_2024                     │
+│ Description: ChR2 activation in RVM Vgat neurons   │
+├────────────────────────────────────────────────────┤
+│ Files: 47 total  │  Analyzed: 12 (26%)  │  Pending: 35  │
+│                                                    │
+│ Current File (13/47):                              │
+│ 📄 2024_05_18_0002.abf                            │
+│ └─ IN_0: 10 sweeps, 20kHz, 15min                 │
+│                                                    │
+│ Status: ✓ Analyzed, saved to .pleth.npz          │
+├────────────────────────────────────────────────────┤
+│ [◀ Previous]  [Next ▶]  [Jump to #...]  [Filter] │
+│                                                    │
+│ Auto-advance after save: ☑                        │
+│ Skip already analyzed:   ☑                        │
+└────────────────────────────────────────────────────┘
+```
+
+**File list with filtering**:
+```
+┌────────────────────────────────────────────────────┐
+│ File List - Sort by: Date ▼                       │
+├────────────────────────────────────────────────────┤
+│ ☑ 2024_03_15_0003.abf    ✓ Analyzed   [Jump]     │
+│ ☑ 2024_03_15_0004.abf    ✓ Analyzed   [Jump]     │
+│ ☐ 2024_03_22_0001.abf    ⚠ Pending    [Jump]     │
+│ ☐ 2024_04_05_0007.abf    ⚠ Pending    [Jump]     │
+│ ...                                                │
+└────────────────────────────────────────────────────┘
+
+Filters:
+☑ Show analyzed    ☑ Show pending    ☐ Show errors
+```
+
+#### 4. Auto-Advance Workflow
+
+**Standard workflow**:
+1. User defines project → files discovered
+2. Load first pending file
+3. User analyzes (detect peaks, edit, review)
+4. Press Ctrl+S → Save analysis dialog
+5. After save completes → **Auto-load next pending file**
+6. Repeat until all files processed
+
+**Smart features**:
+- **Skip analyzed files**: Only show files without `.pleth.npz` sessions
+- **Resume from last**: Remember last analyzed file, continue from there
+- **Bookmark files**: Mark specific files for later review
+- **Batch export**: Export all analyzed files at once (CSV, summary PDF)
+
+#### 5. Progress Tracking & Bookmarks
+
+**Project state file** (`.plethproject.json`):
+```json
+{
+  "project_name": "VgatCre_RVM_ChR2_2024",
+  "created": "2024-10-28T10:30:00",
+  "last_opened": "2024-10-29T14:22:00",
+  "total_files": 47,
+  "analyzed_files": 12,
+  "current_file_index": 12,
+
+  "file_status": {
+    "2024_03_15_0003.abf": {"status": "analyzed", "timestamp": "2024-10-28T11:05:23"},
+    "2024_03_15_0004.abf": {"status": "analyzed", "timestamp": "2024-10-28T11:32:18"},
+    "2024_03_22_0001.abf": {"status": "pending"},
+    ...
+  },
+
+  "bookmarks": [
+    {"file": "2024_05_10_0003.abf", "note": "Unusual breathing pattern - review"},
+    {"file": "2024_08_15_0001.abf", "note": "High noise - may need reanalysis"}
+  ]
+}
+```
+
+**Visual progress indicators**:
+- Progress bar: Files analyzed vs total
+- Color coding: Green (analyzed), Yellow (in progress), Gray (pending), Red (errors)
+- Statistics: Average analysis time per file, estimated time remaining
+
+---
+
+### Implementation Plan
+
+**Phase 1: Project Definition & Discovery** (2-3 hours)
+- Create `ProjectConfig` dataclass
+- Implement file discovery with metadata parsing
+- Filter matching based on criteria
+- Save/load project state to JSON
+
+**Files to create**:
+- `core/project_builder.py` - Core logic
+- `dialogs/project_config_dialog.py` - UI for defining projects
+
+**Phase 2: Project Browser UI** (2-3 hours)
+- Main project window with file list
+- Navigation controls (prev/next/jump)
+- Progress tracking display
+- Bookmark management
+
+**Files to modify**:
+- `main.py` - Add "Open Project" menu item
+- Create `dialogs/project_browser_dialog.py`
+
+**Phase 3: Auto-Advance Integration** (2 hours)
+- Hook into save workflow
+- Auto-load next file after save
+- Skip already analyzed files
+- Smart resumption (continue from last file)
+
+**Files to modify**:
+- `main.py` - Integrate auto-advance in save callback
+- `core/project_builder.py` - Next file logic
+
+**Phase 4: Batch Export** (Optional, 2 hours)
+- Export all analyzed files in project
+- Combined CSV with all sweeps
+- Summary statistics across entire project
+- Progress dialog for batch operations
+
+---
+
+### Future Enhancements
+
+**Integration with ML predictions** (Post v1.0):
+- Auto-analyze entire project with ML model
+- Show only files with uncertain predictions (confidence < 70%)
+- Batch re-train model on all corrected files
+
+**Cloud/network support**:
+- Discover files on network drives
+- Multi-user project collaboration
+- Lock files during analysis to prevent conflicts
+
+**Advanced filtering**:
+- Custom filter expressions (e.g., "IF > 2 Hz AND Ti < 0.3s")
+- Filter by analysis results (e.g., "files with >10 sighs")
+- Regex patterns for filename matching
+
+---
+
+### User Benefits
+
+**Time savings**:
+- **No manual browsing**: One-time project setup, auto-discover all files
+- **No repetitive loading**: Auto-advance eliminates 10-20 seconds per file
+- **Batch operations**: Export all analyses with one click
+
+**Reduced errors**:
+- **Complete coverage**: Won't accidentally skip files
+- **Consistent workflow**: Same analysis pipeline for all files
+- **Progress tracking**: Know exactly which files are done
+
+**Organization**:
+- **Logical grouping**: Organize files by experiment type
+- **Persistent state**: Resume anytime, remember progress
+- **Documentation**: Project config serves as analysis record
+
+**Estimated productivity gain**: **2-3× faster** for batch processing 20+ files
 
 ---
 

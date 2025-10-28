@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
         icon_path = Path(__file__).parent / "assets" / "plethapp_thumbnail_dark_round.ico"
         self.setWindowIcon(QIcon(str(icon_path)))
         # after uic.loadUi(ui_file, self)
-        from PyQt6.QtWidgets import QWidget
+        from PyQt6.QtWidgets import QWidget, QPushButton
         for w in self.findChildren(QWidget):
             if w.property("startHidden") is True:
                 w.hide()
@@ -144,6 +144,10 @@ class MainWindow(QMainWindow):
         ctrl_o_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         ctrl_o_shortcut.activated.connect(self.on_ctrl_o_pressed)
 
+        # Add F1 shortcut for Help
+        f1_shortcut = QShortcut(QKeySequence("F1"), self)
+        f1_shortcut.activated.connect(self.on_help_clicked)
+
         # --- Wire channel selection (immediate application) ---
         self.AnalyzeChanSelect.currentIndexChanged.connect(self.on_analyze_channel_changed)
         self.StimChanSelect.currentIndexChanged.connect(self.on_stim_channel_changed)
@@ -165,6 +169,14 @@ class MainWindow(QMainWindow):
         self.LowPass_checkBox.toggled.connect(self.update_and_redraw)
         self.HighPass_checkBox.toggled.connect(self.update_and_redraw)
         self.InvertSignal_checkBox.toggled.connect(self.update_and_redraw)
+
+        # Re-enable Apply button when filters change (peaks need to be recalculated)
+        self.LowPassVal.editingFinished.connect(self._on_filter_changed)
+        self.HighPassVal.editingFinished.connect(self._on_filter_changed)
+        self.FilterOrderSpin.valueChanged.connect(self._on_filter_changed)
+        self.LowPass_checkBox.toggled.connect(self._on_filter_changed)
+        self.HighPass_checkBox.toggled.connect(self._on_filter_changed)
+        self.InvertSignal_checkBox.toggled.connect(self._on_filter_changed)
 
         # Spectral Analysis button
         self.SpectralAnalysisButton.clicked.connect(self.on_spectral_analysis_clicked)
@@ -193,16 +205,22 @@ class MainWindow(QMainWindow):
         self.export_manager = ExportManager(self)
 
         # --- Peak-detect UI wiring ---
-        # Apply button opens dialog to auto-detect optimal prominence
-        self.ApplyPeakFindPushButton.setText("Auto-Detect && Apply Peaks")
-        self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until data loaded
-        self.ApplyPeakFindPushButton.clicked.connect(self._auto_detect_and_apply_peaks)
+        # Prominence field and Apply button already exist in UI file
+        # Connect the "More Options" button to open histogram dialog
+        self.ThreshOptions.clicked.connect(self._open_prominence_histogram)
 
-        # Store peak detection parameters (auto-populated from dialog)
+        # Apply button just applies peaks with current parameters
+        self.ApplyPeakFindPushButton.setText("Apply")
+        self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until prominence detected
+        self.ApplyPeakFindPushButton.clicked.connect(self._apply_peak_detection)
+
+        # Re-enable Apply button when user manually edits prominence
+        self.PeakPromValue.editingFinished.connect(lambda: self.ApplyPeakFindPushButton.setEnabled(True) if self.state.analyze_chan else None)
+
+        # Store peak detection parameters (auto-populated when channel selected)
         self.peak_prominence = None
+        self.peak_height_threshold = None  # Same as prominence by default
         self.peak_min_dist = 0.05  # Default minimum peak distance in seconds
-        self.peak_quality_score = None
-        self.peak_is_bimodal = None
 
         # Default values for eupnea and apnea thresholds
         self.ApneaThresh.setText("0.5")   # seconds - gaps longer than this are apnea
@@ -254,6 +272,9 @@ class MainWindow(QMainWindow):
 
         # Wire view summary button to show PDF preview
         self.ViewSummary_pushButton.clicked.connect(self.on_view_summary_clicked)
+
+        # Wire Help button (from UI file)
+        self.helpbutton.clicked.connect(self.on_help_clicked)
 
 
 
@@ -631,9 +652,8 @@ class MainWindow(QMainWindow):
 
 
 
-        # Reset Apply button and its enable logic
+        # Reset Apply button
         self.ApplyPeakFindPushButton.setEnabled(False)
-        self._maybe_enable_peak_apply()
 
 
         
@@ -783,9 +803,8 @@ class MainWindow(QMainWindow):
         # This cache stores computed metric traces during export for reuse in PDF generation
         self._export_metric_cache = {}
 
-        # Reset Apply button and its enable logic
+        # Reset Apply button
         self.ApplyPeakFindPushButton.setEnabled(False)
-        self._maybe_enable_peak_apply()
 
         # Fill combos safely (no signal during population)
         self.AnalyzeChanSelect.blockSignals(True)
@@ -1356,6 +1375,9 @@ class MainWindow(QMainWindow):
                             self.AnalyzeChanSelect.blockSignals(True)
                             self.load_npz_state(npz_path)
                             self.AnalyzeChanSelect.blockSignals(False)
+
+                            # Still run auto-detect to populate prominence field for this channel
+                            self._auto_detect_prominence_silent()
                             return  # Don't continue with fresh channel switch
 
                 # User declined or no NPZ exists - continue with fresh channel
@@ -1402,9 +1424,15 @@ class MainWindow(QMainWindow):
                 self.plot_host.clear_saved_view("single")
                 self.plot_host.clear_saved_view("grid")
 
-                # Enable auto-detect button now that we have data
-                self.ApplyPeakFindPushButton.setEnabled(True)
+                # Auto-detect optimal prominence in background when channel selected
+                self._auto_detect_prominence_silent()
+
+                # Redraw plot
                 self.redraw_main_plot()
+
+                # Redraw threshold line after plot is redrawn (it gets cleared during redraw)
+                if self.peak_height_threshold is not None:
+                    self.plot_host.update_threshold_line(self.peak_height_threshold)
 
     def on_stim_channel_changed(self, idx: int):
         """Apply stimulus channel selection immediately."""
@@ -1516,7 +1544,6 @@ class MainWindow(QMainWindow):
             self.state.peaks_by_sweep.clear()
         if hasattr(self.state, "breath_by_sweep"):
             self.state.breath_by_sweep.clear()
-        self._maybe_enable_peak_apply()  # re-enable Apply Peak if threshold is valid
 
         # Peaks/breaths/y2 no longer valid if filters change
         if hasattr(self.state, "peaks_by_sweep"):
@@ -1618,6 +1645,15 @@ class MainWindow(QMainWindow):
         # Simply redraw current sweep, which will use the new threshold values
         self.redraw_main_plot()
 
+    def _on_filter_changed(self, *_):
+        """
+        Called whenever filter settings change.
+        Re-enables Apply button since peaks need to be recalculated with new filtering.
+        """
+        # Only re-enable if we have a threshold value and an analysis channel
+        if self.peak_prominence is not None and self.state.analyze_chan:
+            self.ApplyPeakFindPushButton.setEnabled(True)
+
     ##################################################
     ##Peak detection parameters                     ##
     ##################################################
@@ -1694,29 +1730,25 @@ class MainWindow(QMainWindow):
             print(f"[notch-filter] Error applying filter: {e}")
             return y
 
-    def _auto_detect_and_apply_peaks(self):
+    def _open_prominence_histogram(self):
         """
-        Open auto-detection dialog to determine optimal prominence,
-        then immediately apply peak detection to all sweeps.
+        Open the prominence threshold visualization dialog.
+        Shows histogram, quality score, and allows interactive adjustment.
         """
         from dialogs.prominence_threshold_dialog import ProminenceThresholdDialog
-        import time
 
         st = self.state
         if not st.analyze_chan or st.analyze_chan not in st.sweeps:
             self._show_warning("No Data", "Load and select a channel first.")
             return
 
-        # Concatenate ALL sweeps for representative auto-threshold calculation
-        print("[Auto-Detect] Concatenating all sweeps for auto-threshold analysis...")
+        # Concatenate all sweeps for analysis
         all_sweeps_data = []
         n_sweeps = st.sweeps[st.analyze_chan].shape[1]
 
         for sweep_idx in range(n_sweeps):
-            # Skip omitted sweeps
             if sweep_idx in st.omitted_sweeps:
                 continue
-
             y_sweep = self._get_processed_for(st.analyze_chan, sweep_idx)
             all_sweeps_data.append(y_sweep)
 
@@ -1724,36 +1756,125 @@ class MainWindow(QMainWindow):
             self._show_warning("No Data", "All sweeps are omitted.")
             return
 
-        # Concatenate all sweeps
         y_data = np.concatenate(all_sweeps_data)
-        print(f"[Auto-Detect] Concatenated {len(all_sweeps_data)} sweeps, total length: {len(y_data)} samples")
 
-        # Open dialog with current parameters
+        # Get current prominence from field
+        try:
+            current_prom = float(self.PeakPromValue.text().strip()) if self.PeakPromValue.text().strip() else None
+        except ValueError:
+            current_prom = None
+
+        # Open dialog
         dialog = ProminenceThresholdDialog(
             parent=self,
             y_data=y_data,
             sr_hz=st.sr_hz,
-            current_prom=self.peak_prominence,
+            current_prom=current_prom,
             current_min_dist=self.peak_min_dist
         )
 
         if dialog.exec() == dialog.DialogCode.Accepted:
-            # Store auto-detected values
+            # Update parameters with user-adjusted values from dialog
             vals = dialog.get_values()
             self.peak_prominence = vals['prominence']
             self.peak_min_dist = vals['min_dist']
-            self.peak_quality_score = vals['quality_score']
-            self.peak_is_bimodal = vals['is_bimodal']
+            self.peak_height_threshold = vals['height_threshold']
 
-            print(f"[Auto-Detect] prominence={self.peak_prominence:.4f}, min_dist={self.peak_min_dist:.4f}")
-            print(f"[Auto-Detect] Quality: {self.peak_quality_score:.1f}/10, Bimodal: {self.peak_is_bimodal}")
+            self.PeakPromValue.setText(f"{vals['prominence']:.4f}")
+            self.ApplyPeakFindPushButton.setEnabled(True)
 
-            # Now apply peak detection with auto-detected parameters
-            self._apply_peak_detection()
+            # Update threshold line on plot
+            self.plot_host.update_threshold_line(vals['height_threshold'])
+
+            print(f"[Histogram] Updated prominence: {vals['prominence']:.4f}, Height threshold: {vals['height_threshold']:.4f}")
+
+    def _auto_detect_prominence_silent(self):
+        """
+        Auto-detect optimal prominence using Otsu's method in background (no dialog).
+        Populates prominence field and enables Apply button.
+        """
+        import time
+        from scipy.signal import find_peaks
+        import numpy as np
+
+        st = self.state
+        if not st.analyze_chan or st.analyze_chan not in st.sweeps:
+            return
+
+        try:
+            # Concatenate ALL sweeps for representative auto-threshold calculation
+            print("[Auto-Detect] Calculating optimal prominence...")
+            t_start = time.time()
+
+            all_sweeps_data = []
+            n_sweeps = st.sweeps[st.analyze_chan].shape[1]
+
+            for sweep_idx in range(n_sweeps):
+                if sweep_idx in st.omitted_sweeps:
+                    continue
+                y_sweep = self._get_processed_for(st.analyze_chan, sweep_idx)
+                all_sweeps_data.append(y_sweep)
+
+            if not all_sweeps_data:
+                return
+
+            y_data = np.concatenate(all_sweeps_data)
+
+            # Detect all peaks with minimal prominence
+            min_dist_samples = int(self.peak_min_dist * st.sr_hz)
+            peaks, props = find_peaks(y_data, prominence=0.001, distance=min_dist_samples)
+            prominences = props['prominences']
+
+            if len(prominences) < 10:
+                print("[Auto-Detect] Not enough peaks found")
+                return
+
+            # Otsu's method: auto-calculate optimal prominence threshold
+            prom_norm = ((prominences - prominences.min()) /
+                        (prominences.max() - prominences.min()) * 255).astype(np.uint8)
+
+            hist, bin_edges = np.histogram(prom_norm, bins=256, range=(0, 256))
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+            weight1 = np.cumsum(hist)
+            weight2 = np.cumsum(hist[::-1])[::-1]
+            mean1 = np.cumsum(hist * bin_centers) / (weight1 + 1e-10)
+            mean2 = (np.cumsum((hist * bin_centers)[::-1]) / (weight2 + 1e-10))[::-1]
+
+            variance = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+            optimal_bin = np.argmax(variance)
+            optimal_thresh_norm = bin_centers[optimal_bin]
+
+            # Convert back to original scale
+            optimal_prom = float((optimal_thresh_norm / 255.0 *
+                            (prominences.max() - prominences.min()) +
+                            prominences.min()))
+
+            # Store and populate prominence field with auto-detected value
+            self.peak_prominence = optimal_prom
+            self.PeakPromValue.setText(f"{optimal_prom:.4f}")
+
+            # Store the height threshold value (will be used in peak detection)
+            self.peak_height_threshold = optimal_prom
+
+            # Draw threshold line on plot
+            self.plot_host.update_threshold_line(optimal_prom)
+
+            # Enable Apply button
+            self.ApplyPeakFindPushButton.setEnabled(True)
+
+            t_elapsed = time.time() - t_start
+            print(f"[Auto-Detect] Optimal prominence: {optimal_prom:.4f} ({t_elapsed:.2f}s)")
+            self._log_status_message(f"Auto-detected prominence: {optimal_prom:.4f}", 3000)
+
+        except Exception as e:
+            print(f"[Auto-Detect] Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _apply_peak_detection(self):
         """
-        Run peak detection on the ANALYZE channel for ALL sweeps using auto-detected parameters,
+        Run peak detection on the ANALYZE channel for ALL sweeps,
         store indices per sweep, and redraw current sweep with peaks + breath markers.
         """
         import time
@@ -1765,15 +1886,17 @@ class MainWindow(QMainWindow):
 
         self._log_status_message("Detecting peaks and breath features...")
 
-        # Use auto-detected parameters
-        prom = self.peak_prominence
-        thresh = None  # Height threshold not used (prominence-based detection only)
+        # Get prominence from UI field (user can edit auto-detected value)
+        try:
+            prom = float(self.PeakPromValue.text().strip())
+        except (ValueError, AttributeError):
+            self._show_warning("Invalid Prominence", "Please enter a valid prominence value.")
+            return
+
+        # Use stored height threshold (set during auto-detect, same as prominence)
+        thresh = getattr(self, 'peak_height_threshold', None)
         min_d = self.peak_min_dist
         direction = "up"  # Always detect peaks above threshold for breathing signals
-
-        if prom is None:
-            self._show_warning("No Prominence", "Run auto-detection first.")
-            return
 
         min_dist_samples = None
         if min_d is not None and min_d > 0:
@@ -1827,6 +1950,10 @@ class MainWindow(QMainWindow):
         # Show completion message with elapsed time
         t_elapsed = time.time() - t_start
         self._log_status_message(f"✓ Peak detection complete ({t_elapsed:.1f}s)", 3000)
+
+        # Disable Apply button after successful peak detection
+        # Will be re-enabled if channel, filter, or file changes
+        self.ApplyPeakFindPushButton.setEnabled(False)
 
     def _compute_eupnea_from_gmm(self, sweep_idx: int, signal_length: int) -> np.ndarray:
         """
@@ -2500,6 +2627,12 @@ class MainWindow(QMainWindow):
         # Refresh canvas
         self.plot_host.canvas.draw_idle()
         print("[update-eupnea] Lightweight overlay refresh complete (skipped outlier detection)")
+
+    def on_help_clicked(self):
+        """Open the help dialog (F1)."""
+        from dialogs.help_dialog import HelpDialog
+        dialog = HelpDialog(self)
+        dialog.exec()
 
     def on_spectral_analysis_clicked(self):
         """Open spectral analysis dialog and optionally apply notch filter."""
