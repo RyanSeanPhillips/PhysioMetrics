@@ -9,8 +9,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QTextBrowser, QGroupBox
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPixmap
 
+import os
+from pathlib import Path
 from version_info import VERSION_STRING
 
 
@@ -44,15 +46,29 @@ class FirstLaunchDialog(QDialog):
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
-        # Welcome message
-        welcome_text = QLabel(
-            "<p style='font-size: 11pt;'>"
-            "Thank you for using PlethApp! This tool was created to help researchers "
-            "analyze respiratory signals with advanced breath detection and pattern analysis."
-            "</p>"
+        # Splash image
+        image_path = Path(__file__).parent.parent / 'images' / 'plethapp_splash_dark-01.png'
+        if image_path.exists():
+            image_label = QLabel()
+            pixmap = QPixmap(str(image_path))
+            scaled_pixmap = pixmap.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+            image_label.setPixmap(scaled_pixmap)
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(image_label)
+
+        # What's New section
+        whats_new = QLabel(
+            "<p style='font-size: 11pt; color: #2a7fff; font-weight: bold;'>What's New in v1.0.9:</p>"
+            "<ul style='font-size: 10pt; margin-left: 25px;'>"
+            "<li>Session save/load - Resume previous analyses</li>"
+            "<li>Auto-threshold detection - One-click peak detection</li>"
+            "<li>Comprehensive help guide (Press F1)</li>"
+            "<li>Anonymous usage tracking to improve PlethApp</li>"
+            "</ul>"
         )
-        welcome_text.setWordWrap(True)
-        layout.addWidget(welcome_text)
+        whats_new.setWordWrap(True)
+        layout.addWidget(whats_new)
 
         # Telemetry explanation group
         telemetry_group = QGroupBox("Help Improve PlethApp")
@@ -69,7 +85,7 @@ class FirstLaunchDialog(QDialog):
         # Telemetry checkbox
         self.telemetry_checkbox = QCheckBox("Share anonymous usage data")
         self.telemetry_checkbox.setChecked(True)  # Opt-out model
-        self.telemetry_checkbox.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        self.telemetry_checkbox.setStyleSheet("font-size: 10pt;")
         telemetry_layout.addWidget(self.telemetry_checkbox)
 
         # What's collected
@@ -86,7 +102,7 @@ class FirstLaunchDialog(QDialog):
         # Crash reports checkbox
         self.crash_reports_checkbox = QCheckBox("Send crash reports")
         self.crash_reports_checkbox.setChecked(True)  # Opt-out model
-        self.crash_reports_checkbox.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        self.crash_reports_checkbox.setStyleSheet("font-size: 10pt;")
         telemetry_layout.addWidget(self.crash_reports_checkbox)
 
         crash_label = QLabel(
@@ -97,27 +113,16 @@ class FirstLaunchDialog(QDialog):
         )
         telemetry_layout.addWidget(crash_label)
 
-        # What's NOT collected
-        not_collected_label = QLabel(
-            "<p style='color: #FFD700; font-weight: bold; margin-top: 10px;'>What we NEVER collect:</p>"
-            "<ul style='margin-left: 20px;'>"
-            "<li>File names, paths, or directory structure</li>"
-            "<li>Animal metadata (strain, virus, injection site)</li>"
-            "<li>Actual breathing data (frequencies, amplitudes, metrics)</li>"
-            "<li>Your name, email, or institution</li>"
-            "</ul>"
-        )
-        not_collected_label.setWordWrap(True)
-        telemetry_layout.addWidget(not_collected_label)
-
-        # Learn more button
-        learn_more_btn = QPushButton("Learn More...")
-        learn_more_btn.clicked.connect(self._show_details)
-        learn_more_btn.setMaximumWidth(150)
-        telemetry_layout.addWidget(learn_more_btn)
+        # Learn more link
+        learn_more_label = QLabel('<a href="#details" style="color: #2a7fff; font-size: 10pt;">Learn more about what data is collected...</a>')
+        learn_more_label.setOpenExternalLinks(False)
+        learn_more_label.linkActivated.connect(self._show_details)
+        learn_more_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        telemetry_layout.addWidget(learn_more_label)
 
         telemetry_group.setLayout(telemetry_layout)
-        layout.addWidget(telemetry_group)
+        telemetry_group.setMaximumWidth(500)  # Make the box smaller
+        layout.addWidget(telemetry_group, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Note about changing preferences
         note_label = QLabel(
@@ -182,19 +187,19 @@ class FirstLaunchDialog(QDialog):
             }
             QCheckBox {
                 color: #e0e0e0;
-                spacing: 8px;
+                spacing: 6px;
             }
             QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
+                width: 10px;
+                height: 10px;
             }
             QCheckBox::indicator:unchecked {
                 background-color: #2a2a2a;
-                border: 2px solid #555;
+                border: 1px solid #555;
             }
             QCheckBox::indicator:checked {
                 background-color: #2a7fff;
-                border: 2px solid #2a7fff;
+                border: 1px solid #2a7fff;
             }
             QPushButton {
                 background-color: #3a3a3a;
@@ -221,7 +226,7 @@ class FirstLaunchDialog(QDialog):
         """Show detailed information about telemetry."""
         details_dialog = QDialog(self)
         details_dialog.setWindowTitle("Telemetry Details")
-        details_dialog.resize(500, 400)
+        details_dialog.resize(500, 450)
 
         layout = QVBoxLayout(details_dialog)
 
@@ -252,6 +257,15 @@ class FirstLaunchDialog(QDialog):
             <h4>Anonymous User ID</h4>
             <p>A random UUID (like "a3f2e8c9-4b7d-...") is generated once and stored on your computer.
             This lets us count unique users without knowing who you are.</p>
+
+            <p style="color: #FFD700; font-weight: bold; margin-top: 15px;">What we NEVER collect:</p>
+            <ul>
+                <li>File names, paths, or directory structure</li>
+                <li>Animal metadata (strain, virus, injection site)</li>
+                <li>Actual breathing data (frequencies, amplitudes, metrics)</li>
+                <li>Your name, email, or institution</li>
+                <li>Computer name or network information</li>
+            </ul>
 
             <h4>Why Opt-Out by Default?</h4>
             <p>PlethApp uses an "opt-out" model (checkboxes pre-checked) because:</p>

@@ -11,6 +11,7 @@ No personal information, file names, or experimental data is collected.
 import sys
 import platform
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -30,12 +31,12 @@ from version_info import VERSION_STRING
 # Google Analytics 4 Measurement Protocol
 # Get these from: https://analytics.google.com/
 # Admin → Data Streams → Your stream → Measurement Protocol API secrets
-GA4_MEASUREMENT_ID = None  # Format: "G-XXXXXXXXXX"
-GA4_API_SECRET = None      # Create in GA4 admin panel
+GA4_MEASUREMENT_ID = "G-38M0HTXEQ2"
+GA4_API_SECRET = "2gmx-luNQFqTNDdZyASmkA"
 
 # Sentry DSN (for crash reports)
 # Get from: https://sentry.io/settings/projects/your-project/keys/
-SENTRY_DSN = None  # Format: "https://abc123@o456.ingest.sentry.io/789"
+SENTRY_DSN = "https://3a2829e5a500579ba0f205028b68645c@o4510270639898624.ingest.us.sentry.io/4510270680596480"
 
 
 # ============================================================================
@@ -148,13 +149,15 @@ def _sanitize_sentry_event(event, hint):
 
 def _send_to_google_analytics(event_name, params=None):
     """
-    Send event to Google Analytics 4 using Measurement Protocol.
+    Send event to Google Analytics 4 in background thread (non-blocking).
 
     Args:
         event_name (str): Event name (e.g., "file_loaded", "gmm_clustering")
         params (dict, optional): Event parameters (must not contain PII)
 
     Docs: https://developers.google.com/analytics/devguides/collection/protocol/ga4
+
+    Note: This function returns immediately. Network call happens in background.
     """
     if not GA4_MEASUREMENT_ID or not GA4_API_SECRET:
         # GA4 not configured - log locally
@@ -165,6 +168,22 @@ def _send_to_google_analytics(event_name, params=None):
         })
         return
 
+    # Send in background thread (non-blocking)
+    thread = threading.Thread(
+        target=_send_to_ga4_blocking,
+        args=(event_name, params),
+        daemon=True  # Don't block app exit
+    )
+    thread.start()  # Returns immediately
+
+
+def _send_to_ga4_blocking(event_name, params):
+    """
+    Actually send event to GA4 (runs in background thread).
+
+    This function blocks on network I/O, but it runs in a background thread
+    so it doesn't affect UI responsiveness.
+    """
     try:
         import requests
 
@@ -179,7 +198,7 @@ def _send_to_google_analytics(event_name, params=None):
             }]
         }
 
-        # Send to GA4 (non-blocking, short timeout)
+        # Send to GA4 (blocking, but in background thread)
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
 
@@ -191,7 +210,7 @@ def _send_to_google_analytics(event_name, params=None):
             'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
-        # Network error or timeout - silently fail (never interrupt user)
+        # Network error or timeout - log locally (never interrupt user)
         print(f"Telemetry: GA4 send failed (logged locally): {e}")
         _log_event_locally({
             'event': event_name,
