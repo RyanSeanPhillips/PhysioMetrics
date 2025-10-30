@@ -14,7 +14,7 @@ import pandas as pd
 from pathlib import Path
 from PyQt6.QtWidgets import QMessageBox, QFileDialog, QDialog, QProgressDialog, QApplication
 from PyQt6.QtCore import Qt
-from core import metrics
+from core import metrics, telemetry
 from dialogs import SaveMetaDialog
 
 # Enable line profiling when running with kernprof -l
@@ -117,6 +117,38 @@ class ExportManager:
             # Default to 30Hz
             print(f"[export] Unknown experiment type '{experiment_type}', using default (30Hz)")
             return Stim30HzStrategy(self.window)
+
+    def _is_pulse_experiment(self, kept_sweeps: list) -> bool:
+        """
+        Detect if this is a brief pulse perturbation experiment.
+
+        Returns True if:
+        - Stim channel exists
+        - Each sweep has exactly 1 pulse
+        - Pulse width < 1.0s
+
+        Args:
+            kept_sweeps: List of sweep indices to check
+
+        Returns:
+            True if this is a pulse experiment (single brief pulse per sweep)
+        """
+        st = self.window.state
+        if not st.stim_chan:
+            return False
+
+        for s in kept_sweeps:
+            spans = st.stim_spans_by_sweep.get(s, [])
+            if len(spans) != 1:
+                return False  # Need exactly 1 pulse per sweep
+
+            # Check pulse width
+            metrics = st.stim_metrics_by_sweep.get(s, {})
+            pulse_width = metrics.get("pulse_width_s", None)
+            if pulse_width is None or pulse_width >= 1.0:
+                return False  # Too long or missing
+
+        return True
 
     def _load_save_dialog_history(self) -> dict:
         """Load autocomplete history for the Save Data dialog from QSettings."""
@@ -307,6 +339,28 @@ class ExportManager:
             # Show completion message with elapsed time
             t_elapsed = time.time() - t_start
             self.window._log_status_message(f"✓ Data export complete ({t_elapsed:.1f}s)", 3000)
+
+            # Count eupnea and sniffing breaths for telemetry
+            st = self.window.state
+            eupnea_count = 0
+            sniff_count = 0
+            for s in st.sweeps.keys():
+                breath_data = st.breath_by_sweep.get(s, {})
+                onsets = breath_data.get('onsets', [])
+
+                for i in range(len(onsets) - 1):
+                    if self._is_breath_sniffing(s, i, onsets):
+                        sniff_count += 1
+                    else:
+                        eupnea_count += 1
+
+            # Log telemetry: CSV/NPZ export with per-file edit metrics (for ML evaluation)
+            telemetry.log_file_saved(
+                save_type='csv_bundle',
+                eupnea_count=eupnea_count,
+                sniff_count=sniff_count,
+                num_sweeps=len(self.window.state.sweeps)
+            )
         except Exception as e:
             t_elapsed = time.time() - t_start
             self.window._log_status_message(f"✗ Data export failed ({t_elapsed:.1f}s)", 3000)
@@ -1781,12 +1835,25 @@ class ExportManager:
 
         if preview_only:
             # Show interactive preview dialog instead of saving
-            # Check if event channel data exists to determine which preview to show
+            # Check experiment type to determine which preview to show
+
+            # First check for pulse experiments (Phase 1 testing)
+            is_pulse_exp = self._is_pulse_experiment(kept_sweeps)
+
+            # Check if event channel data exists
             has_event_data = (st.event_channel and st.bout_annotations and
                              any(st.bout_annotations.get(s, []) for s in kept_sweeps))
 
             try:
-                if has_event_data:
+                if is_pulse_exp:
+                    # PHASE 1 TEST: Show pulse CTA test figure
+                    print("[Preview] Pulse experiment detected - showing CTA test figure")
+                    fig_test = self._generate_pulse_cta_test_figure(kept_sweeps)
+
+                    # Show in simple preview dialog
+                    self._show_simple_figure_preview(fig_test, "Pulse CTA Test (Phase 1)")
+
+                elif has_event_data:
                     # Show event-aligned CTA preview
                     self._show_event_cta_preview_dialog(
                         kept_sweeps=kept_sweeps,
@@ -1935,7 +2002,109 @@ class ExportManager:
             sem = np.nan
         return (m, sem)
 
-   
+    def _plot_pulse_cta_overlay(self, ax, kept_sweeps: list, global_s0: float = None):
+        """
+        Plot CTA overlay: all sweeps centered on stimulus onset.
+
+        Time window: ±2s around stim onset (adjustable)
+
+        Args:
+            ax: Matplotlib axis to plot on
+            kept_sweeps: List of sweep indices to include
+            global_s0: Global stimulus onset time (seconds), or None
+        """
+        import numpy as np
+
+        st = self.window.state
+
+        # Collect all traces aligned to stim onset
+        aligned_traces = []
+
+        for s in kept_sweeps:
+            spans = st.stim_spans_by_sweep.get(s, [])
+            if not spans:
+                continue
+
+            stim_onset = spans[0][0]  # First (and only) pulse onset
+
+            # Extract window around stim: [onset - 2s, onset + 2s]
+            window_start = stim_onset - 2.0
+            window_end = stim_onset + 2.0
+
+            # Find indices
+            idx_start = np.searchsorted(st.t, window_start)
+            idx_end = np.searchsorted(st.t, window_end)
+
+            # Bounds check
+            if idx_start >= len(st.t) or idx_end > len(st.t):
+                continue
+
+            # Extract segment
+            t_segment = st.t[idx_start:idx_end] - stim_onset  # Centered at 0
+            y_segment = st.y[idx_start:idx_end]
+
+            if len(t_segment) > 0:
+                aligned_traces.append((t_segment, y_segment))
+
+        if not aligned_traces:
+            ax.text(0.5, 0.5, 'No data available for CTA',
+                   ha='center', va='center', transform=ax.transAxes)
+            return
+
+        # Overlay all traces (semi-transparent)
+        for t_seg, y_seg in aligned_traces:
+            ax.plot(t_seg, y_seg, color='gray', alpha=0.3, linewidth=0.5)
+
+        # Compute and plot mean
+        # Interpolate to common time base
+        t_common = np.linspace(-2.0, 2.0, 1000)
+        y_interp_all = []
+        for t_seg, y_seg in aligned_traces:
+            # Only interpolate if we have valid data
+            if len(t_seg) > 1:
+                y_interp = np.interp(t_common, t_seg, y_seg, left=np.nan, right=np.nan)
+                y_interp_all.append(y_interp)
+
+        if y_interp_all:
+            y_mean = np.nanmean(y_interp_all, axis=0)
+            y_std = np.nanstd(y_interp_all, axis=0)
+
+            ax.plot(t_common, y_mean, color='blue', linewidth=2,
+                   label=f'Mean (n={len(aligned_traces)})')
+            ax.fill_between(t_common, y_mean - y_std, y_mean + y_std,
+                           color='blue', alpha=0.2, label='±1 SD')
+
+        # Vertical line at stim onset
+        ax.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Stim Onset')
+
+        ax.set_xlabel('Time relative to stim onset (s)', fontsize=10)
+        ax.set_ylabel('Airflow (mV)', fontsize=10)
+        ax.set_title('Cycle-Triggered Average (CTA) - Aligned to Stim Onset', fontsize=11, fontweight='bold')
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(-2.0, 2.0)
+
+    def _generate_pulse_cta_test_figure(self, kept_sweeps: list):
+        """
+        Generate a standalone test figure with just the CTA overlay plot.
+
+        This is a temporary helper for Phase 1 testing before full integration.
+
+        Args:
+            kept_sweeps: List of sweep indices to include
+
+        Returns:
+            matplotlib Figure object
+        """
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+        self._plot_pulse_cta_overlay(ax, kept_sweeps, global_s0=None)
+        fig.tight_layout()
+
+        return fig
+
+
 
 
     def _save_metrics_summary_pdf(
@@ -2820,6 +2989,56 @@ class ExportManager:
 
         plt.tight_layout()
         return fig
+
+    def _show_simple_figure_preview(self, fig, title="Preview"):
+        """
+        Display a simple preview dialog with a single matplotlib figure.
+
+        Args:
+            fig: Matplotlib figure to display
+            title: Window title
+        """
+        import matplotlib.pyplot as plt
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QScrollArea
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        from PyQt6.QtCore import Qt
+        import time
+
+        dialog = QDialog(self.window)
+        dialog.setWindowTitle(title)
+        dialog.resize(1200, 700)
+
+        main_layout = QVBoxLayout(dialog)
+
+        # Scroll area for the canvas
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Canvas for displaying matplotlib figure
+        canvas = FigureCanvas(fig)
+        from PyQt6.QtWidgets import QSizePolicy
+        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        canvas.setMinimumWidth(800)
+
+        scroll_area.setWidget(canvas)
+        main_layout.addWidget(scroll_area)
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        main_layout.addWidget(close_btn)
+
+        # Show timing message
+        if hasattr(self, '_preview_start_time'):
+            t_elapsed = time.time() - self._preview_start_time
+            self.window._log_status_message(f"✓ Preview generated ({t_elapsed:.1f}s)", 5000)
+
+        dialog.exec()
+
+        # Cleanup
+        plt.close(fig)
 
 
     def _show_summary_preview_dialog(self, t_ds_csv, y2_ds_by_key, keys_for_csv, label_by_key, stim_zero, stim_dur):

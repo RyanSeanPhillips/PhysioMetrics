@@ -34,7 +34,7 @@ This document tracks planned features, enhancements, and long-term development g
 
 ### 📋 Medium Priority (Scientific Features)
 - [ ] **Project Builder - Batch processing workflow** (6-8 hours) ← PRODUCTIVITY BOOST
-- [ ] 25ms stim analysis: phase response curves, airflow CTA, firing rate (10-15 hours)
+- [ ] **25ms pulse analysis: phase-sorted traces, CTA, PRC** (14-17 hours) ← See detailed plan in Feature #12
 - [ ] Omit region mode - exclude artifact sections within sweep (2-3 hours)
 - [ ] Idealized breath template overlay for move point mode (3-4 hours)
 - [ ] CSV/text time-series import with preview dialog (6-7 hours)
@@ -1129,7 +1129,456 @@ rf_model.fit(X, y)
 
 ---
 
-### 12. Dark Mode for Main Plot
+### 12. 25ms Pulse Stimulation Analysis
+**Description**: Specialized analysis tools for brief pulse perturbation experiments with phase-dependent response quantification
+
+**Motivation**:
+- **Quantify phase-dependent responses**: Understand how breathing responds to perturbations at different points in the respiratory cycle
+- **Publication-quality visualization**: Generate phase-sorted aligned traces and cycle-triggered averages
+- **Awake vs anesthetized**: Handle both clean (anesthetized) and noisy (awake) recordings
+- **Novel analysis approach**: Probability-based PRC for noisy awake recordings
+
+**Experimental Setup**:
+- 50 sweeps (~30s each)
+- One 25ms pulse in the middle of each sweep
+- Pulse timing varies relative to breath cycle phase across sweeps
+
+**Implementation Phases**:
+
+---
+
+#### Phase 1: Cycle-Triggered Average (CTA) - 3 hours
+
+**Description**: Average all breath cycles aligned to a common reference point
+
+**Algorithm**:
+```python
+def compute_cycle_triggered_average(st, pulse_times, alignment='onset'):
+    """
+    Compute CTA aligned to breath event.
+
+    Args:
+        st: Application state with peaks_by_sweep
+        pulse_times: List of pulse onset times (one per sweep)
+        alignment: 'onset', 'peak', or 'offset' - which breath event to align to
+
+    Returns:
+        t_aligned: Time vector (relative to alignment point)
+        cta_mean: Mean aligned trace
+        cta_std: Standard deviation at each timepoint
+        n_cycles: Number of cycles included
+    """
+
+    aligned_traces = []
+
+    for sweep_idx, pulse_t in enumerate(pulse_times):
+        # Find breath containing the pulse
+        breath_events = st.peaks_by_sweep[sweep_idx]
+
+        # Find inspiratory onset BEFORE pulse
+        onsets = breath_events['onsets']
+        pre_pulse_onset_idx = find_last_event_before(onsets, pulse_t)
+
+        # Find expiratory offset AFTER pulse (or 2nd breath after)
+        offsets = breath_events['offsets']
+        post_pulse_offset_idx = find_nth_event_after(offsets, pulse_t, n=2)
+
+        # Extract aligned segment
+        t0 = st.t[pre_pulse_onset_idx]
+        t1 = st.t[post_pulse_offset_idx]
+
+        segment = extract_segment(st.y, t0, t1)
+        aligned_traces.append(segment)
+
+    # Interpolate to common time base (handle variable cycle lengths)
+    t_common = np.linspace(0, max_duration, num=1000)
+    aligned_interp = [np.interp(t_common, seg_t, seg_y)
+                      for seg_t, seg_y in aligned_traces]
+
+    # Compute statistics
+    cta_mean = np.mean(aligned_interp, axis=0)
+    cta_std = np.std(aligned_interp, axis=0)
+
+    return t_common, cta_mean, cta_std, len(aligned_traces)
+```
+
+**Visualization**:
+```
+┌─────────────────────────────────────────────────┐
+│ Cycle-Triggered Average (n=50 sweeps)          │
+├─────────────────────────────────────────────────┤
+│                  ╱╲                             │
+│                 ╱  ╲        ╱╲                  │
+│      ╱╲        ╱    ╲      ╱  ╲                 │
+│     ╱  ╲      ╱      ╲    ╱    ╲                │
+│────╱────╲────╱────────╲──╱──────╲───────        │
+│   ↑          ↑              ↑                    │
+│ Onset-1    Pulse         Offset+2               │
+│                                                  │
+│ Shaded region: ± 1 SD                           │
+│ Vertical dashed line: Pulse onset               │
+└─────────────────────────────────────────────────┘
+```
+
+**Files to create**:
+- `core/pulse_analysis.py` - Core analysis functions
+- `dialogs/pulse_analysis_dialog.py` - UI for selecting pulse channel, alignment options
+
+**Files to modify**:
+- `main.py` - Add "Pulse Analysis" button/menu item
+
+**Effort**: 3 hours
+
+---
+
+#### Phase 2: Phase-Sorted Aligned Traces - 4-5 hours
+
+**Description**: Display all raw pleth traces aligned and sorted by pulse phase
+
+**Key Concept**:
+- **Alignment**: Inspiratory onset BEFORE pulse → Expiratory offset of 2nd breath AFTER pulse
+- **Sorting**: By pulse timing relative to last expiratory offset (0 = just after expiration, 1 = just before next inspiration)
+- **Display**: Stacked raw traces (not raster), color-coded by phase
+
+**Algorithm**:
+```python
+def compute_phase_sorted_traces(st, pulse_times):
+    """
+    Extract and sort aligned breath traces by pulse phase.
+
+    Returns:
+        sorted_traces: List of (t, y) tuples, sorted by phase
+        phases: Phase of pulse in each trace (0-1)
+        pulse_times_aligned: Pulse time in aligned coordinates
+    """
+
+    traces_with_phase = []
+
+    for sweep_idx, pulse_t in enumerate(pulse_times):
+        breath_events = st.peaks_by_sweep[sweep_idx]
+
+        # Find last expiratory offset before pulse
+        offsets = breath_events['offsets']
+        last_offset_before_pulse = find_last_event_before(offsets, pulse_t)
+
+        # Find next inspiratory onset after that offset
+        onsets = breath_events['onsets']
+        next_onset_after_offset = find_next_event_after(onsets,
+                                                         last_offset_before_pulse)
+
+        # Calculate phase (0 = just after offset, 1 = just before onset)
+        t_offset = st.t[last_offset_before_pulse]
+        t_next_onset = st.t[next_onset_after_offset]
+        cycle_duration = t_next_onset - t_offset
+
+        phase = (pulse_t - t_offset) / cycle_duration
+        phase = np.clip(phase, 0, 1)  # Handle edge cases
+
+        # Find alignment boundaries
+        pre_pulse_onset = find_last_onset_before(onsets, pulse_t)
+        post_pulse_offset = find_nth_event_after(offsets, pulse_t, n=2)
+
+        # Extract segment
+        t_align_start = st.t[pre_pulse_onset]
+        t_align_end = st.t[post_pulse_offset]
+
+        segment_t = st.t[pre_pulse_onset:post_pulse_offset+1] - t_align_start
+        segment_y = st.y[pre_pulse_onset:post_pulse_offset+1]
+
+        traces_with_phase.append({
+            'phase': phase,
+            't': segment_t,
+            'y': segment_y,
+            'pulse_t_aligned': pulse_t - t_align_start
+        })
+
+    # Sort by phase
+    traces_with_phase.sort(key=lambda x: x['phase'])
+
+    return traces_with_phase
+```
+
+**Visualization**:
+```
+┌───────────────────────────────────────────────────────┐
+│ Phase-Sorted Aligned Traces (n=50)                    │
+│ Sorted by pulse phase (0=post-expiration, 1=pre-insp) │
+├───────────────────────────────────────────────────────┤
+│ Sweep 23 (φ=0.95) ──╱╲──|───╱╲────╱╲──  [Late exp]  │
+│ Sweep 12 (φ=0.88) ──╱╲──|───╱╲────╱╲──               │
+│ Sweep 45 (φ=0.72) ──╱╲─|────╱╲────╱╲──               │
+│        ...                                             │
+│ Sweep 08 (φ=0.35) ──╱|╲─────╱╲────╱╲──               │
+│ Sweep 31 (φ=0.18) ──╱|╲─────╱╲────╱╲──               │
+│ Sweep 19 (φ=0.05) ─|─╱╲─────╱╲────╱╲──  [Early exp] │
+│                     ↑                                  │
+│                  Pulse onset (vertical line)           │
+│                                                        │
+│ Color gradient: Blue (φ=0) → Red (φ=1)               │
+│ Traces offset vertically for visibility               │
+└───────────────────────────────────────────────────────┘
+```
+
+**UI Options**:
+- Number of breaths after pulse to show (1 or 2)
+- Vertical offset between traces (adjustable)
+- Color scheme (gradient, categorical, or monochrome)
+- Option to show CTA overlay on top of individual traces
+
+**Files to modify**:
+- `core/pulse_analysis.py` - Add phase calculation and sorting
+- `dialogs/pulse_analysis_dialog.py` - Add sorting options
+
+**Effort**: 4-5 hours
+
+---
+
+#### Phase 3: Phase Response Curve (PRC) - 5-6 hours
+
+**Description**: Quantify how perturbation at different phases affects the next breath
+
+**Two Approaches** (depending on data quality):
+
+**3A. Traditional PRC (Anesthetized/Clean Recordings)**
+
+Calculate phase shift induced by perturbation:
+
+```python
+def compute_traditional_prc(st, pulse_times):
+    """
+    Traditional PRC: phase shift vs perturbation phase.
+
+    Returns:
+        phases: Perturbation phases (0-1)
+        phase_shifts: Induced phase shifts in next cycle
+        amplitudes: Change in breath amplitude
+        frequencies: Change in breath frequency
+    """
+
+    prc_data = []
+
+    for sweep_idx, pulse_t in enumerate(pulse_times):
+        breath_events = st.peaks_by_sweep[sweep_idx]
+
+        # Compute perturbation phase (same as Phase 2)
+        phase = compute_pulse_phase(breath_events, pulse_t)
+
+        # Find unperturbed cycle duration (breath before pulse)
+        pre_pulse_cycle_dur = get_cycle_duration_before_pulse(breath_events, pulse_t)
+
+        # Find perturbed cycle duration (breath containing pulse)
+        perturbed_cycle_dur = get_cycle_duration_at_pulse(breath_events, pulse_t)
+
+        # Calculate phase shift (advance or delay)
+        expected_offset_time = t_onset + pre_pulse_cycle_dur
+        actual_offset_time = t_actual_offset
+        phase_shift = (actual_offset_time - expected_offset_time) / pre_pulse_cycle_dur
+
+        # Calculate amplitude change
+        pre_pulse_amp = get_amplitude_before_pulse(breath_events, pulse_t)
+        perturbed_amp = get_amplitude_at_pulse(breath_events, pulse_t)
+        amp_change = (perturbed_amp - pre_pulse_amp) / pre_pulse_amp
+
+        prc_data.append({
+            'phase': phase,
+            'phase_shift': phase_shift,
+            'amp_change': amp_change,
+            'freq_change': 1/perturbed_cycle_dur - 1/pre_pulse_cycle_dur
+        })
+
+    return pd.DataFrame(prc_data)
+```
+
+**Visualization**:
+```
+┌──────────────────────────────────────────────┐
+│ Phase Response Curve                         │
+├──────────────────────────────────────────────┤
+│ Phase Shift                                  │
+│  +0.2 │                                      │
+│       │         ●                            │
+│  +0.1 │    ●        ●                        │
+│   0.0 ├────●───●────●───●────────────        │
+│ -0.1  │                  ●   ●               │
+│ -0.2  │                      ●               │
+│       └─────────────────────────────         │
+│       0.0  0.2  0.4  0.6  0.8  1.0           │
+│            Perturbation Phase                │
+│                                              │
+│ Interpretation:                              │
+│ • Positive: Phase advance (earlier next breath) │
+│ • Negative: Phase delay (later next breath)    │
+└──────────────────────────────────────────────┘
+```
+
+**3B. Probability-Based PRC (Awake/Noisy Recordings)**
+
+For awake recordings where individual cycle detection is unreliable:
+
+```python
+def compute_probability_prc(st, pulse_times, time_bins=50):
+    """
+    Probability of breath as function of time since last expiratory offset.
+
+    Bins breaths by:
+    - Time since last expiration when pulse occurred
+    - Time to next inspiration after pulse
+
+    Returns probability distribution showing when breaths are likely
+    to occur after perturbation at different phases.
+    """
+
+    # Create time bins relative to last expiratory offset
+    t_bins = np.linspace(0, max_cycle_duration, time_bins)
+
+    # For each phase bin, collect distribution of next breath times
+    phase_bins = np.linspace(0, 1, 10)  # 10 phase bins
+
+    prob_matrix = np.zeros((len(phase_bins)-1, len(t_bins)-1))
+
+    for sweep_idx, pulse_t in enumerate(pulse_times):
+        breath_events = st.peaks_by_sweep[sweep_idx]
+
+        # Compute pulse phase
+        phase = compute_pulse_phase(breath_events, pulse_t)
+        phase_bin_idx = np.digitize(phase, phase_bins) - 1
+
+        # Find next inspiratory onset after pulse
+        next_onset_t = find_next_onset_after(breath_events, pulse_t)
+
+        # Time from pulse to next breath
+        dt_to_next_breath = next_onset_t - pulse_t
+        time_bin_idx = np.digitize(dt_to_next_breath, t_bins) - 1
+
+        # Increment probability matrix
+        if 0 <= phase_bin_idx < prob_matrix.shape[0] and \
+           0 <= time_bin_idx < prob_matrix.shape[1]:
+            prob_matrix[phase_bin_idx, time_bin_idx] += 1
+
+    # Normalize to probabilities
+    prob_matrix = prob_matrix / prob_matrix.sum(axis=1, keepdims=True)
+
+    return phase_bins[:-1], t_bins[:-1], prob_matrix
+```
+
+**Visualization**:
+```
+┌─────────────────────────────────────────────────┐
+│ Breath Probability After Pulse                  │
+├─────────────────────────────────────────────────┤
+│ Phase│                                           │
+│  1.0 │ ░░░░▓▓▓▓████░░░░                         │
+│  0.8 │ ░░░░░░▓▓████▓▓░░                         │
+│  0.6 │ ░░░░░░░░▓███▓▓▓░░                        │
+│  0.4 │ ░░░░░░░░░▓███▓▓░░                        │
+│  0.2 │ ░░░░░░░░░░▓███▓░░                        │
+│  0.0 │ ░░░░░░░░░░░███▓▓░                        │
+│      └────────────────────────                  │
+│      0.0   0.5   1.0   1.5   2.0               │
+│      Time to Next Breath (s)                    │
+│                                                 │
+│ Color: White (0%) → Black (100% probability)   │
+│                                                 │
+│ Interpretation:                                 │
+│ • Early phase pulses (φ~0): Trigger breath quickly │
+│ • Late phase pulses (φ~1): Delay next breath      │
+└─────────────────────────────────────────────────┘
+```
+
+**Files to modify**:
+- `core/pulse_analysis.py` - Add PRC computation functions
+- `dialogs/pulse_analysis_dialog.py` - Add PRC type selection (traditional vs probability)
+
+**Effort**: 5-6 hours
+
+---
+
+#### Integration & Export - 2-3 hours
+
+**Dialog UI**:
+```
+┌─ Pulse Analysis Configuration ──────────────────┐
+│                                                  │
+│ Pulse Detection:                                 │
+│   Event Channel: [Stim ▼]                       │
+│   ☑ Auto-detect pulse times (threshold crossing)│
+│   Threshold: [0.5     ] V                       │
+│   Min pulse width: [20  ] ms                    │
+│   Max pulse width: [30  ] ms                    │
+│                                                  │
+│ Analysis Type:                                   │
+│   ☑ Cycle-Triggered Average                     │
+│   ☑ Phase-Sorted Aligned Traces                 │
+│   ☑ Phase Response Curve                        │
+│                                                  │
+│ PRC Method:                                      │
+│   ⦿ Traditional PRC (anesthetized/clean)        │
+│   ○ Probability-based PRC (awake/noisy)         │
+│                                                  │
+│ Alignment Options:                               │
+│   Start: [1 ▼] breath(s) before pulse           │
+│   End:   [2 ▼] breath(s) after pulse            │
+│                                                  │
+│ Display Options:                                 │
+│   Vertical trace spacing: [Auto ▼]              │
+│   Color scheme: [Phase gradient ▼]              │
+│   ☑ Show pulse timing marker                    │
+│   ☑ Show CTA overlay on sorted traces           │
+│                                                  │
+│ Export:                                          │
+│   ☑ Save plots as PDF                           │
+│   ☑ Save data as CSV                            │
+│   ☑ Include individual trial data               │
+│                                                  │
+│          [Cancel]  [Run Analysis]                │
+└──────────────────────────────────────────────────┘
+```
+
+**Export Files**:
+1. **`_pulse_cta.pdf`** - Cycle-triggered average plot
+2. **`_pulse_sorted_traces.pdf`** - Phase-sorted aligned traces
+3. **`_pulse_prc.pdf`** - Phase response curve
+4. **`_pulse_analysis.csv`** - Summary data:
+   ```csv
+   sweep,pulse_time,phase,phase_shift,amp_change,freq_change,time_to_next_breath
+   1,15.234,0.23,0.05,0.12,0.08,0.87
+   2,15.891,0.67,-0.12,-0.05,-0.15,1.23
+   ...
+   ```
+5. **`_pulse_cta_data.csv`** - CTA time series (for replotting)
+
+**Files to create**:
+- `core/pulse_analysis.py` - All analysis functions
+- `dialogs/pulse_analysis_dialog.py` - Configuration dialog
+
+**Files to modify**:
+- `main.py` - Add "Pulse Analysis..." button (below GMM button)
+- `export/export_manager.py` - Add pulse analysis export functions
+
+**Effort**: 2-3 hours
+
+---
+
+### Total Effort: 14-17 hours
+
+**Phased Implementation Priority**:
+1. **Phase 2 first** (Phase-Sorted Traces) - Most informative for understanding data
+2. **Phase 1** (CTA) - Standard analysis, builds on Phase 2 code
+3. **Phase 3** (PRC) - After seeing Phase 2 results, determine best PRC approach
+4. **Integration** - Polish UI and export
+
+**Dependencies**:
+- Event channel support (already implemented ✅)
+- Breath event detection (already implemented ✅)
+- Multi-sweep data support (already implemented ✅)
+
+**Testing Datasets Needed**:
+- Anesthetized recording with clean pulses (validate traditional PRC)
+- Awake recording with noisy breathing (validate probability-based PRC)
+
+---
+
+### 13. Dark Mode for Main Plot
 **Description**: Toggle dark theme for matplotlib plot area
 
 **Motivation**:
@@ -1172,7 +1621,7 @@ def set_dark_plot_theme(ax, dark_mode: bool):
 
 ## Long-Term / Major Features
 
-### 13. Universal Data Loader Framework (Cross-App Infrastructure)
+### 14. Universal Data Loader Framework (Cross-App Infrastructure)
 **Description**: Create modular, reusable file loading system for all neuroscience apps
 
 **Motivation**:
@@ -1186,7 +1635,7 @@ def set_dark_plot_theme(ax, dark_mode: bool):
 
 ---
 
-### 14. ML-Ready Data Export
+### 15. ML-Ready Data Export
 **Description**: Export format optimized for machine learning training and analysis
 
 **See PUBLICATION_ROADMAP.md for complete implementation plan (Week 1-2 of v1.0 timeline).**
@@ -1195,7 +1644,7 @@ def set_dark_plot_theme(ax, dark_mode: bool):
 
 ---
 
-### 15. Machine Learning Integration
+### 16. Machine Learning Integration
 **Description**: Train models on exported labeled data to improve automated detection
 
 **See PUBLICATION_ROADMAP.md for complete implementation plan (Week 3-6 of v1.0 timeline).**
@@ -1628,7 +2077,7 @@ retrain_model(
 
 ---
 
-### 16. Core Modularization (Breathtools Package)
+### 17. Core Modularization (Breathtools Package)
 **Description**: Refactor core analysis functions into standalone, reusable library
 
 **See MULTI_APP_STRATEGY.md for complete extraction plan.**
@@ -1637,7 +2086,7 @@ retrain_model(
 
 ---
 
-### 17. PyPI Publication
+### 18. PyPI Publication
 **Description**: Publish app to Python Package Index for public `pip install`
 
 **Prerequisites**:

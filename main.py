@@ -205,6 +205,12 @@ class MainWindow(QMainWindow):
         # --- Initialize Export Manager ---
         self.export_manager = ExportManager(self)
 
+        # --- Initialize Telemetry Heartbeat Timer ---
+        # Send periodic user_engagement events to help GA4 recognize active users
+        self.telemetry_heartbeat_timer = QTimer(self)
+        self.telemetry_heartbeat_timer.timeout.connect(telemetry.log_user_engagement)
+        self.telemetry_heartbeat_timer.start(45000)  # Send engagement event every 45 seconds
+
         # --- Peak-detect UI wiring ---
         # Prominence field and Apply button already exist in UI file
         # Connect the "More Options" button to open histogram dialog
@@ -401,6 +407,9 @@ class MainWindow(QMainWindow):
         else:
             print("[TESTING MODE] Warning: Apply Peak Detection button is not enabled")
             print("[TESTING MODE] Auto-load complete (but peaks not detected)")
+
+        # Log main screen view for telemetry
+        telemetry.log_screen_view('Main Analysis Screen', screen_class='main')
 
     # ---------- File browse ----------
     def closeEvent(self, event):
@@ -626,13 +635,26 @@ class MainWindow(QMainWindow):
         st.sweep_idx = 0
         self.navigation_manager.reset_window_state()
 
-        # Log telemetry: file loaded
+        # Log telemetry: file loaded with enhanced metrics
         file_ext = path.suffix.lower()[1:]  # .abf -> abf
+        load_duration = time.time() - t_start
+        file_size_mb = path.stat().st_size / (1024 * 1024)
+        duration_minutes = (t[-1] - t[0]) / 60 if len(t) > 1 else 0
+
         telemetry.log_file_loaded(
             file_type=file_ext,
             num_sweeps=n_sweeps,
-            num_breaths=None  # Not detected yet
+            num_breaths=None,  # Not detected yet
+            file_size_mb=round(file_size_mb, 2),
+            sampling_rate_hz=int(sr),
+            duration_minutes=round(duration_minutes, 1),
+            num_channels=len(ch_names)
         )
+
+        # Log file loading timing
+        telemetry.log_timing('file_load', load_duration,
+                            file_size_mb=round(file_size_mb, 2),
+                            num_sweeps=n_sweeps)
 
         # Reset peak results and trace cache
         if not hasattr(st, "peaks_by_sweep"):
@@ -1015,6 +1037,41 @@ class MainWindow(QMainWindow):
                 timeout=5000
             )
 
+            # Count eupnea and sniffing breaths for telemetry
+            eupnea_count = 0
+            sniff_count = 0
+            for s in self.state.sweeps.keys():
+                breath_data = self.state.breath_by_sweep.get(s, {})
+                onsets = breath_data.get('onsets', [])
+                sniff_regions = self.state.sniff_regions_by_sweep.get(s, [])
+
+                for i in range(len(onsets) - 1):
+                    # Check if breath midpoint falls in any sniffing region
+                    t_start = self.state.t[onsets[i]]
+                    t_end = self.state.t[onsets[i + 1]]
+                    t_mid = (t_start + t_end) / 2.0
+
+                    is_sniff = False
+                    for (region_start, region_end) in sniff_regions:
+                        if region_start <= t_mid <= region_end:
+                            is_sniff = True
+                            break
+
+                    if is_sniff:
+                        sniff_count += 1
+                    else:
+                        eupnea_count += 1
+
+            # Log telemetry: file saved with per-file edit metrics (for ML evaluation)
+            telemetry.log_file_saved(
+                save_type='npz',
+                eupnea_count=eupnea_count,
+                sniff_count=sniff_count,
+                file_size_mb=round(file_size_mb, 2),
+                include_raw_data=include_raw,
+                num_sweeps=len(self.state.sweeps)
+            )
+
             # Update settings with last save location
             self.settings.setValue("last_npz_save_dir", str(save_path.parent))
 
@@ -1395,6 +1452,12 @@ class MainWindow(QMainWindow):
 
                 # User declined or no NPZ exists - continue with fresh channel
                 st.analyze_chan = new_chan
+
+                # Log telemetry: channel selection
+                telemetry.log_button_click('select_analyze_channel',
+                                          channel_name=new_chan,
+                                          channel_index=idx)
+
                 st.proc_cache.clear()
                 # Clear z-score global statistics cache
                 self.zscore_global_mean = None
@@ -1663,6 +1726,17 @@ class MainWindow(QMainWindow):
         Called whenever filter settings change.
         Re-enables Apply button since peaks need to be recalculated with new filtering.
         """
+        st = self.state
+
+        # Log telemetry: filter settings changed
+        telemetry.log_button_click('filter_changed',
+                                   use_low=st.use_low,
+                                   low_hz=st.low_hz if st.use_low else None,
+                                   use_high=st.use_high,
+                                   high_hz=st.high_hz if st.use_high else None,
+                                   use_mean_sub=st.use_mean_sub,
+                                   use_invert=st.use_invert)
+
         # Only re-enable if we have a threshold value and an analysis channel
         if self.peak_prominence is not None and self.state.analyze_chan:
             self.ApplyPeakFindPushButton.setEnabled(True)
@@ -1785,6 +1859,7 @@ class MainWindow(QMainWindow):
             current_prom=current_prom,
             current_min_dist=self.peak_min_dist
         )
+        telemetry.log_screen_view('Peak Detection Options Dialog', screen_class='config_dialog')
 
         if dialog.exec() == dialog.DialogCode.Accepted:
             # Update parameters with user-adjusted values from dialog
@@ -1962,6 +2037,31 @@ class MainWindow(QMainWindow):
 
         # Show completion message with elapsed time
         t_elapsed = time.time() - t_start
+
+        # Log telemetry: peak detection with results
+        total_peaks = sum(len(pks) for pks in st.peaks_by_sweep.values())
+        total_breaths = sum(len(b.get('onsets', [])) for b in st.breath_by_sweep.values())
+
+        telemetry.log_peak_detection(
+            method='manual_threshold' if thresh else 'auto_threshold',
+            num_peaks=total_peaks,
+            threshold=thresh if thresh else prom,
+            prominence=prom,
+            min_distance_samples=min_dist_samples if min_dist_samples else 0,
+            num_sweeps=n_sweeps
+        )
+
+        telemetry.log_timing('peak_detection', t_elapsed,
+                            num_peaks=total_peaks,
+                            num_breaths=total_breaths,
+                            num_sweeps=n_sweeps)
+
+        # Log warning if no peaks detected
+        if total_peaks == 0:
+            telemetry.log_warning('No peaks detected',
+                                 threshold=thresh if thresh else prom,
+                                 prominence=prom)
+
         self._log_status_message(f"✓ Peak detection complete ({t_elapsed:.1f}s)", 3000)
 
         # Disable Apply button after successful peak detection
@@ -2151,11 +2251,33 @@ class MainWindow(QMainWindow):
 
             # Show completion message with elapsed time
             t_elapsed = time.time() - t_start
+
+            # Log telemetry: GMM clustering success
+            eupnea_count = len(cluster_labels) - n_sniffing_breaths
+            telemetry.log_feature_used('gmm_clustering')
+            telemetry.log_timing('gmm_clustering', t_elapsed,
+                                num_breaths=len(cluster_labels),
+                                num_clusters=n_clusters,
+                                silhouette_score=round(silhouette, 3))
+
+            telemetry.log_breath_statistics(
+                num_breaths=len(cluster_labels),
+                sniff_count=int(n_sniffing_breaths),
+                eupnea_count=int(eupnea_count),
+                silhouette_score=round(silhouette, 3)
+            )
+
             self._log_status_message(f"✓ GMM clustering complete ({t_elapsed:.1f}s)", 2000)
 
         except Exception as e:
             print(f"[auto-gmm] Error during automatic GMM clustering: {e}")
             t_elapsed = time.time() - t_start
+
+            # Log telemetry: GMM clustering failure
+            telemetry.log_crash(f"GMM clustering failed: {type(e).__name__}",
+                               operation='gmm_clustering',
+                               num_breaths=len(feature_matrix) if 'feature_matrix' in locals() else 0)
+
             self._log_status_message(f"✗ GMM clustering failed ({t_elapsed:.1f}s)", 3000)
             import traceback
             traceback.print_exc()
@@ -2645,6 +2767,7 @@ class MainWindow(QMainWindow):
         """Open the help dialog (F1)."""
         from dialogs.help_dialog import HelpDialog
         dialog = HelpDialog(self)
+        telemetry.log_screen_view('Help Dialog', screen_class='info_dialog')
         dialog.exec()
 
     def on_spectral_analysis_clicked(self):
@@ -2669,6 +2792,7 @@ class MainWindow(QMainWindow):
             parent=self, t=t, y=y, sr_hz=st.sr_hz, stim_spans=stim_spans,
             parent_window=self, use_zscore=self.use_zscore_normalization
         )
+        telemetry.log_screen_view('Spectral Analysis Dialog', screen_class='analysis_dialog')
         if dlg.exec() == QDialog.DialogCode.Accepted:
             # Get filter parameters
             lower, upper = dlg.get_filter_params()
@@ -2730,6 +2854,7 @@ class MainWindow(QMainWindow):
 
         # Create and show GMM dialog
         dlg = GMMClusteringDialog(parent=self, main_window=self)
+        telemetry.log_screen_view('GMM Clustering Dialog', screen_class='analysis_dialog')
         if dlg.exec() == QDialog.DialogCode.Accepted:
             # User applied clustering results
             print("[gmm-clustering] Results applied to main plot")

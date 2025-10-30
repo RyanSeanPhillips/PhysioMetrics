@@ -451,6 +451,12 @@ class EditingModes:
         st.breath_by_sweep[s] = breaths
         print(f"[add-peak] Surgically added breath events at index {new_idx}")
 
+        # Log telemetry: manual edit
+        from core import telemetry
+        telemetry.log_edit('add_peak',
+                          num_peaks_after=len(pks_new),
+                          sweep_index=s)
+
         # Show success message
         self.window._log_status_message("✓ Peak added", 1500)
 
@@ -598,6 +604,13 @@ class EditingModes:
         # Delete only the closest peak
         pks_new = np.delete(pks, closest_idx)
         print(f"[delete-peak] Deleted peak at index {closest_peak} (distance: {distances[closest_idx]} samples)")
+
+        # Log telemetry: manual edit
+        from core import telemetry
+        telemetry.log_edit('delete_peak',
+                          num_peaks_after=len(pks_new),
+                          sweep_index=s)
+
         self.window._log_status_message("✓ Peak deleted", 1500)
         st.peaks_by_sweep[s] = pks_new
 
@@ -1303,6 +1316,13 @@ class EditingModes:
                     # Delete this region
                     del self.window.state.sniff_regions_by_sweep[s][i]
                     print(f"[mark-sniff] Deleted region {i}: {start_time:.3f} - {end_time:.3f} s")
+
+                    # Log telemetry: manual edit
+                    from core import telemetry
+                    telemetry.log_edit('delete_sniff_region',
+                                      num_regions_after=len(self.window.state.sniff_regions_by_sweep.get(s, [])),
+                                      sweep_index=s)
+
                     self.window.redraw_main_plot()
                     return
 

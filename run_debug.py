@@ -104,6 +104,22 @@ def main():
         from core import telemetry
         telemetry.init_telemetry()
 
+        # Install global exception handler for crash tracking
+        def exception_hook(exctype, value, tb):
+            """Catch unhandled exceptions and log to telemetry."""
+            import traceback
+
+            # Log crash to telemetry
+            telemetry.log_crash(
+                error_message=f"{exctype.__name__}: {str(value)[:100]}",
+                traceback_depth=len(traceback.extract_tb(tb))
+            )
+
+            # Call default handler to print traceback
+            sys.__excepthook__(exctype, value, tb)
+
+        sys.excepthook = exception_hook
+
         # Create splash screen
         splash_paths = [
             Path(__file__).parent / "images" / "plethapp_splash_dark-01.png",
