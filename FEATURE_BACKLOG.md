@@ -59,6 +59,12 @@ This document tracks planned features, enhancements, and long-term development g
 - [ ] Expiratory onset detection (separate from insp offset) (3-4 hours)
 
 ### 🔮 Long-Term Features (Post v1.0)
+- [ ] **Auto-update notification system** (2-3 hours) ← USER EXPERIENCE
+  - Check GitHub Releases API on startup
+  - Show dialog if new version available with release notes
+  - Direct download link to latest release
+  - Optional: "Don't show again for this version" checkbox
+  - Respects telemetry opt-out (no tracking if disabled)
 - [ ] Dark mode toggle for main plot (2-3 hours)
 - [ ] ML-ready data export format (CSV, HDF5, JSON) (3-4 hours)
 - [ ] ML breath classifier (Random Forest + XGBoost) (12-20 hours in phases)
