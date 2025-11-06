@@ -73,3 +73,6 @@ test_*.bat
 
 # Internal development files (kept locally, not on GitHub)
 _internal/
+
+# Claude project instructions (local only, not on GitHub)
+CLAUDE.md
