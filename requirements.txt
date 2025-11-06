@@ -6,6 +6,7 @@ numpy>=1.21.0
 pandas>=1.5.0
 scipy>=1.9.0
 scikit-learn>=1.0.0  # For GMM breath clustering
+numba>=0.57.0  # Optional: 10-50× speedup for breath detection (highly recommended)
 
 # Plotting
 matplotlib>=3.6.0

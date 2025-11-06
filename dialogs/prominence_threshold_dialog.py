@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QLabel, QGroupBox, QDialogButtonBox, QWidget
 )
 from PyQt6.QtCore import Qt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from scipy.signal import find_peaks
 
@@ -25,7 +25,8 @@ from scipy.signal import find_peaks
 class ProminenceThresholdDialog(QDialog):
     """Interactive prominence threshold detection using Otsu's method."""
 
-    def __init__(self, parent=None, y_data=None, sr_hz=None, current_prom=None, current_min_dist=None):
+    def __init__(self, parent=None, y_data=None, sr_hz=None, current_prom=None, current_min_dist=None, current_height_threshold=None,
+                 percentile_cutoff=99, num_bins=200):
         super().__init__(parent)
         self.setWindowTitle("Auto-Detect Prominence Threshold")
         self.resize(1000, 700)
@@ -34,6 +35,7 @@ class ProminenceThresholdDialog(QDialog):
         self.sr_hz = sr_hz or 1000.0
         self.current_prom = current_prom or 0.1
         self.current_min_dist = current_min_dist or 0.05
+        self.user_threshold = current_height_threshold  # Previously set threshold
 
         # Cached peak detection
         self.all_peaks = None
@@ -42,6 +44,7 @@ class ProminenceThresholdDialog(QDialog):
         # Auto-calculated threshold
         self.auto_threshold = None
         self.current_threshold = None  # User-adjusted value
+        self.local_min_threshold = None  # Local minimum threshold
         self.inter_class_variance_curve = None  # For plotting
 
         # Separation metric for display
@@ -49,10 +52,15 @@ class ProminenceThresholdDialog(QDialog):
 
         # Draggable line (only vertical, no horizontal to avoid obscuring labels)
         self.threshold_vline = None
+        self.otsu_reference_line = None  # Fixed line showing Otsu's calculated threshold
         self.is_dragging = False
 
         # Y2 axis mode toggle
         self.y2_mode = "peak_count"  # or "variance"
+
+        # Histogram controls - use passed values or defaults
+        self.percentile_cutoff = percentile_cutoff
+        self.num_bins = num_bins
 
         # Apply dark theme
         self._apply_dark_theme()
@@ -181,6 +189,19 @@ class ProminenceThresholdDialog(QDialog):
 
         plot_header.addStretch()
 
+        # "Set to Otsu" button
+        self.btn_set_otsu = QPushButton("→ Otsu")
+        self.btn_set_otsu.setToolTip("Set threshold to Otsu's calculated value")
+        self.btn_set_otsu.clicked.connect(self._set_to_otsu)
+        plot_header.addWidget(self.btn_set_otsu)
+
+        # "Set to Local Min" button
+        self.btn_set_local_min = QPushButton("→ Local Min")
+        self.btn_set_local_min.setToolTip("Set threshold to first local minimum")
+        self.btn_set_local_min.clicked.connect(self._set_to_local_min)
+        self.btn_set_local_min.setEnabled(False)  # Enabled only if local min exists
+        plot_header.addWidget(self.btn_set_local_min)
+
         # Y2 axis toggle button (initial text shows what you'll see if you CLICK it)
         self.btn_toggle_y2 = QPushButton("Show: Inter-Class Variance")
         self.btn_toggle_y2.setToolTip("Toggle between Peak Count and Inter-Class Variance")
@@ -195,6 +216,30 @@ class ProminenceThresholdDialog(QDialog):
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setStyleSheet("background-color: #1e1e1e;")
         layout.addWidget(self.canvas)
+
+        # Add matplotlib navigation toolbar for zoom/pan
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        self.toolbar.setStyleSheet("""
+            QToolBar {
+                background-color: #2d2d2d;
+                border: 1px solid #3e3e42;
+                spacing: 3px;
+            }
+            QToolButton {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 3px;
+                padding: 3px;
+            }
+            QToolButton:hover {
+                background-color: #3e3e42;
+            }
+            QToolButton:pressed {
+                background-color: #505050;
+            }
+        """)
+        layout.addWidget(self.toolbar)
 
         # Connect drag events
         self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
@@ -215,6 +260,45 @@ class ProminenceThresholdDialog(QDialog):
 
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
+
+        # Histogram controls
+        histogram_controls_group = QGroupBox("Histogram Controls")
+        histogram_controls_layout = QHBoxLayout()
+
+        # Percentile cutoff control
+        from PyQt6.QtWidgets import QSpinBox, QComboBox
+        histogram_controls_layout.addWidget(QLabel("Outlier Cutoff:"))
+        self.percentile_combo = QComboBox()
+        self.percentile_combo.addItems(["90%", "95%", "99%", "100% (None)"])
+        # Set to stored value
+        if self.percentile_cutoff == 90:
+            self.percentile_combo.setCurrentText("90%")
+        elif self.percentile_cutoff == 95:
+            self.percentile_combo.setCurrentText("95%")
+        elif self.percentile_cutoff == 99:
+            self.percentile_combo.setCurrentText("99%")
+        else:
+            self.percentile_combo.setCurrentText("100% (None)")
+        self.percentile_combo.setToolTip("Exclude outliers above this percentile from histogram")
+        self.percentile_combo.currentTextChanged.connect(self._on_percentile_changed)
+        histogram_controls_layout.addWidget(self.percentile_combo)
+
+        histogram_controls_layout.addSpacing(20)
+
+        # Bin count control
+        histogram_controls_layout.addWidget(QLabel("Bins:"))
+        self.bins_spin = QSpinBox()
+        self.bins_spin.setRange(20, 500)  # Increased max to 500
+        self.bins_spin.setValue(self.num_bins)  # Use stored value
+        self.bins_spin.setSingleStep(10)
+        self.bins_spin.setToolTip("Number of bins in histogram")
+        self.bins_spin.valueChanged.connect(self._on_bins_changed)
+        histogram_controls_layout.addWidget(self.bins_spin)
+
+        histogram_controls_layout.addStretch()
+
+        histogram_controls_group.setLayout(histogram_controls_layout)
+        layout.addWidget(histogram_controls_group)
 
         # Dialog buttons
         button_box = QDialogButtonBox(
@@ -240,6 +324,19 @@ class ProminenceThresholdDialog(QDialog):
             self.all_peaks = peaks
             self.all_peak_heights = self.y_data[peaks]  # Use peak heights instead of prominences
 
+            # Calculate percentile to exclude large artifacts
+            if len(self.all_peak_heights) > 0:
+                self.percentile_95 = np.percentile(self.all_peak_heights, self.percentile_cutoff)
+
+                # Count outliers above percentile
+                outliers = np.sum(self.all_peak_heights > self.percentile_95)
+
+                print(f"[Prominence Dialog] Peak height range: {self.all_peak_heights.min():.3f} - {self.all_peak_heights.max():.3f}")
+                print(f"[Prominence Dialog] {self.percentile_cutoff}th percentile: {self.percentile_95:.3f}")
+                print(f"[Prominence Dialog] Outliers excluded from histogram: {outliers} ({100*outliers/len(self.all_peak_heights):.1f}%)")
+            else:
+                self.percentile_95 = None
+
             t_elapsed = time.time() - t_start
             print(f"[Prominence Dialog] Found {len(self.all_peaks)} peaks in {t_elapsed:.2f}s")
 
@@ -256,7 +353,16 @@ class ProminenceThresholdDialog(QDialog):
             return
 
         try:
-            peak_heights = self.all_peak_heights
+            # Filter out outliers above 95th percentile to focus on real breath distribution
+            if self.percentile_95 is not None:
+                peak_heights = self.all_peak_heights[self.all_peak_heights <= self.percentile_95]
+                print(f"[Otsu] Using {len(peak_heights)} peaks (excluded {len(self.all_peak_heights) - len(peak_heights)} outliers)")
+            else:
+                peak_heights = self.all_peak_heights
+
+            if len(peak_heights) < 10:
+                print("[Otsu] Not enough peaks after filtering outliers")
+                return
 
             # Normalize peak heights to [0, 255] for Otsu
             heights_norm = ((peak_heights - peak_heights.min()) /
@@ -293,19 +399,152 @@ class ProminenceThresholdDialog(QDialog):
             thresh_values = bin_centers[:-1] / 255.0 * (peak_heights.max() - peak_heights.min()) + peak_heights.min()
             self.inter_class_variance_curve = (thresh_values, variance)
 
-            self.current_threshold = self.auto_threshold
+            # Calculate local minimum threshold (first local min to the right of Otsu's threshold)
+            self.local_min_threshold = self._calculate_local_minimum_threshold(peak_heights, self.auto_threshold)
+            if self.local_min_threshold is not None:
+                print(f"[Local Min] First local minimum after Otsu: {self.local_min_threshold:.4f}")
+                self.btn_set_local_min.setEnabled(True)  # Enable button if local min exists
+            else:
+                self.btn_set_local_min.setEnabled(False)
 
-            print(f"[Otsu] Auto-detected height threshold: {self.auto_threshold:.4f}")
-            self.lbl_threshold.setText(f"{self.auto_threshold:.4f}")
+            # Use user's previously set threshold if available, otherwise DEFAULT TO OTSU
+            if self.user_threshold is not None:
+                self.current_threshold = self.user_threshold
+                print(f"[Otsu] Using user threshold: {self.user_threshold:.4f} (Otsu calculated: {self.auto_threshold:.4f})")
+            else:
+                self.current_threshold = self.auto_threshold  # DEFAULT TO OTSU
+                print(f"[Otsu] Auto-detected height threshold: {self.auto_threshold:.4f}")
 
-            # Also populate the height threshold field with the same value
-            self.le_threshold_height.setText(f"{self.auto_threshold:.4f}")
+            self.lbl_threshold.setText(f"{self.current_threshold:.4f}")
+
+            # Also populate the height threshold field
+            self.le_threshold_height.setText(f"{self.current_threshold:.4f}")
 
         except Exception as e:
             print(f"[Otsu] Error: {e}")
             import traceback
             traceback.print_exc()
 
+
+    def _calculate_local_minimum_threshold(self, peak_heights, otsu_threshold):
+        """
+        Calculate first local minimum of histogram to the right of Otsu's threshold.
+
+        This provides an alternative threshold that may better separate noise from breaths
+        when there's a clear valley between the two distributions.
+        """
+        try:
+            from scipy.ndimage import gaussian_filter1d
+            from scipy.signal import argrelmin
+
+            # Create histogram with same bins as visual display
+            if self.percentile_95 is not None:
+                hist_range = (peak_heights.min(), self.percentile_95)
+                peaks_for_hist = peak_heights[peak_heights <= self.percentile_95]
+            else:
+                hist_range = None
+                peaks_for_hist = peak_heights
+
+            if len(peaks_for_hist) < 10:
+                print("[Local Min] Not enough peaks for calculation")
+                return None
+
+            counts, bins = np.histogram(peaks_for_hist, bins=self.num_bins, range=hist_range)
+            bin_centers = (bins[:-1] + bins[1:]) / 2
+
+            # Smooth histogram to reduce noise (adaptive sigma based on bin count)
+            sigma = max(1.5, self.num_bins / 50)  # Scale sigma with bin count
+            smoothed_counts = gaussian_filter1d(counts.astype(float), sigma=sigma)
+
+            # Find local minima with adaptive order
+            order = max(2, int(self.num_bins / 40))  # Adaptive order based on bins
+            local_mins = argrelmin(smoothed_counts, order=order)[0]
+
+            print(f"[Local Min] Found {len(local_mins)} local minima in histogram")
+            print(f"[Local Min] Otsu threshold: {otsu_threshold:.4f}")
+            print(f"[Local Min] Histogram range: {bin_centers.min():.4f} - {bin_centers.max():.4f}")
+
+            if len(local_mins) == 0:
+                print("[Local Min] No local minima found in smoothed histogram")
+                return None
+
+            # Find first local minimum to the right of Otsu threshold
+            candidates = []
+            for min_idx in local_mins:
+                min_value = bin_centers[min_idx]
+                if min_value > otsu_threshold:
+                    candidates.append((min_value, smoothed_counts[min_idx]))
+                    print(f"[Local Min] Candidate: {min_value:.4f} (count: {smoothed_counts[min_idx]:.1f})")
+
+            if len(candidates) == 0:
+                print("[Local Min] No local minima found to the right of Otsu threshold")
+                return None
+
+            # Return the first (leftmost) local minimum
+            best_threshold = candidates[0][0]
+            print(f"[Local Min] Selected: {best_threshold:.4f}")
+            return float(best_threshold)
+
+        except Exception as e:
+            print(f"[Local Min] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _on_percentile_changed(self, text):
+        """Callback when percentile cutoff changes."""
+        # Parse percentile from text (e.g., "95%" -> 95)
+        if "100%" in text:
+            self.percentile_cutoff = 100
+        else:
+            self.percentile_cutoff = int(text.replace("%", ""))
+
+        # Recalculate percentile value
+        if self.all_peak_heights is not None and len(self.all_peak_heights) > 0:
+            if self.percentile_cutoff < 100:
+                self.percentile_95 = np.percentile(self.all_peak_heights, self.percentile_cutoff)
+            else:
+                self.percentile_95 = None  # No filtering
+
+        # Recalculate Otsu with new filtered range
+        self._calculate_otsu_threshold()
+
+        # Redraw histogram
+        self._plot_histogram()
+
+    def _on_bins_changed(self, value):
+        """Callback when bin count changes."""
+        self.num_bins = value
+        self._plot_histogram()
+
+    def _set_to_otsu(self):
+        """Set threshold to Otsu's calculated value."""
+        if self.auto_threshold is not None:
+            self.current_threshold = self.auto_threshold
+            self.lbl_threshold.setText(f"{self.current_threshold:.4f}")
+            self.le_threshold_height.setText(f"{self.current_threshold:.4f}")
+            self.btn_reset.setEnabled(False)  # No need to reset if already at Otsu
+            self._plot_histogram()
+            print(f"[Threshold] Set to Otsu: {self.current_threshold:.4f}")
+
+    def _set_to_local_min(self):
+        """Set threshold to local minimum value."""
+        if self.local_min_threshold is not None:
+            self.current_threshold = self.local_min_threshold
+            self.lbl_threshold.setText(f"{self.current_threshold:.4f}")
+            self.le_threshold_height.setText(f"{self.current_threshold:.4f}")
+            self.btn_reset.setEnabled(True)  # Enable reset since we moved away from Otsu
+            self._plot_histogram()
+
+            # Real-time update to main plot
+            if self.parent() is not None:
+                try:
+                    self.parent().plot_host.update_threshold_line(self.current_threshold)
+                    self.parent().plot_host.canvas.draw_idle()
+                except Exception:
+                    pass
+
+            print(f"[Threshold] Set to Local Min: {self.current_threshold:.4f}")
 
     def _toggle_y2_axis(self):
         """Toggle between peak count and inter-class variance on y2 axis."""
@@ -341,9 +580,24 @@ class ProminenceThresholdDialog(QDialog):
 
             peak_heights = self.all_peak_heights
 
-            # Plot histogram with MORE BINS (100 instead of 50)
-            n, bins, patches = ax1.hist(peak_heights, bins=100, color='steelblue',
-                                       alpha=0.7, edgecolor='#1e1e1e', label='Peak Height Distribution')
+            # Use percentile as upper range to exclude large artifacts
+            if self.percentile_95 is not None:
+                hist_range = (peak_heights.min(), self.percentile_95)
+                # Filter peaks for histogram display (but keep all for threshold line positioning)
+                peaks_for_hist = peak_heights[peak_heights <= self.percentile_95]
+                n_excluded = len(peak_heights) - len(peaks_for_hist)
+                pct_excluded = 100 * n_excluded / len(peak_heights) if len(peak_heights) > 0 else 0
+            else:
+                hist_range = None
+                peaks_for_hist = peak_heights
+                n_excluded = 0
+                pct_excluded = 0
+
+            # Plot histogram with user-controlled bin count and restricted range
+            n, bins, patches = ax1.hist(peaks_for_hist, bins=self.num_bins, color='steelblue',
+                                       alpha=0.7, edgecolor='#1e1e1e',
+                                       label=f'Peak Height Distribution (n={len(peaks_for_hist)})',
+                                       range=hist_range)
 
             # Color bars based on threshold (gray = below, red = above)
             if self.current_threshold is not None:
@@ -357,17 +611,35 @@ class ProminenceThresholdDialog(QDialog):
 
             ax1.set_xlabel('Peak Height', fontsize=11, color='#d4d4d4')
             ax1.set_ylabel('Frequency (count)', fontsize=11, color='#d4d4d4')
-            ax1.set_title('Peak Height Distribution (Otsu\'s Method)', fontsize=12,
-                         fontweight='bold', color='#d4d4d4')
+
+            # Title with outlier count if applicable
+            if n_excluded > 0:
+                title_text = f'Peak Height Distribution (Otsu\'s Method)\n{n_excluded} outlier peaks excluded (above {self.percentile_cutoff}th percentile)'
+            else:
+                title_text = 'Peak Height Distribution (Otsu\'s Method)'
+            ax1.set_title(title_text, fontsize=12, fontweight='bold', color='#d4d4d4')
             ax1.grid(True, alpha=0.2, axis='y', color='#666666')
 
-            # Draw THINNER threshold lines (draggable)
+            # Draw FIXED Otsu reference line (thin, gray, dashed)
+            if self.auto_threshold is not None:
+                self.otsu_reference_line = ax1.axvline(self.auto_threshold, color='#888888',
+                                                       linestyle=':', linewidth=1.0,
+                                                       label=f'Otsu = {self.auto_threshold:.4f}',
+                                                       zorder=1)  # Behind draggable line
+
+            # Draw local minimum line (thin, cyan, dotted)
+            if hasattr(self, 'local_min_threshold') and self.local_min_threshold is not None:
+                ax1.axvline(self.local_min_threshold, color='#00cccc',
+                           linestyle=':', linewidth=1.0,
+                           label=f'Local Min = {self.local_min_threshold:.4f}',
+                           zorder=1)
+
+            # Draw draggable threshold line (red, thicker)
             if self.current_threshold is not None:
-                # Vertical line (thinner: linewidth=1.5 instead of 2.5)
                 self.threshold_vline = ax1.axvline(self.current_threshold, color='red',
                                                    linestyle='--', linewidth=1.5,
-                                                   label=f'Threshold = {self.current_threshold:.4f}',
-                                                   picker=5)  # Pickable within 5 pixels
+                                                   label=f'Current = {self.current_threshold:.4f}',
+                                                   picker=5, zorder=2)  # Pickable within 5 pixels
 
             # Secondary y-axis: Toggle between peak count and inter-class variance
             ax2 = ax1.twinx()
@@ -379,8 +651,12 @@ class ProminenceThresholdDialog(QDialog):
             ax2.spines['bottom'].set_color('#666666')
 
             if self.y2_mode == "peak_count":
-                # Compute peak count vs threshold
-                thresh_range = np.linspace(peak_heights.min(), peak_heights.max(), 100)
+                # Compute peak count vs threshold (using filtered range)
+                if self.percentile_95 is not None:
+                    thresh_range = np.linspace(peak_heights.min(), self.percentile_95, 100)
+                else:
+                    thresh_range = np.linspace(peak_heights.min(), peak_heights.max(), 100)
+
                 peak_counts = [np.sum(peak_heights >= t) for t in thresh_range]
 
                 ax2.plot(thresh_range, peak_counts, color='#66cc66', linewidth=2, alpha=0.6,
@@ -473,6 +749,14 @@ class ProminenceThresholdDialog(QDialog):
             # Update height threshold field to match dragged threshold
             self.le_threshold_height.setText(f"{self.current_threshold:.4f}")
 
+            # Real-time update to main plot
+            if self.parent() is not None:
+                try:
+                    self.parent().plot_host.update_threshold_line(self.current_threshold)
+                    self.parent().plot_host.canvas.draw_idle()
+                except Exception as e:
+                    pass  # Silently fail if main plot update doesn't work
+
             # Redraw plot
             self._plot_histogram()
 
@@ -506,5 +790,9 @@ class ProminenceThresholdDialog(QDialog):
         return {
             'prominence': self.current_threshold if self.current_threshold else self.auto_threshold,
             'min_dist': min_dist,
-            'height_threshold': height_thresh  # Now always populated from Otsu's method
+            'height_threshold': height_thresh,  # Now always populated from Otsu's method
+            'percentile_95': self.percentile_95,  # Pass to main window for consistent histogram range
+            'all_peak_heights': self.all_peak_heights,  # Pass to main window for histogram display
+            'histogram_num_bins': self.num_bins,  # Pass bin count for matching histograms
+            'percentile_cutoff': self.percentile_cutoff  # Pass cutoff for remembering setting
         }

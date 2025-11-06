@@ -373,11 +373,18 @@ class PlotHost(QWidget):
         # Single-panel: no grid
         self.ax_main.grid(False)
 
-        # Restore preserved view if desired
+        # Intelligent y-axis scaling: ALWAYS use 99th percentile + padding to avoid artifacts
+        # This prevents huge outliers from distorting the view
+        y_min = np.percentile(y, 1)  # 1st percentile for lower bound
+        y_max = np.percentile(y, 99)  # 99th percentile for upper bound
+        y_range = y_max - y_min
+        padding = 0.25 * y_range  # 25% padding to avoid clipping peaks
+        self.ax_main.set_ylim(y_min - padding, y_max + padding)
+        print(f"[Plot] Auto-scaled Y-axis: {y_min - padding:.3f} to {y_max + padding:.3f} (99th percentile)")
+
+        # Restore preserved X view if desired (but always auto-scale Y)
         if prev_xlim is not None:
             self.ax_main.set_xlim(prev_xlim)
-        if prev_ylim is not None:
-            self.ax_main.set_ylim(prev_ylim)
 
         self._attach_limit_listeners([self.ax_main], mode="single")
         self._store_from_axes(mode="single")
@@ -521,7 +528,7 @@ class PlotHost(QWidget):
                 linewidth=1.2,  # Thinner
                 color="red",
                 alpha=0.8,
-                zorder=2,
+                zorder=1000,  # Very high z-order to be on top of Y2 axis and always pickable
                 label="Height Threshold",
                 picker=5  # Pickable within 5 pixels
             )
@@ -613,7 +620,20 @@ class PlotHost(QWidget):
         return None
 
     def _show_peak_height_histogram(self):
-        """Show a horizontal histogram of all peak heights while dragging threshold."""
+        """Show a horizontal histogram of all peak heights while dragging threshold.
+
+        NOTE: Known limitation - histogram shows peaks from last detection:
+        - If dialog was used: Shows full peak distribution (threshold=0)
+        - If only Apply was used: Shows peaks passing current threshold
+        This causes inconsistency where dragging histogram may differ from dialog histogram.
+
+        Considered solutions:
+        1. Re-detect peaks with threshold=0 on first drag (may cause lag on long recordings)
+        2. Always cache threshold=0 peaks in background (memory overhead)
+        3. Wait for ML refactor where all peaks are kept and labeled (planned approach)
+
+        Current approach: Simple and fast - use cached peaks from last detection.
+        """
         try:
             if not self.fig.axes:
                 return
@@ -626,13 +646,54 @@ class PlotHost(QWidget):
 
             import numpy as np
 
-            # Use peak heights from auto-detect (already calculated, no recalculation needed)
+            st = main_window.state
+
+            # Use cached peak heights if available (from dialog or previous detection)
+            # Otherwise collect from currently detected peaks
             if not hasattr(main_window, 'all_peak_heights') or main_window.all_peak_heights is None:
-                print("[Histogram] No peak heights available - run auto-detect first")
-                return
+                # Collect peak heights from currently detected peaks
+                all_heights = []
+
+                for s in range(len(st.peaks_by_sweep)):
+                    pks = st.peaks_by_sweep.get(s, None)
+                    if pks is not None and len(pks) > 0:
+                        # Get processed data for this sweep
+                        y_proc = main_window._get_processed_for(st.analyze_chan, s)
+                        all_heights.extend(y_proc[pks])
+
+                if len(all_heights) == 0:
+                    print("[Histogram] No peaks detected yet")
+                    return
+
+                main_window.all_peak_heights = np.array(all_heights)
 
             peak_heights = main_window.all_peak_heights
-            print(f"[Histogram] Using {len(peak_heights)} peak heights from auto-detect")
+
+            # Calculate percentile cutoff if not already available
+            num_bins = getattr(main_window, 'histogram_num_bins', 200)
+            percentile_cutoff = getattr(main_window, 'histogram_percentile_cutoff', 99)
+
+            if not hasattr(main_window, 'percentile_95') or main_window.percentile_95 is None:
+                if percentile_cutoff < 100:
+                    main_window.percentile_95 = np.percentile(peak_heights, percentile_cutoff)
+                    print(f"[Histogram] Calculated {percentile_cutoff}th percentile on-the-fly: {main_window.percentile_95:.3f}")
+                else:
+                    main_window.percentile_95 = None
+
+            percentile_95 = main_window.percentile_95
+            print(f"[Histogram] Using {len(peak_heights)} peaks, {num_bins} bins, {percentile_cutoff}% cutoff")
+
+            if percentile_95 is not None:
+                # Filter peaks for histogram to match dialog display
+                peaks_for_hist = peak_heights[peak_heights <= percentile_95]
+                hist_range = (peaks_for_hist.min(), percentile_95)
+                n_excluded = len(peak_heights) - len(peaks_for_hist)
+                pct_excluded = 100 * n_excluded / len(peak_heights) if len(peak_heights) > 0 else 0
+                print(f"[Histogram] Excluding {n_excluded} outliers ({pct_excluded:.1f}%) above percentile ({percentile_95:.3f})")
+            else:
+                peaks_for_hist = peak_heights
+                hist_range = None
+                n_excluded = 0
 
             # Get current x-axis limits to position histogram at left edge
             xlim = ax.get_xlim()
@@ -644,8 +705,8 @@ class PlotHost(QWidget):
             if current_threshold is None:
                 return
 
-            # Create histogram data
-            counts, bins = np.histogram(peak_heights, bins=50)
+            # Create histogram data with SAME bins and range as dialog
+            counts, bins = np.histogram(peaks_for_hist, bins=num_bins, range=hist_range)
             bin_centers = (bins[:-1] + bins[1:]) / 2
 
             # Scale histogram to 10% of x-axis range
@@ -659,24 +720,24 @@ class PlotHost(QWidget):
                 below_mask = bin_centers < current_threshold
                 above_mask = bin_centers >= current_threshold
 
-                # Gray fill for below threshold
+                # Gray fill for below threshold (HIGH Z-ORDER to show on top)
                 if np.any(below_mask):
                     line_below = ax.plot(x_min + scaled_counts[below_mask], bin_centers[below_mask],
-                                        'k-', linewidth=1.0, alpha=0.8, zorder=2)[0]
+                                        'k-', linewidth=1.0, alpha=0.8, zorder=100)[0]
                     fill_below = ax.fill_betweenx(bin_centers[below_mask],
                                                   x_min, x_min + scaled_counts[below_mask],
-                                                  alpha=0.3, color='gray', zorder=1)
+                                                  alpha=0.3, color='gray', zorder=99)
                     self._threshold_histogram = [line_below, fill_below]
                 else:
                     self._threshold_histogram = []
 
-                # Red fill for above threshold
+                # Red fill for above threshold (HIGH Z-ORDER to show on top)
                 if np.any(above_mask):
                     line_above = ax.plot(x_min + scaled_counts[above_mask], bin_centers[above_mask],
-                                        'k-', linewidth=1.0, alpha=0.8, zorder=2)[0]
+                                        'k-', linewidth=1.0, alpha=0.8, zorder=100)[0]
                     fill_above = ax.fill_betweenx(bin_centers[above_mask],
                                                   x_min, x_min + scaled_counts[above_mask],
-                                                  alpha=0.3, color='red', zorder=1)
+                                                  alpha=0.3, color='red', zorder=99)
                     if self._threshold_histogram is None:
                         self._threshold_histogram = []
                     self._threshold_histogram.extend([line_above, fill_above])
@@ -740,33 +801,23 @@ class PlotHost(QWidget):
             t_exoff=None, y_exoff=None,
             size=30):
         """
-        Onsets  : green triangles up (at signal value)
-        Offsets : orange triangles down (at signal value)
-        Exp. min: blue squares (vertically offset below signal)
-        Exp. off: purple diamonds (vertically offset further below signal)
+        Plot breath event markers at actual data points (no vertical offsets).
 
-        Vertical offsetting helps visualize when markers overlap at same location.
+        Onsets  : green triangles up
+        Offsets : orange triangles down
+        Exp. min: blue squares
+        Exp. off: purple diamonds
         """
         if not self.fig.axes:
             return
         ax = self.fig.axes[0]
 
-        # Get y-axis range for computing vertical offsets
-        ylim = ax.get_ylim()
-        y_range = ylim[1] - ylim[0]
-
-        # Vertical offset amounts (as fraction of y-range)
-        # Just enough to distinguish overlapping markers
-        offset_expmin = -0.001 * y_range   # 0.1% below signal
-        offset_expoff = +0.001 * y_range   # 0.1% above signal
-
-        def _upd(scatter_attr, tx, ty, color, marker, y_offset=0):
+        def _upd(scatter_attr, tx, ty, color, marker):
             import numpy as np
             pts = None
             if tx is not None and ty is not None and len(tx) > 0:
-                # Apply vertical offset
-                ty_offset = np.asarray(ty) + y_offset
-                pts = np.column_stack([tx, ty_offset])
+                # No vertical offset - plot at actual data points
+                pts = np.column_stack([tx, ty])
             sc = getattr(self, scatter_attr)
             if pts is None:
                 if sc is not None:
@@ -781,11 +832,11 @@ class PlotHost(QWidget):
             else:
                 sc.set_offsets(pts)
 
-        # Plot markers with vertical offsets
-        _upd("scatter_onsets",  t_on,   y_on,   "limegreen", "^", y_offset=0)           # No offset
-        _upd("scatter_offsets", t_off,  y_off,  "orange",    "v", y_offset=0)           # No offset
-        _upd("scatter_expmins", t_exp,  y_exp,  "blue",      "s", y_offset=offset_expmin)  # 3% below
-        _upd("scatter_expoffs", t_exoff,y_exoff,EXPOFF_COLOR,"D", y_offset=offset_expoff)  # 6% below
+        # Plot markers at actual data points (no vertical offsets)
+        _upd("scatter_onsets",  t_on,   y_on,   "limegreen", "^")
+        _upd("scatter_offsets", t_off,  y_off,  "orange",    "v")
+        _upd("scatter_expmins", t_exp,  y_exp,  "blue",      "s")
+        _upd("scatter_expoffs", t_exoff,y_exoff,EXPOFF_COLOR,"D")
 
         self.canvas.draw_idle()
 
@@ -837,6 +888,7 @@ class PlotHost(QWidget):
             # This allows editing modes (Mark Sniff, Add Peaks, etc.) to work when Y2 is displayed
             ax_y2.set_navigate(False)  # Disable navigation (zoom/pan)
             ax_y2.patch.set_visible(False)  # Make background transparent/non-interactive
+            ax_y2.patch.set_picker(None)  # Explicitly disable picking on patch
 
         # optional downsample
         import numpy as np

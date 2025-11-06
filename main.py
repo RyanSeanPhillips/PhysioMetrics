@@ -298,7 +298,7 @@ class MainWindow(QMainWindow):
         # Defaults: 0.5–20 Hz band, all off initially
         self.HighPassVal.setText("0.5")
         self.LowPassVal.setText("20")
-        self.HighPass_checkBox.setChecked(False)
+        self.HighPass_checkBox.setChecked(True)  # Default ON to remove baseline drift
         self.LowPass_checkBox.setChecked(True)
         self.InvertSignal_checkBox.setChecked(False)
 
@@ -3361,6 +3361,26 @@ if __name__ == "__main__":
     )
     splash.show()
     app.processEvents()
+
+    # Pre-compile Numba functions if available (10-50× speedup for breath detection)
+    try:
+        from core.peaks import _USE_NUMBA_VERSION, warmup_numba
+        if _USE_NUMBA_VERSION:
+            splash.showMessage(
+                "Pre-compiling optimized algorithms...",
+                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
+                Qt.GlobalColor.white
+            )
+            app.processEvents()
+            warmup_numba()
+            splash.showMessage(
+                "Loading PlethApp...",
+                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
+                Qt.GlobalColor.white
+            )
+            app.processEvents()
+    except Exception as e:
+        print(f"[Startup] Numba warmup failed (will use Python version): {e}")
 
     # Create main window (this is where the loading time happens)
     w = MainWindow()

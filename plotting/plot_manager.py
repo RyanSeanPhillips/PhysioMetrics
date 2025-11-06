@@ -171,17 +171,19 @@ class PlotManager:
                     # Sigh markers have ~7% offset, so add that for ylim calculation
                     y_values.append(y[idx])
 
-        # Calculate ylim with padding
+        # Calculate ylim with percentile-based scaling (matching core/plotting.py autoscale)
         if len(y_values) > 0:
             y_values = np.array(y_values)
-            y_min = np.nanmin(y_values)
-            y_max = np.nanmax(y_values)
+            # Use percentiles to avoid artifacts and huge outliers
+            y_min = np.percentile(y_values, 1)   # 1st percentile
+            y_max = np.percentile(y_values, 99)  # 99th percentile
 
-            # Add 5% padding
+            # Add 25% padding to avoid clipping peaks (matching core/plotting.py)
             y_range = y_max - y_min
             if y_range > 0:
-                padding = 0.05 * y_range
+                padding = 0.25 * y_range
                 ax.set_ylim(y_min - padding, y_max + padding)
+                print(f"[Plot Manager] Auto-scaled Y-axis (excluding omitted): {y_min - padding:.3f} to {y_max + padding:.3f}")
 
     def _draw_dual_subplot_plot(self, t_full, y_pleth, t_plot, spans_plot, title, sweep_idx, t0):
         """Draw dual subplot layout with pleth trace on top and event channel on bottom."""
@@ -230,6 +232,15 @@ class PlotManager:
             ax_pleth.set_title(title)
         ax_pleth.set_ylabel(st.analyze_chan or "Signal")
         ax_pleth.grid(False)
+
+        # Apply percentile-based Y-axis autoscaling (matching single-panel behavior)
+        if len(y_pleth) > 0:
+            y_min = np.percentile(y_pleth, 1)   # 1st percentile
+            y_max = np.percentile(y_pleth, 99)  # 99th percentile
+            y_range = y_max - y_min
+            padding = 0.25 * y_range  # 25% padding
+            ax_pleth.set_ylim(y_min - padding, y_max + padding)
+            print(f"[Dual Plot] Auto-scaled Y-axis: {y_min - padding:.3f} to {y_max + padding:.3f} (99th percentile)")
 
         # Plot event trace on bottom subplot
         self._plot_event_trace(ax_event, t_full, t_plot, spans_plot, t0)
