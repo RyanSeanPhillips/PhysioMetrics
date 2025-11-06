@@ -1177,7 +1177,7 @@ Options</string>
                 <rect>
                  <x>90</x>
                  <y>20</y>
-                 <width>54</width>
+                 <width>57</width>
                  <height>18</height>
                 </rect>
                </property>
@@ -1189,7 +1189,7 @@ Options</string>
                </property>
                <property name="minimumSize">
                 <size>
-                 <width>54</width>
+                 <width>57</width>
                  <height>18</height>
                 </size>
                </property>
@@ -1332,6 +1332,28 @@ QPushButton:hover {
                </property>
                <property name="text">
                 <string>More Options</string>
+               </property>
+              </widget>
+              <widget class="QDoubleSpinBox" name="PeakPromValueSpinBox">
+               <property name="geometry">
+                <rect>
+                 <x>150</x>
+                 <y>20</y>
+                 <width>81</width>
+                 <height>22</height>
+                </rect>
+               </property>
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                 <horstretch>81</horstretch>
+                 <verstretch>18</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>81</width>
+                 <height>18</height>
+                </size>
                </property>
               </widget>
              </widget>
@@ -2024,7 +2046,7 @@ QPushButton:pressed {
 </string>
                     </property>
                     <property name="text">
-                     <string>Omit Sweep</string>
+                     <string>Omit</string>
                     </property>
                     <property name="startHidden" stdset="0">
                      <bool>false</bool>

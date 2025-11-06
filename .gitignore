@@ -17,6 +17,7 @@ ENV/
 # IDE/project
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store

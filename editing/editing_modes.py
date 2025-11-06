@@ -46,6 +46,15 @@ class EditingModes:
         self._sniff_edge_mode = None  # 'start' or 'end' if dragging an edge, None if creating new region
         self._sniff_region_index = None  # Index of region being edited
 
+        # Omit Region mode state
+        self._omit_region_mode = False
+        self._omit_region_remove_mode = False  # True for removing regions, False for adding
+        self._omit_region_start_x = None  # X-coordinate where drag started
+        self._omit_region_drag_artist = None  # Visual indicator while dragging
+        self._omit_edge_mode = None  # 'start' or 'end' if dragging an edge, None if creating new region
+        self._omit_region_index = None  # Index of region being edited
+        self._key_cid = None  # Connection ID for matplotlib key press events (omit mode)
+
         # Peak editing window size
         self._peak_edit_half_win_s = 0.08  # ±80ms window for peak operations
 
@@ -70,7 +79,7 @@ class EditingModes:
 
     def handle_key_press_event(self, event) -> bool:
         """
-        Handle keyboard events for move point mode.
+        Handle keyboard events for editing modes.
 
         Args:
             event: QKeyEvent from MainWindow
@@ -78,6 +87,10 @@ class EditingModes:
         Returns:
             True if event was handled, False otherwise
         """
+        # Note: Omit region mode uses matplotlib canvas key events (spacebar)
+        # not Qt key events, so no handler needed here for snap functionality
+
+        # Move point mode handlers
         if self._move_point_mode and self._selected_point:
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 # Move point left or right
@@ -1583,3 +1596,565 @@ class EditingModes:
             self._sniff_artists.append(artist)
 
         self.window.plot_host.canvas.draw_idle()
+
+    # ========== Omit Region Mode ==========
+
+    def toggle_omit_region_mode(self, remove_mode=False):
+        """Toggle omit region selection mode on/off."""
+        if self._omit_region_mode:
+            # Turn off
+            self._exit_omit_region_mode()
+        else:
+            # Turn on
+            self._enter_omit_region_mode(remove_mode)
+
+    def _enter_omit_region_mode(self, remove_mode=False):
+        """Enter omit region selection mode."""
+        self._omit_region_mode = True
+        self._omit_region_remove_mode = remove_mode
+
+        # Turn off matplotlib toolbar modes
+        self.window.plot_host.turn_off_toolbar_modes()
+
+        # Turn OFF other edit modes
+        if getattr(self, "_add_peaks_mode", False):
+            self._add_peaks_mode = False
+            self.window.addPeaksButton.blockSignals(True)
+            self.window.addPeaksButton.setChecked(False)
+            self.window.addPeaksButton.blockSignals(False)
+            self.window.addPeaksButton.setText("Add Peaks")
+
+        if getattr(self, "_delete_peaks_mode", False):
+            self._delete_peaks_mode = False
+            self.window.deletePeaksButton.blockSignals(True)
+            self.window.deletePeaksButton.setChecked(False)
+            self.window.deletePeaksButton.blockSignals(False)
+            self.window.deletePeaksButton.setText("Delete Peaks")
+
+        if getattr(self, "_add_sigh_mode", False):
+            self._add_sigh_mode = False
+            self.window.addSighButton.blockSignals(True)
+            self.window.addSighButton.setChecked(False)
+            self.window.addSighButton.blockSignals(False)
+            self.window.addSighButton.setText("ADD/DEL Sigh")
+
+        if getattr(self, "_move_point_mode", False):
+            self._move_point_mode = False
+            self.window.movePointButton.blockSignals(True)
+            self.window.movePointButton.setChecked(False)
+            self.window.movePointButton.blockSignals(False)
+            self.window.movePointButton.setText("Move Point")
+
+        if getattr(self, "_mark_sniff_mode", False):
+            self._mark_sniff_mode = False
+            self.window.markSniffButton.blockSignals(True)
+            self.window.markSniffButton.setChecked(False)
+            self.window.markSniffButton.blockSignals(False)
+            self.window.markSniffButton.setText("Mark Sniff")
+
+        # Update omit button appearance
+        self.window.OmitSweepButton.setChecked(True)
+        self.window.OmitSweepButton.setText("Omit (ON)")
+        msg = "OMIT REGION MODE: Click-drag to create/adjust | Ctrl+click to delete | Ctrl+Shift+click full sweep | Press 'R' to snap to breaths"
+        try:
+            self.window._log_status_message(msg, 0)  # 0 = persistent message
+            self.window._persistent_status_message = msg  # Store for refresh
+        except Exception: pass
+
+        # Set up event handlers
+        self.window.plot_host.set_click_callback(self._on_plot_click_omit_region)
+        self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+
+        # Give focus to the canvas so it can receive key events
+        self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.window.plot_host.canvas.setFocus()
+
+        # Connect matplotlib events for drag functionality and keyboard
+        self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_omit_region_drag)
+        self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_omit_region_release)
+        self._key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_omit_region_key_press)
+
+    def _exit_omit_region_mode(self):
+        """Exit omit region selection mode."""
+        self._omit_region_mode = False
+        self._omit_region_remove_mode = False
+
+        # Update button appearance
+        self.window.OmitSweepButton.setChecked(False)
+        self.window._refresh_omit_button_label()
+
+        # Disconnect matplotlib events
+        if self._motion_cid is not None:
+            self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+            self._motion_cid = None
+        if self._release_cid is not None:
+            self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+            self._release_cid = None
+        if self._key_cid is not None:
+            self.window.plot_host.canvas.mpl_disconnect(self._key_cid)
+            self._key_cid = None
+
+        # Clear drag artist
+        if self._omit_region_drag_artist:
+            try:
+                self._omit_region_drag_artist.remove()
+            except:
+                pass
+            self._omit_region_drag_artist = None
+            self.window.plot_host.canvas.draw_idle()
+
+        # Clear click callback and restore cursor
+        self.window.plot_host.clear_click_callback()
+        self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+
+        # Clear persistent status message
+        try:
+            self.window._persistent_status_message = None
+            self.window._log_status_message("Exited omit region mode", 3000)
+        except Exception: pass
+
+    def _on_plot_click_omit_region(self, xdata, ydata, event):
+        """Start marking an omitted region (click-and-drag) or grab an edge to adjust.
+        Ctrl+click on a region to delete it.
+        Ctrl+Shift+click to toggle full sweep omission."""
+        if not getattr(self, "_omit_region_mode", False):
+            return
+        if event.inaxes is None or xdata is None:
+            return
+
+        # Check modifier keys
+        modifiers = QApplication.keyboardModifiers()
+        shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        ctrl_held = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+
+        # Get current sweep
+        st = self.window.state
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+
+        # Check if full sweep is already omitted (unless doing Ctrl+Shift to toggle)
+        if s in st.omitted_sweeps and not (ctrl_held and shift_held):
+            print(f"[omit-region] Full sweep {s} already omitted - ignoring region operations")
+            try: self.window._log_status_message("Full sweep already omitted (use Ctrl+Shift+click to un-omit)", 2000)
+            except Exception: pass
+            return
+
+        # Ctrl+Shift: Toggle full sweep (DON'T exit mode, keep button ON)
+        if ctrl_held and shift_held:
+            print(f"[omit-region] Ctrl+Shift detected in click handler - toggling full sweep")
+            # Get current sweep
+            st = self.window.state
+            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+
+            # Toggle sweep omission directly (keep mode active)
+            if s in st.omitted_sweeps:
+                st.omitted_sweeps.remove(s)
+                try: self.window._log_status_message(f"Sweep {s+1}: included", 2000)
+                except Exception: pass
+            else:
+                st.omitted_sweeps.add(s)
+                # Clear smaller omitted regions when full sweep is omitted (they're redundant)
+                if s in st.omitted_ranges:
+                    print(f"[omit-region] Clearing {len(st.omitted_ranges[s])} smaller regions (full sweep now omitted)")
+                    del st.omitted_ranges[s]
+                try: self.window._log_status_message(f"Sweep {s+1}: omitted (cleared region markers)", 2000)
+                except Exception: pass
+
+            # Refresh and restore persistent message
+            self.window._refresh_omit_button_label()
+            self.window.redraw_main_plot()
+            if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+                try: self.window._log_status_message(self.window._persistent_status_message, 0)
+                except Exception: pass
+            return
+
+        # Get current sweep
+        st = self.window.state
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+
+        # Get omitted regions for this sweep
+        regions = st.omitted_ranges.get(s, [])
+
+        # Convert to plot time for comparison
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+        else:
+            t0 = 0.0
+
+        sr_hz = st.sr_hz if st.sr_hz else 1000.0
+
+        # CTRL+CLICK (no shift): Delete region
+        if ctrl_held and not shift_held and regions:
+            for i, (i_start, i_end) in enumerate(regions):
+                t_start = i_start / sr_hz - t0
+                t_end = i_end / sr_hz - t0
+
+                # Check if click is INSIDE this region
+                if t_start <= xdata <= t_end:
+                    # Delete this region
+                    del st.omitted_ranges[s][i]
+                    if not st.omitted_ranges[s]:
+                        del st.omitted_ranges[s]
+                    print(f"[omit-region] Deleted region {i}: {t_start:.3f} - {t_end:.3f} s")
+
+                    self.window.redraw_main_plot()
+                    # Restore persistent message
+                    if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+                        try: self.window._log_status_message(self.window._persistent_status_message, 0)
+                        except Exception: pass
+                    return
+
+        # Edge detection threshold (in plot time units)
+        edge_threshold = 0.3  # seconds
+
+        # Check each region for edge proximity (for adjusting edges)
+        for i, (i_start, i_end) in enumerate(regions):
+            t_start = i_start / sr_hz - t0
+            t_end = i_end / sr_hz - t0
+
+            # Check if near start edge
+            if abs(xdata - t_start) < edge_threshold:
+                self._omit_edge_mode = 'start'
+                self._omit_region_index = i
+                self._omit_region_start_x = t_end  # The other edge stays fixed
+                print(f"[omit-region] Grabbed START edge of region {i}")
+                return
+
+            # Check if near end edge
+            if abs(xdata - t_end) < edge_threshold:
+                self._omit_edge_mode = 'end'
+                self._omit_region_index = i
+                self._omit_region_start_x = t_start  # The other edge stays fixed
+                print(f"[omit-region] Grabbed END edge of region {i}")
+                return
+
+        # Not near any edge - start creating new region (or removing if in remove mode)
+        self._omit_edge_mode = None
+        self._omit_region_index = None
+        self._omit_region_start_x = xdata
+        print(f"[omit-region] Started new region at x={xdata:.3f}")
+
+    def _on_omit_region_key_press(self, event):
+        """Handle matplotlib canvas key press events for omit region mode."""
+        if not getattr(self, "_omit_region_mode", False):
+            return
+
+        print(f"[omit-region] Canvas key press: '{event.key}'")
+
+        # 'r' key to snap regions to breath onsets (R for "Region snap")
+        if event.key in ('r', 'R'):
+            print(f"[omit-region] R key detected on canvas, calling snap function")
+            self._snap_all_omit_regions_to_breaths()
+
+    def _on_omit_region_drag(self, event):
+        """Update visual indicator while dragging to mark omitted region."""
+        if not getattr(self, "_omit_region_mode", False):
+            return
+        if self._omit_region_start_x is None or event.inaxes is None or event.xdata is None:
+            return
+
+        # Get plot axes
+        ax = self.window.plot_host.ax_main
+        if ax is None:
+            return
+
+        # Remove previous drag indicator
+        if self._omit_region_drag_artist:
+            try:
+                self._omit_region_drag_artist.remove()
+            except:
+                pass
+
+        # Draw semi-transparent rectangle
+        x_start = self._omit_region_start_x
+        x_end = event.xdata
+        x_left = min(x_start, x_end)
+        x_right = max(x_start, x_end)
+
+        # Choose color based on mode (gray for add, red for remove)
+        color = 'red' if self._omit_region_remove_mode else 'gray'
+        self._omit_region_drag_artist = ax.axvspan(x_left, x_right, alpha=0.3, color=color, zorder=10)
+        self.window.plot_host.canvas.draw_idle()
+
+    def _on_omit_region_release(self, event):
+        """Finalize the omitted region when mouse is released."""
+        if not getattr(self, "_omit_region_mode", False):
+            return
+        if self._omit_region_start_x is None or event.inaxes is None or event.xdata is None:
+            return
+
+        x_start = self._omit_region_start_x
+        x_end = event.xdata
+        x_left = min(x_start, x_end)
+        x_right = max(x_start, x_end)
+
+        # Minimum width check (avoid accidental clicks)
+        if abs(x_right - x_left) < 0.05:  # Less than 50ms
+            print(f"[omit-region] Region too small, ignoring")
+            self._omit_region_start_x = None
+            self._omit_edge_mode = None
+            self._omit_region_index = None
+            if self._omit_region_drag_artist:
+                try:
+                    self._omit_region_drag_artist.remove()
+                except:
+                    pass
+                self._omit_region_drag_artist = None
+                self.window.plot_host.canvas.draw_idle()
+            return
+
+        # Get current sweep and convert plot time to sample indices
+        st = self.window.state
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        sr_hz = st.sr_hz if st.sr_hz else 1000.0
+
+        # Adjust for stim normalization
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_left_absolute = x_left + t0
+            t_right_absolute = x_right + t0
+        else:
+            t_left_absolute = x_left
+            t_right_absolute = x_right
+
+        # Note: Snapping disabled for now - user may want to mark artifacts before breath detection
+        # Can add a "Snap Regions to Breaths" button later if needed
+        # t_left_absolute, t_right_absolute = self._snap_omit_to_breath_events(s, t_left_absolute, t_right_absolute)
+
+        # Convert to sample indices
+        i_left = int(t_left_absolute * sr_hz)
+        i_right = int(t_right_absolute * sr_hz)
+
+        # Additional check: Ensure minimum width of at least 10 samples
+        if abs(i_right - i_left) < 10:
+            print(f"[omit-region] Region too small in samples ({abs(i_right - i_left)} samples), ignoring")
+            self._reset_omit_region_state()
+            if self._omit_region_drag_artist:
+                try:
+                    self._omit_region_drag_artist.remove()
+                except:
+                    pass
+                self._omit_region_drag_artist = None
+                self.window.plot_host.canvas.draw_idle()
+            return
+
+        # Handle edge adjustment vs new region
+        if self._omit_edge_mode and self._omit_region_index is not None:
+            # Adjusting an existing region's edge
+            if s not in st.omitted_ranges or self._omit_region_index >= len(st.omitted_ranges[s]):
+                # Region no longer exists, bail out
+                self._reset_omit_region_state()
+                return
+
+            old_i_start, old_i_end = st.omitted_ranges[s][self._omit_region_index]
+
+            if self._omit_edge_mode == 'start':
+                # Moving start edge
+                new_i_start = min(i_left, i_right)
+                st.omitted_ranges[s][self._omit_region_index] = (new_i_start, old_i_end)
+                print(f"[omit-region] Adjusted START edge of region {self._omit_region_index}")
+            else:  # 'end'
+                # Moving end edge
+                new_i_end = max(i_left, i_right)
+                st.omitted_ranges[s][self._omit_region_index] = (old_i_start, new_i_end)
+                print(f"[omit-region] Adjusted END edge of region {self._omit_region_index}")
+
+        elif self._omit_region_remove_mode:
+            # Remove mode: Find and remove overlapping ranges
+            if s in st.omitted_ranges:
+                new_ranges = []
+                for (i0, i1) in st.omitted_ranges[s]:
+                    # Keep ranges that don't overlap with selected region
+                    if i1 < i_left or i0 > i_right:
+                        new_ranges.append((i0, i1))
+                    else:
+                        # Trim overlapping ranges
+                        if i0 < i_left:
+                            new_ranges.append((i0, min(i1, i_left)))
+                        if i1 > i_right:
+                            new_ranges.append((max(i0, i_right), i1))
+
+                if new_ranges:
+                    st.omitted_ranges[s] = new_ranges
+                else:
+                    del st.omitted_ranges[s]
+        else:
+            # Add mode: Append new range
+            if s not in st.omitted_ranges:
+                st.omitted_ranges[s] = []
+            st.omitted_ranges[s].append((i_left, i_right))
+
+            print(f"[omit-region] Added region to sweep {s}: samples {i_left}-{i_right} (time {x_left:.2f}-{x_right:.2f}s)")
+            print(f"[omit-region] Total regions for sweep {s}: {len(st.omitted_ranges[s])}")
+            print(f"[omit-region] All regions: {st.omitted_ranges.get(s, [])}")
+
+        # Merge overlapping regions
+        self._merge_omit_regions(s)
+
+        # Reset state and redraw
+        self._reset_omit_region_state()
+        print(f"[omit-region] Calling redraw_main_plot()...")
+        self.window.redraw_main_plot()
+
+        # Restore persistent status message after redraw
+        if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+            try: self.window._log_status_message(self.window._persistent_status_message, 0)
+            except Exception: pass
+
+    def _reset_omit_region_state(self):
+        """Reset omit region drag state."""
+        self._omit_region_start_x = None
+        self._omit_edge_mode = None
+        self._omit_region_index = None
+        if self._omit_region_drag_artist:
+            try:
+                self._omit_region_drag_artist.remove()
+            except:
+                pass
+            self._omit_region_drag_artist = None
+            self.window.plot_host.canvas.draw_idle()
+
+    def _snap_all_omit_regions_to_breaths(self):
+        """Snap all omitted regions on current sweep to breath onsets (onset to onset)."""
+        st = self.window.state
+        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+
+        if s not in st.omitted_ranges:
+            try: self.window._log_status_message("No omitted regions to snap on this sweep", 2000)
+            except Exception: pass
+            return
+
+        # Get breath events
+        breaths = st.breath_by_sweep.get(s, {})
+        onsets = np.asarray(breaths.get('onsets', []), dtype=int)
+
+        if onsets.size == 0:
+            try: self.window._log_status_message("No breath onsets detected - run peak detection first", 3000)
+            except Exception: pass
+            return
+
+        # Get current trace for time conversion
+        t, y = self.window._current_trace()
+        if t is None:
+            return
+
+        sr_hz = st.sr_hz if st.sr_hz else 1000.0
+        regions = st.omitted_ranges[s]
+        snapped_regions = []
+
+        for (i_start, i_end) in regions:
+            # Convert to time
+            t_start = i_start / sr_hz
+            t_end = i_end / sr_hz
+
+            # Snap using existing function
+            t_start_snapped, t_end_snapped = self._snap_omit_to_breath_events(s, t_start, t_end)
+
+            # Convert back to sample indices
+            i_start_snapped = int(t_start_snapped * sr_hz)
+            i_end_snapped = int(t_end_snapped * sr_hz)
+
+            snapped_regions.append((i_start_snapped, i_end_snapped))
+
+        # Update state
+        st.omitted_ranges[s] = snapped_regions
+
+        # Merge any overlapping regions after snapping
+        self._merge_omit_regions(s)
+
+        # Redraw and restore message
+        self.window.redraw_main_plot()
+        if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+            try: self.window._log_status_message(self.window._persistent_status_message, 0)
+            except Exception: pass
+
+        print(f"[omit-region] Snapped {len(regions)} region(s) to breath onsets")
+
+    def _snap_omit_to_breath_events(self, sweep_idx: int, start_time: float, end_time: float):
+        """Snap omit region edges to nearest breath events.
+
+        Both edges snap to inspiratory onsets (onset to onset).
+        This captures complete breaths within the region.
+        """
+        # Get current trace to convert indices to times
+        t, y = self.window._current_trace()
+        if t is None:
+            print("[omit-region] No trace available for snapping")
+            return start_time, end_time
+
+        # Get breath events for this sweep
+        breaths = self.window.state.breath_by_sweep.get(sweep_idx, {})
+        onsets = np.asarray(breaths.get('onsets', []), dtype=int)
+
+        if onsets.size == 0:
+            print("[omit-region] No breath onsets available for snapping")
+            return start_time, end_time
+
+        onset_times = t[onsets]
+        snapped_start = start_time
+        snapped_end = end_time
+
+        # Snap start to nearest onset (prefer earlier onset if tie)
+        distances_start = np.abs(onset_times - start_time)
+        nearest_start_idx = np.argmin(distances_start)
+
+        # Only snap if within reasonable distance (e.g., 1 second)
+        if distances_start[nearest_start_idx] < 1.0:
+            snapped_start = onset_times[nearest_start_idx]
+            print(f"[omit-region] Snapped START to onset at {snapped_start:.3f}s (was {start_time:.3f}s)")
+
+        # Snap end to nearest onset (prefer later onset if tie)
+        # Find onsets that are after the start
+        later_onsets = onset_times[onset_times > snapped_start]
+        if later_onsets.size > 0:
+            distances_end = np.abs(later_onsets - end_time)
+            nearest_end_idx = np.argmin(distances_end)
+
+            # Only snap if within reasonable distance (e.g., 1 second)
+            if distances_end[nearest_end_idx] < 1.0:
+                snapped_end = later_onsets[nearest_end_idx]
+                print(f"[omit-region] Snapped END to onset at {snapped_end:.3f}s (was {end_time:.3f}s)")
+
+        return snapped_start, snapped_end
+
+    def _merge_omit_regions(self, sweep_idx: int):
+        """Merge overlapping or directly adjacent omitted regions for a given sweep."""
+        st = self.window.state
+        if sweep_idx not in st.omitted_ranges:
+            return
+
+        regions = st.omitted_ranges[sweep_idx]
+        if len(regions) <= 1:
+            return
+
+        # Convert sample indices to times for merging
+        sr_hz = st.sr_hz if st.sr_hz else 1000.0
+        time_regions = [(i_start / sr_hz, i_end / sr_hz) for (i_start, i_end) in regions]
+
+        # Sort regions by start time
+        time_regions = sorted(time_regions, key=lambda x: x[0])
+
+        # Merge overlapping or directly adjacent regions
+        merged = []
+        current_start, current_end = time_regions[0]
+
+        for start, end in time_regions[1:]:
+            if start <= current_end:  # Overlapping or directly adjacent
+                # Merge by extending current region
+                current_end = max(current_end, end)
+                print(f"[omit-region] Merged overlapping regions into: {current_start:.3f} - {current_end:.3f}s")
+            else:
+                # No overlap - save current and start new
+                merged.append((current_start, current_end))
+                current_start, current_end = start, end
+
+        # Add the last region
+        merged.append((current_start, current_end))
+
+        # Convert back to sample indices
+        merged_samples = [(int(t_start * sr_hz), int(t_end * sr_hz)) for (t_start, t_end) in merged]
+
+        # Update state
+        st.omitted_ranges[sweep_idx] = merged_samples
+        print(f"[omit-region] After merging: {len(merged_samples)} region(s) on sweep {sweep_idx}")
