@@ -15,10 +15,11 @@ import os
 class HelpDialog(QDialog):
     """Quick reference help dialog with essential information."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, update_info=None):
         super().__init__(parent)
         self.setWindowTitle("PlethApp - Quick Reference")
         self.resize(850, 700)
+        self.update_info = update_info  # Pre-checked update info from main window
 
         self._setup_ui()
         self._apply_dark_theme()
@@ -405,17 +406,42 @@ class HelpDialog(QDialog):
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)
 
-        # Check for updates
-        update_label = QLabel()
-        update_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        update_label.setOpenExternalLinks(True)
-        update_label.setTextFormat(Qt.TextFormat.RichText)
-        update_label.setWordWrap(True)
-        update_label.setMaximumWidth(500)
-        layout.addWidget(update_label)
+        # Check for updates button
+        from PyQt6.QtWidgets import QPushButton
+        check_update_btn = QPushButton("Check for Updates")
+        check_update_btn.setMaximumWidth(200)
+        check_update_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #e0e0e0;
+                border: 1px solid #4a4a4a;
+                padding: 8px 16px;
+                border-radius: 3px;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+            QPushButton:pressed {
+                background-color: #2a2a2a;
+            }
+        """)
+        check_update_btn.clicked.connect(self._on_check_updates_clicked)
+        layout.addWidget(check_update_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        # Perform update check asynchronously to avoid blocking UI
-        self._check_for_updates_async(update_label)
+        layout.addSpacing(10)
+
+        # Update status label
+        self.update_label = QLabel()
+        self.update_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.update_label.setOpenExternalLinks(True)
+        self.update_label.setTextFormat(Qt.TextFormat.RichText)
+        self.update_label.setWordWrap(True)
+        self.update_label.setMaximumWidth(500)
+        layout.addWidget(self.update_label)
+
+        # Perform initial update check asynchronously to avoid blocking UI
+        self._check_for_updates_async()
 
         # Add description
         description = QLabel(
@@ -532,8 +558,28 @@ class HelpDialog(QDialog):
         details_dialog.setStyleSheet(self.styleSheet())
         details_dialog.exec()
 
-    def _check_for_updates_async(self, label):
-        """Check for updates in background thread and update label."""
+    def _on_check_updates_clicked(self):
+        """Handle manual check for updates button click."""
+        # Show "checking..." message
+        self.update_label.setText('<p style="color: #888;">Checking for updates...</p>')
+
+        # Force a fresh check (ignore cached update_info)
+        self._check_for_updates_async(force_check=True)
+
+    def _check_for_updates_async(self, force_check=False):
+        """Check for updates in background thread and update label.
+
+        Args:
+            force_check: If True, always check GitHub even if update_info was cached
+        """
+        from core import update_checker
+
+        # If update info already provided from main window and not forcing, use it immediately
+        if self.update_info is not None and not force_check:
+            self.update_label.setText(update_checker.get_update_message(self.update_info))
+            return
+
+        # Otherwise, check in background
         from PyQt6.QtCore import QThread, pyqtSignal
 
         class UpdateChecker(QThread):
@@ -542,21 +588,24 @@ class HelpDialog(QDialog):
 
             def run(self):
                 """Run update check in background."""
-                from core import update_checker
                 update_info = update_checker.check_for_updates()
                 self.update_checked.emit(update_info)
 
         def on_update_checked(update_info):
             """Handle update check result."""
-            from core import update_checker
-
             if update_info:
                 # Update available
-                label.setText(update_checker.get_update_message(update_info))
+                self.update_label.setText(update_checker.get_update_message(update_info))
+                # Update cached info
+                self.update_info = update_info
             else:
-                # No update or check failed - be less intrusive
-                # Only show message if explicitly requested
-                pass
+                # No update or check failed
+                if force_check:
+                    # User explicitly clicked button - show "up to date" message
+                    self.update_label.setText(update_checker.get_no_update_message())
+                else:
+                    # Silent automatic check - don't show anything
+                    pass
 
         # Create and start background thread
         self.update_thread = UpdateChecker()

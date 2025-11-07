@@ -110,30 +110,45 @@ def check_for_updates(timeout: float = 5.0) -> Optional[dict]:
 
 def get_update_message(update_info: dict) -> str:
     """
-    Format update info into user-friendly message.
+    Format update info into user-friendly message for About tab.
 
     Args:
         update_info: Dictionary from check_for_updates()
 
     Returns:
-        Formatted HTML message
+        Formatted HTML message with box styling
     """
     version = update_info.get('version', 'Unknown')
     name = update_info.get('name', f'Version {version}')
 
     message = f"""
-    <div style="padding: 10px; background-color: #2a4a2a; border: 2px solid #4CAF50; border-radius: 5px;">
+    <div style="padding: 15px; background-color: #2a4a2a; border: 3px solid #4CAF50; border-radius: 8px; margin: 10px 0;">
         <h3 style="color: #4CAF50; margin-top: 0;">🎉 Update Available!</h3>
-        <p><b>New version:</b> {version}</p>
-        <p><b>Release:</b> {name}</p>
+        <p style="margin: 8px 0;"><b>New version:</b> {version}</p>
+        <p style="margin: 8px 0;"><b>Release:</b> {name}</p>
         <p style="margin-bottom: 0;">
-            <a href="{update_info.get('url', GITHUB_RELEASES_URL)}" style="color: #4CAF50; font-weight: bold;">
+            <a href="{update_info.get('url', GITHUB_RELEASES_URL)}" style="color: #4CAF50; font-weight: bold; text-decoration: underline;">
                 Download the latest version →
             </a>
         </p>
     </div>
     """
     return message
+
+
+def get_main_window_update_message(update_info: dict) -> Tuple[str, str]:
+    """
+    Get simple update message for main window banner.
+
+    Args:
+        update_info: Dictionary from check_for_updates()
+
+    Returns:
+        Tuple of (text, url) for display in main window
+    """
+    version = update_info.get('version', 'Unknown')
+    url = update_info.get('url', GITHUB_RELEASES_URL)
+    return (f"Update Available: v{version}", url)
 
 
 def get_no_update_message() -> str:

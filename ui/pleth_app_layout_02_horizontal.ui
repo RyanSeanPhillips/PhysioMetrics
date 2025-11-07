@@ -542,6 +542,40 @@ QPushButton:hover {
               </property>
              </widget>
             </item>
+            <item>
+             <widget class="QLabel" name="update_notification_label">
+              <property name="font">
+               <font>
+                <pointsize>8</pointsize>
+                <underline>true</underline>
+               </font>
+              </property>
+              <property name="styleSheet">
+               <string notr="true">QLabel {
+    text-align: left;
+    border: none;
+    background: transparent;
+    text-decoration: underline;
+    color: #FFD700;
+}
+QLabel:hover {
+    color: #FFED4E;
+}</string>
+              </property>
+              <property name="text">
+               <string/>
+              </property>
+              <property name="textFormat">
+               <enum>Qt::RichText</enum>
+              </property>
+              <property name="openExternalLinks">
+               <bool>true</bool>
+              </property>
+              <property name="visible">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
            </layout>
           </item>
           <item>

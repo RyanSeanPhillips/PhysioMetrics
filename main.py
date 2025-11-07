@@ -297,6 +297,17 @@ class MainWindow(QMainWindow):
         # Wire Help button (from UI file)
         self.helpbutton.clicked.connect(self.on_help_clicked)
 
+        # Set pointer cursor for update notification label (defined in UI file)
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtCore import Qt
+        self.update_notification_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        # Store update info for later use
+        self.update_info = None
+
+        # Start background update check
+        self._check_for_updates_on_startup()
+
 
 
         # Defaults: 0.5–20 Hz band, all off initially
@@ -2851,9 +2862,44 @@ class MainWindow(QMainWindow):
     def on_help_clicked(self):
         """Open the help dialog (F1)."""
         from dialogs.help_dialog import HelpDialog
-        dialog = HelpDialog(self)
+        dialog = HelpDialog(self, update_info=self.update_info)
         telemetry.log_screen_view('Help Dialog', screen_class='info_dialog')
         dialog.exec()
+
+    def _check_for_updates_on_startup(self):
+        """Check for updates in background and update UI if available."""
+        from PyQt6.QtCore import QThread, pyqtSignal
+
+        class UpdateChecker(QThread):
+            """Background thread for checking updates."""
+            update_checked = pyqtSignal(object)  # Emits update_info or None
+
+            def run(self):
+                """Run update check in background."""
+                from core import update_checker
+                update_info = update_checker.check_for_updates()
+                self.update_checked.emit(update_info)
+
+        def on_update_checked(update_info):
+            """Handle update check result."""
+            if update_info:
+                # Store for help dialog
+                self.update_info = update_info
+
+                # Update main window label
+                from core import update_checker
+                text, url = update_checker.get_main_window_update_message(update_info)
+                self.update_notification_label.setText(f'<a href="{url}" style="color: #FFD700; text-decoration: underline;">{text}</a>')
+                self.update_notification_label.setVisible(True)
+                print(f"[Update Check] New version available: {update_info.get('version')}")
+            else:
+                # No update available - keep label hidden
+                print("[Update Check] You're up to date!")
+
+        # Create and start background thread
+        self.update_thread = UpdateChecker()
+        self.update_thread.update_checked.connect(on_update_checked)
+        self.update_thread.start()
 
     def on_spectral_analysis_clicked(self):
         """Open spectral analysis dialog and optionally apply notch filter."""
