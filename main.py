@@ -1961,6 +1961,104 @@ class MainWindow(QMainWindow):
 
             print(f"[Histogram] Updated prominence: {vals['prominence']:.4f}, Height threshold: {vals['height_threshold']:.4f}")
 
+    def _calculate_local_minimum_threshold_silent(self, peak_heights):
+        """
+        Calculate valley threshold using exponential + Gaussian mixture model.
+        Simplified version for silent auto-detection (no UI feedback).
+
+        Args:
+            peak_heights: Array of detected peak heights
+
+        Returns:
+            float: Valley location, or None if fitting fails
+        """
+        try:
+            from scipy.optimize import curve_fit
+
+            # Use 99th percentile to exclude outliers
+            percentile_95 = np.percentile(peak_heights, 99)
+            peaks_for_hist = peak_heights[peak_heights <= percentile_95]
+
+            if len(peaks_for_hist) < 10:
+                return None
+
+            # Create histogram
+            hist_range = (peaks_for_hist.min(), percentile_95)
+            counts, bin_edges = np.histogram(peaks_for_hist, bins=200, range=hist_range)
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            bin_width = bin_edges[1] - bin_edges[0]
+
+            # Convert to density
+            density = counts / (len(peaks_for_hist) * bin_width)
+
+            # Try 2-Gaussian model first (for eupnea + sniffing)
+            def exp_2gauss_model(x, lambda_exp, mu1, sigma1, mu2, sigma2, w_exp, w_g1):
+                exp_comp = lambda_exp * np.exp(-lambda_exp * x)
+                gauss1 = (1 / (np.sqrt(2 * np.pi) * sigma1)) * np.exp(-0.5 * ((x - mu1) / sigma1) ** 2)
+                gauss2 = (1 / (np.sqrt(2 * np.pi) * sigma2)) * np.exp(-0.5 * ((x - mu2) / sigma2) ** 2)
+                w_g2 = max(0, 1 - w_exp - w_g1)
+                return w_exp * exp_comp + w_g1 * gauss1 + w_g2 * gauss2
+
+            try:
+                p0_2g = [
+                    1.0 / np.mean(bin_centers),  # lambda_exp
+                    np.percentile(bin_centers, 40),  # mu1 (eupnea)
+                    np.std(bin_centers) * 0.3,  # sigma1
+                    np.percentile(bin_centers, 70),  # mu2 (sniffing)
+                    np.std(bin_centers) * 0.3,  # sigma2
+                    0.3,  # w_exp
+                    0.4   # w_g1
+                ]
+                popt, _ = curve_fit(exp_2gauss_model, bin_centers, density, p0=p0_2g, maxfev=5000)
+                fitted = exp_2gauss_model(bin_centers, *popt)
+
+                # Check fit quality
+                residuals = density - fitted
+                ss_res = np.sum(residuals ** 2)
+                ss_tot = np.sum((density - np.mean(density)) ** 2)
+                r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+
+                if r_squared >= 0.7 and popt[5] >= 0.05 and popt[6] >= 0.05:
+                    # Find valley between 0 and first Gaussian peak
+                    search_end_idx = np.argmin(np.abs(bin_centers - popt[1]))
+                    valley_idx = np.argmin(fitted[:search_end_idx])
+                    return float(bin_centers[valley_idx])
+            except:
+                pass
+
+            # Fallback: 1-Gaussian model
+            def exp_gauss_model(x, lambda_exp, mu_gauss, sigma_gauss, w_exp):
+                exp_component = lambda_exp * np.exp(-lambda_exp * x)
+                gauss_component = (1 / (np.sqrt(2 * np.pi) * sigma_gauss)) * np.exp(-0.5 * ((x - mu_gauss) / sigma_gauss) ** 2)
+                return w_exp * exp_component + (1 - w_exp) * gauss_component
+
+            p0_1g = [
+                1.0 / np.mean(bin_centers),
+                np.median(bin_centers),
+                np.std(bin_centers),
+                0.3
+            ]
+            popt, _ = curve_fit(exp_gauss_model, bin_centers, density, p0=p0_1g, maxfev=5000)
+            fitted = exp_gauss_model(bin_centers, *popt)
+
+            # Check fit quality
+            residuals = density - fitted
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((density - np.mean(density)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+
+            if r_squared >= 0.7:
+                # Find valley between 0 and Gaussian peak
+                search_end_idx = np.argmin(np.abs(bin_centers - popt[1]))
+                valley_idx = np.argmin(fitted[:search_end_idx])
+                return float(bin_centers[valley_idx])
+
+            return None
+
+        except Exception as e:
+            print(f"[Valley Fit] Error: {e}")
+            return None
+
     def _auto_detect_prominence_silent(self):
         """
         Auto-detect optimal prominence using Otsu's method in background (no dialog).
@@ -2027,23 +2125,35 @@ class MainWindow(QMainWindow):
                             (peak_heights.max() - peak_heights.min()) +
                             peak_heights.min()))
 
+            # Calculate local minimum threshold (valley between noise and signal)
+            # This is more robust than Otsu for breath signals
+            local_min_threshold = self._calculate_local_minimum_threshold_silent(peak_heights)
+
+            # Choose threshold: prefer local minimum if available, fallback to Otsu
+            if local_min_threshold is not None:
+                chosen_threshold = local_min_threshold
+                print(f"[Auto-Detect] Using valley threshold: {chosen_threshold:.4f} (Otsu: {optimal_height:.4f})")
+            else:
+                chosen_threshold = optimal_height
+                print(f"[Auto-Detect] Using Otsu threshold: {chosen_threshold:.4f} (no valley found)")
+
             # Store and populate spinbox with auto-detected value
             # Use same value for both height and prominence thresholds
-            self.peak_prominence = optimal_height
-            self.PeakPromValueSpinBox.setValue(optimal_height)
+            self.peak_prominence = chosen_threshold
+            self.PeakPromValueSpinBox.setValue(chosen_threshold)
 
             # Store the height threshold value (will be used in peak detection)
-            self.peak_height_threshold = optimal_height
+            self.peak_height_threshold = chosen_threshold
 
             # Draw threshold line on plot
-            self.plot_host.update_threshold_line(optimal_height)
+            self.plot_host.update_threshold_line(chosen_threshold)
 
             # Enable Apply button
             self.ApplyPeakFindPushButton.setEnabled(True)
 
             t_elapsed = time.time() - t_start
-            print(f"[Auto-Detect] Optimal prominence: {optimal_height:.4f} ({t_elapsed:.2f}s)")
-            self._log_status_message(f"Auto-detected prominence: {optimal_height:.4f}", 3000)
+            # Status message already printed above with valley/Otsu choice
+            self._log_status_message(f"Auto-detected threshold: {chosen_threshold:.4f}", 3000)
 
         except Exception as e:
             print(f"[Auto-Detect] Error: {e}")
