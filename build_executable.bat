@@ -65,6 +65,23 @@ if exist "dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe" (
     echo.
     echo Previous versions are preserved in the dist\ folder.
     echo.
+
+    REM Create zip file for distribution
+    echo Creating zip file for distribution...
+    python -c "import shutil; shutil.make_archive('dist/PlethApp_v%VERSION%_Windows', 'zip', 'dist', 'PlethApp_v%VERSION%')"
+    if exist "dist\PlethApp_v%VERSION%_Windows.zip" (
+        echo.
+        echo ZIP FILE CREATED!
+        for %%A in ("dist\PlethApp_v%VERSION%_Windows.zip") do echo Zip size: %%~zA bytes (%%~zA / 1048576 MB^)
+        echo Location: dist\PlethApp_v%VERSION%_Windows.zip
+        echo.
+        echo Ready to upload to GitHub releases!
+    ) else (
+        echo.
+        echo Warning: Failed to create zip file
+        echo You can manually zip the folder: dist\PlethApp_v%VERSION%
+    )
+    echo.
 ) else (
     echo.
     echo ====================================================================

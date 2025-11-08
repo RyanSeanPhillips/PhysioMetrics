@@ -133,6 +133,24 @@ def build_executable():
                 print(f"\nBuild directory: {dist_dir}")
                 print("\nYou can now distribute the entire folder to users.")
                 print("The executable is self-contained and doesn't require Python installation.")
+
+                # Create zip file for distribution
+                print("\nCreating zip file for distribution...")
+                zip_path = Path(f'dist/PlethApp_v{version}_Windows')
+                try:
+                    shutil.make_archive(str(zip_path), 'zip', 'dist', f'PlethApp_v{version}')
+                    zip_file = Path(f'{zip_path}.zip')
+                    if zip_file.exists():
+                        zip_size = zip_file.stat().st_size
+                        print("\nZIP FILE CREATED!")
+                        print(f"Zip size: {zip_size:,} bytes ({zip_size / (1024*1024):.1f} MB)")
+                        print(f"Location: {zip_file}")
+                        print("\nReady to upload to GitHub releases!")
+                    else:
+                        print("\nWarning: Zip file was not created")
+                except Exception as e:
+                    print(f"\nWarning: Failed to create zip file: {e}")
+                    print(f"You can manually zip the folder: {dist_dir}")
             else:
                 print(f"\nWarning: Could not find executable at expected path: {exe_path}")
                 print("Check the dist/ folder for build output.")
