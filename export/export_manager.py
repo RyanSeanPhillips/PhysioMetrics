@@ -398,7 +398,7 @@ class ExportManager:
 
         # Create progress dialog
         progress = QProgressDialog("Preparing data export...", None, 0, 100, self.window)
-        progress.setWindowTitle("PlethAnalysis")
+        progress.setWindowTitle("PhysioMetrics")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)  # Show immediately
         progress.setValue(0)
@@ -473,7 +473,7 @@ class ExportManager:
 
         # Create progress dialog
         progress = QProgressDialog("Generating summary preview...", None, 0, 100, self.window)
-        progress.setWindowTitle("PlethAnalysis")
+        progress.setWindowTitle("PhysioMetrics")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)  # Show immediately
         progress.setValue(0)

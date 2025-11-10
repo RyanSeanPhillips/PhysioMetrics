@@ -1,5 +1,5 @@
 """
-Anonymous usage tracking and telemetry for PlethApp.
+Anonymous usage tracking and telemetry for PhysioMetrics.
 
 Uses dual system:
 - Google Analytics 4: Usage statistics (unlimited events)

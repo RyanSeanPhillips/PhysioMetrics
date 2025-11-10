@@ -643,6 +643,9 @@ class ProminenceThresholdDialog(QDialog):
                 'density': density
             }
 
+            # Store parameters in metrics module for probability metrics
+            self._store_model_params_for_probability_metrics()
+
             return float(valley_location), float(quality_score)
 
         except Exception as e:
@@ -723,11 +726,60 @@ class ProminenceThresholdDialog(QDialog):
                 'density': density
             }
 
+            # Store parameters in metrics module for probability metrics
+            self._store_model_params_for_probability_metrics()
+
             return float(valley_location), float(quality_score)
 
         except Exception as e:
             print(f"[1-Gauss] Fit failed: {e}")
             return None
+
+    def _store_model_params_for_probability_metrics(self):
+        """
+        Store auto-threshold model parameters in metrics module.
+
+        This enables P(noise) and P(breath) metrics to evaluate probabilities
+        based on the fitted exponential + Gaussian model.
+        """
+        from core import metrics as core_metrics
+
+        if not hasattr(self, 'exp_gauss_params') or self.exp_gauss_params is None:
+            return
+
+        params = self.exp_gauss_params
+        model_type = params.get('model')
+
+        if model_type == '2gauss':
+            # Exponential + 2 Gaussians
+            model_params = {
+                'lambda_exp': float(params['lambda']),
+                'mu1': float(params['mu1']),
+                'sigma1': float(params['sigma1']),
+                'mu2': float(params['mu2']),
+                'sigma2': float(params['sigma2']),
+                'w_exp': float(params['w_exp']),
+                'w_g1': float(params['w_g1']),
+                'w_g2': float(params['w_g2'])
+            }
+        elif model_type == '1gauss':
+            # Exponential + 1 Gaussian (treat as 2-gauss with second Gaussian disabled)
+            model_params = {
+                'lambda_exp': float(params['lambda']),
+                'mu1': float(params['mu']),
+                'sigma1': float(params['sigma']),
+                'mu2': float(params['mu']),  # Same as mu1 (won't be used much)
+                'sigma2': float(params['sigma']),  # Same as sigma1
+                'w_exp': float(params['w_exp']),
+                'w_g1': float(1.0 - params['w_exp']),  # All non-exp weight to first Gaussian
+                'w_g2': 0.0  # No second Gaussian
+            }
+        else:
+            print(f"[Probability] Unknown model type: {model_type}")
+            return
+
+        core_metrics.set_threshold_model_params(model_params)
+        print(f"[Probability] Stored {model_type} model params for P(noise) and P(breath) metrics")
 
     def _update_quality_label(self):
         """Update the signal quality label with color-coded quality rating."""

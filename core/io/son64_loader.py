@@ -1,8 +1,8 @@
 """
-SON64 (.smrx) file loader for PlethApp.
+SON64 (.smrx) file loader for PhysioMetrics.
 
 This module uses the CED DLL wrapper to load Spike2 .smrx files
-and convert them to the format expected by PlethApp.
+and convert them to the format expected by PhysioMetrics.
 """
 
 from pathlib import Path
@@ -118,7 +118,7 @@ def load_son64(path: str, progress_callback=None) -> Tuple[float, Dict[str, np.n
                 else:
                     data = data_ch
 
-            # PlethApp expects shape (n_samples, n_sweeps)
+            # PhysioMetrics expects shape (n_samples, n_sweeps)
             # .smrx files are continuous, so n_sweeps = 1
             sweeps_by_channel[ch_name] = data.reshape(-1, 1)
 

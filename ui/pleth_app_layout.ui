@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>PlethAnalysisApp V0.1</string>
+   <string>PhysioMetrics</string>
   </property>
   <property name="windowIcon">
    <iconset theme="applications-science"/>

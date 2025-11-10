@@ -43,6 +43,10 @@ class AppState:
     peaks_by_sweep: Dict[int, np.ndarray] = field(default_factory=dict)
     breath_by_sweep: Dict[int, Dict] = field(default_factory=dict)  # sweep -> {'onsets', 'offsets', 'expmins', 'expoffs'}
     sigh_by_sweep: Dict[int, np.ndarray] = field(default_factory=dict)  # sweep -> peak indices marked as sighs
+
+    # ML Training Data: ALL detected peaks with auto-labels
+    all_peaks_by_sweep: Dict[int, Dict] = field(default_factory=dict)  # sweep -> {'indices', 'labels', 'label_source', 'prominences'}
+    all_breaths_by_sweep: Dict[int, Dict] = field(default_factory=dict)  # sweep -> {'onsets', 'offsets', 'expmins'} for ALL peaks (including noise)
     omitted_points: Dict[int, List[int]] = field(default_factory=dict)       # sweep -> sample idxs
     omitted_ranges: Dict[int, List[Tuple[int,int]]] = field(default_factory=dict)  # sweep -> [(i0,i1), ...]
     omitted_sweeps: set = field(default_factory=set)  # set of sweep indices to exclude

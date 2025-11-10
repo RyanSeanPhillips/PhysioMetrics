@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PlethApp Build Script - Python version
+PhysioMetrics Build Script - Python version
 Creates Windows Executable using PyInstaller
 
 This script provides a cross-platform way to build the executable
@@ -77,7 +77,7 @@ def check_required_files():
 
     required_files = [
         'main.py',
-        'pleth_app.spec',
+        'physiometrics.spec',
         'ui/pleth_app_layout.ui',  # At least one UI file
         'images/plethapp_thumbnail.ico',  # Application icon
     ]
@@ -114,7 +114,7 @@ def build_executable():
         result = subprocess.run([
             sys.executable, '-m', 'PyInstaller',
             '--clean',
-            'pleth_app.spec'
+            'physiometrics.spec'
         ], capture_output=True, text=True)
 
         if result.returncode == 0:
@@ -123,8 +123,8 @@ def build_executable():
             print("="*60)
 
             # Check for versioned directory output
-            dist_dir = Path(f'dist/PlethApp_v{version}')
-            exe_path = dist_dir / f'PlethApp_v{version}.exe'
+            dist_dir = Path(f'dist/PhysioMetrics_v{version}')
+            exe_path = dist_dir / f'PhysioMetrics_v{version}.exe'
 
             if exe_path.exists():
                 file_size = exe_path.stat().st_size
@@ -136,9 +136,9 @@ def build_executable():
 
                 # Create zip file for distribution
                 print("\nCreating zip file for distribution...")
-                zip_path = Path(f'dist/PlethApp_v{version}_Windows')
+                zip_path = Path(f'dist/PhysioMetrics_v{version}_Windows')
                 try:
-                    shutil.make_archive(str(zip_path), 'zip', 'dist', f'PlethApp_v{version}')
+                    shutil.make_archive(str(zip_path), 'zip', 'dist', f'PhysioMetrics_v{version}')
                     zip_file = Path(f'{zip_path}.zip')
                     if zip_file.exists():
                         zip_size = zip_file.stat().st_size
@@ -174,7 +174,7 @@ def build_executable():
 def main():
     """Main build process."""
     print("="*60)
-    print("PlethApp Windows Executable Builder")
+    print("PhysioMetrics Windows Executable Builder")
     print("="*60)
 
     # Change to script directory

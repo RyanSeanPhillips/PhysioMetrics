@@ -1,5 +1,5 @@
 """
-Persistent configuration management for PlethApp.
+Persistent configuration management for PhysioMetrics.
 
 Handles user preferences, UUID generation, and config file storage.
 """
@@ -18,22 +18,22 @@ def get_config_dir():
         Path: Config directory path
 
     Platform paths:
-    - Windows: C:/Users/{username}/AppData/Roaming/PlethApp
-    - Mac: ~/Library/Application Support/PlethApp
-    - Linux: ~/.config/PlethApp
+    - Windows: C:/Users/{username}/AppData/Roaming/PhysioMetrics
+    - Mac: ~/Library/Application Support/PhysioMetrics
+    - Linux: ~/.config/PhysioMetrics
     """
     import sys
 
     if sys.platform == 'win32':
         # Windows: AppData/Roaming
         base = os.environ.get('APPDATA', os.path.expanduser('~'))
-        config_dir = Path(base) / 'PlethApp'
+        config_dir = Path(base) / 'PhysioMetrics'
     elif sys.platform == 'darwin':
         # macOS: ~/Library/Application Support
-        config_dir = Path.home() / 'Library' / 'Application Support' / 'PlethApp'
+        config_dir = Path.home() / 'Library' / 'Application Support' / 'PhysioMetrics'
     else:
         # Linux: ~/.config
-        config_dir = Path.home() / '.config' / 'PlethApp'
+        config_dir = Path.home() / '.config' / 'PhysioMetrics'
 
     # Create directory if it doesn't exist
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -46,7 +46,7 @@ def get_config_path():
     Get full path to config file.
 
     Returns:
-        Path: Config file path (e.g., ~/.config/PlethApp/config.json)
+        Path: Config file path (e.g., ~/.config/PhysioMetrics/config.json)
     """
     return get_config_dir() / 'config.json'
 

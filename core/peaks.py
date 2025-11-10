@@ -36,10 +36,14 @@ def detect_peaks(y: np.ndarray, sr_hz: float,
                  thresh: float = None,
                  prominence: float = None,
                  min_dist_samples: int = None,
-                 direction: str = "up") -> np.ndarray:
+                 direction: str = "up",
+                 return_all: bool = False) -> np.ndarray:
     """
     y: 1D vector
     Returns np.ndarray of peak indices (int)
+
+    If return_all=True, returns ALL detected peaks without threshold filtering.
+    If return_all=False (default), filters by threshold for backward compatibility.
     """
     y_use = -y if direction == "down" else y
 
@@ -58,6 +62,12 @@ def detect_peaks(y: np.ndarray, sr_hz: float,
         kwargs["distance"] = int(min_dist_samples)
 
     pks, _ = find_peaks(y_use, **kwargs)
+
+    # For ML training: return ALL peaks without filtering
+    if return_all:
+        return pks
+
+    # For backward compatibility: filter by threshold
     if thresh is not None:
         pks = pks[y_use[pks] >= thresh]
     return pks
@@ -892,6 +902,61 @@ def detect_peaks_and_breaths(
         breaths = compute_breath_events(y, pks, sr_hz=sr_hz, exclude_sec=exclude_sec)
 
     return pks, breaths
+
+
+def label_peaks_by_threshold(
+    y: np.ndarray,
+    peak_indices: np.ndarray,
+    thresh: float | None = None,
+    direction: str = "up"
+) -> Dict[str, np.ndarray]:
+    """
+    Label detected peaks as breath (1) or noise (0) based on threshold.
+
+    Args:
+        y: Signal data
+        peak_indices: Already-detected peak indices
+        thresh: Height threshold for labeling (peaks >= thresh are breaths)
+        direction: 'up' or 'down'
+
+    Returns dictionary with:
+        'indices': Peak indices (same as input)
+        'labels': Binary labels (1 = breath, 0 = noise)
+        'label_source': Array of 'auto' for each peak
+        'prominences': Prominence values for each peak
+    """
+    from scipy.signal import peak_prominences
+
+    if len(peak_indices) == 0:
+        return {
+            'indices': np.array([], dtype=int),
+            'labels': np.array([], dtype=int),
+            'label_source': np.array([], dtype=object),
+            'prominences': np.array([], dtype=float)
+        }
+
+    y_use = -y if direction == "down" else y
+
+    # Compute prominences for all peaks
+    proms = peak_prominences(y_use, peak_indices)[0]
+
+    # Auto-label based on threshold
+    if thresh is not None:
+        peak_heights = y_use[peak_indices]
+        labels = (peak_heights >= thresh).astype(int)
+    else:
+        # No threshold: all peaks labeled as breaths
+        labels = np.ones(len(peak_indices), dtype=int)
+
+    # All labels initially from auto-detection
+    label_source = np.array(['auto'] * len(peak_indices), dtype=object)
+
+    return {
+        'indices': peak_indices.copy(),
+        'labels': labels,
+        'label_source': label_source,
+        'prominences': proms
+    }
 
 
 def _first_zc_before(x: np.ndarray, idx: int, left_bound: int,

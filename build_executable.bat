@@ -1,14 +1,14 @@
 @echo off
 REM ====================================================================
-REM PlethApp Build Script - Creates Windows Executable
+REM PhysioMetrics Build Script - Creates Windows Executable
 REM ====================================================================
 REM This script automates the process of building a Windows executable
-REM from the PlethApp breath analysis application using PyInstaller.
+REM from the PhysioMetrics breath analysis application using PyInstaller.
 REM ====================================================================
 
 echo.
 echo ====================================================================
-echo Building PlethApp Windows Executable
+echo Building PhysioMetrics Windows Executable
 echo ====================================================================
 echo.
 
@@ -46,19 +46,19 @@ REM Get version string from version_info.py
 for /f "tokens=*" %%i in ('python -c "from version_info import VERSION_STRING; print(VERSION_STRING)"') do set VERSION=%%i
 
 REM Build the executable using the spec file
-pyinstaller --clean pleth_app.spec
+pyinstaller --clean physiometrics.spec
 
 REM Check if build was successful (looking for versioned output)
-if exist "dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe" (
+if exist "dist\PhysioMetrics_v%VERSION%\PhysioMetrics_v%VERSION%.exe" (
     echo.
     echo ====================================================================
     echo BUILD SUCCESSFUL!
     echo ====================================================================
     echo.
-    echo Executable created: dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe
-    echo Build directory: dist\PlethApp_v%VERSION%\
+    echo Executable created: dist\PhysioMetrics_v%VERSION%\PhysioMetrics_v%VERSION%.exe
+    echo Build directory: dist\PhysioMetrics_v%VERSION%\
     echo File size:
-    for %%A in ("dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe") do echo %%~zA bytes
+    for %%A in ("dist\PhysioMetrics_v%VERSION%\PhysioMetrics_v%VERSION%.exe") do echo %%~zA bytes
     echo.
     echo You can now distribute the entire folder to users.
     echo The executable is self-contained and doesn't require Python installation.
@@ -68,18 +68,18 @@ if exist "dist\PlethApp_v%VERSION%\PlethApp_v%VERSION%.exe" (
 
     REM Create zip file for distribution
     echo Creating zip file for distribution...
-    python -c "import shutil; shutil.make_archive('dist/PlethApp_v%VERSION%_Windows', 'zip', 'dist', 'PlethApp_v%VERSION%')"
-    if exist "dist\PlethApp_v%VERSION%_Windows.zip" (
+    python -c "import shutil; shutil.make_archive('dist/PhysioMetrics_v%VERSION%_Windows', 'zip', 'dist', 'PhysioMetrics_v%VERSION%')"
+    if exist "dist\PhysioMetrics_v%VERSION%_Windows.zip" (
         echo.
         echo ZIP FILE CREATED!
-        for %%A in ("dist\PlethApp_v%VERSION%_Windows.zip") do echo Zip size: %%~zA bytes (%%~zA / 1048576 MB^)
-        echo Location: dist\PlethApp_v%VERSION%_Windows.zip
+        for %%A in ("dist\PhysioMetrics_v%VERSION%_Windows.zip") do echo Zip size: %%~zA bytes (%%~zA / 1048576 MB^)
+        echo Location: dist\PhysioMetrics_v%VERSION%_Windows.zip
         echo.
         echo Ready to upload to GitHub releases!
     ) else (
         echo.
         echo Warning: Failed to create zip file
-        echo You can manually zip the folder: dist\PlethApp_v%VERSION%
+        echo You can manually zip the folder: dist\PhysioMetrics_v%VERSION%
     )
     echo.
 ) else (

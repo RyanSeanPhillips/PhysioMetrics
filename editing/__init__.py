@@ -1,5 +1,5 @@
 """
-Editing modes module for PlethApp.
+Editing modes module for PhysioMetrics.
 
 Provides interactive editing capabilities including:
 - Peak addition and deletion

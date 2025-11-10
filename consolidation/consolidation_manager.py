@@ -191,7 +191,7 @@ class ConsolidationManager:
         # Create progress dialog
         n_total_files = len(means_files) + len(breaths_files)
         progress = QProgressDialog("Consolidating data...", "Cancel", 0, 100, self.window)
-        progress.setWindowTitle("PlethAnalysis")
+        progress.setWindowTitle("PhysioMetrics")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)

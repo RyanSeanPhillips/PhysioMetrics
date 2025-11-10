@@ -1,5 +1,5 @@
 """
-EDF/EDF+ file loader for PlethApp.
+EDF/EDF+ file loader for PhysioMetrics.
 
 This module loads European Data Format (EDF) files, commonly used for
 physiological recordings (EEG, breathing, etc.).
@@ -153,7 +153,7 @@ def load_edf(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.nd
                 else:
                     data = data_raw
 
-            # PlethApp expects shape (n_samples, n_sweeps)
+            # PhysioMetrics expects shape (n_samples, n_sweeps)
             # EDF files are continuous, so n_sweeps = 1
             sweeps_by_channel[display_name] = data.reshape(-1, 1)
 

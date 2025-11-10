@@ -1,5 +1,5 @@
 """
-Event Detection Settings Dialog for PlethApp.
+Event Detection Settings Dialog for PhysioMetrics.
 
 This dialog provides tools for detecting and marking events in the event channel:
 - Automatic threshold-based detection

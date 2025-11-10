@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for PlethApp - Breath Analysis Application
+PyInstaller spec file for PhysioMetrics - Breath Analysis Application
 This file configures how PyInstaller packages the application into a Windows executable.
 """
 
@@ -121,7 +121,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 #     a.zipfiles,
 #     a.datas,
 #     [],
-#     name='PlethApp',
+#     name='PhysioMetrics',
 #     debug=False,
 #     bootloader_ignore_signals=False,
 #     strip=False,
@@ -143,7 +143,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=f'PlethApp_v{VERSION_STRING}',
+    name=f'PhysioMetrics_v{VERSION_STRING}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -164,5 +164,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=f'PlethApp_v{VERSION_STRING}',
+    name=f'PhysioMetrics_v{VERSION_STRING}',
 )

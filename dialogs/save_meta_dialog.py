@@ -1,5 +1,5 @@
 """
-Save Metadata Dialog for PlethApp.
+Save Metadata Dialog for PhysioMetrics.
 
 This dialog provides a structured interface for collecting metadata about analyzed
 breath data before saving, including experimental details like mouse strain, virus,

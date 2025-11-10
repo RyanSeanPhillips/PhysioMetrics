@@ -1,7 +1,7 @@
 """
 GitHub Release Update Checker
 
-Checks for new PlethApp releases on GitHub and notifies users.
+Checks for new PhysioMetrics releases on GitHub and notifies users.
 """
 
 import urllib.request
@@ -12,7 +12,7 @@ from version_info import VERSION_STRING
 
 # GitHub repository info
 GITHUB_REPO_OWNER = "RyanSeanPhillips"
-GITHUB_REPO_NAME = "plethapp_GUI"
+GITHUB_REPO_NAME = "PhysioMetrics"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases"
 

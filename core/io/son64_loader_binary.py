@@ -3,7 +3,7 @@ Son64 (.smrx) file loader - Pure binary implementation
 Direct binary reading without external dependencies
 
 Author: Reverse-engineered from binary analysis
-Compatible with PlethApp's data loading interface
+Compatible with PhysioMetrics's data loading interface
 """
 import struct
 import numpy as np
@@ -21,7 +21,7 @@ def load_son64(file_path: str, progress_callback=None) -> Tuple[float, Dict[str,
 
     Returns:
         (sr_hz, sweeps_by_channel, channel_names, t)
-        Compatible with PlethApp's ABF loader interface
+        Compatible with PhysioMetrics's ABF loader interface
     """
     file_path = Path(file_path)
 

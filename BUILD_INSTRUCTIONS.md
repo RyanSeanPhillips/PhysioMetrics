@@ -1,6 +1,6 @@
-# PlethApp - Windows Executable Build Instructions
+# PhysioMetrics - Windows Executable Build Instructions
 
-This document provides step-by-step instructions for packaging the PlethApp breath analysis application into a standalone Windows executable.
+This document provides step-by-step instructions for packaging the PhysioMetrics breath analysis application into a standalone Windows executable.
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ pip install -r requirements.txt
    build_executable.bat
    ```
 3. Wait for the build to complete (5-10 minutes)
-4. Find your executable in `dist/PlethApp.exe`
+4. Find your executable in `dist/PhysioMetrics.exe`
 
 ### Method 2: Using the Python Script (Recommended)
 1. Run the Python build script:
@@ -40,16 +40,16 @@ pip install -r requirements.txt
    ```
 2. Run PyInstaller with the spec file:
    ```bash
-   pyinstaller --clean pleth_app.spec
+   pyinstaller --clean physiometrics.spec
    ```
 
 ## File Structure
 
 ```
-plethapp/
+physiometrics/
 ├── main.py                    # Main application entry point
 ├── requirements.txt           # Python dependencies
-├── pleth_app.spec            # PyInstaller configuration
+├── physiometrics.spec            # PyInstaller configuration
 ├── build_executable.bat      # Windows build script
 ├── build_executable.py       # Cross-platform build script
 ├── version_info.py          # Version metadata generator
@@ -81,12 +81,12 @@ plethapp/
 ### Common Build Issues
 
 #### "Module not found" errors
-- **Solution**: Add missing modules to `hidden_imports` in `pleth_app.spec`
+- **Solution**: Add missing modules to `hidden_imports` in `physiometrics.spec`
 - **Example**: If scipy.signal is missing, add `'scipy.signal'` to the list
 
 #### UI files not found
 - **Solution**: Verify UI files exist in the `ui/` directory
-- **Check**: The `datas` section in `pleth_app.spec` includes UI files
+- **Check**: The `datas` section in `physiometrics.spec` includes UI files
 
 #### Large executable size
 - **Expected**: 200-400 MB due to scientific libraries (NumPy, SciPy, Matplotlib)
@@ -101,7 +101,7 @@ plethapp/
 #### Application crashes on startup
 1. Run the executable from Command Prompt to see error messages:
    ```cmd
-   dist\PlethApp.exe
+   dist\PhysioMetrics.exe
    ```
 2. Check for missing data files or dependencies
 
@@ -112,17 +112,17 @@ plethapp/
 ## Distribution
 
 ### Single File Distribution
-- **File**: `dist/PlethApp.exe`
+- **File**: `dist/PhysioMetrics.exe`
 - **Size**: ~200-400 MB
 - **Pros**: Easy to distribute, single file
 - **Cons**: Slower startup, larger download
 
 ### Directory Distribution
 To create a directory distribution (faster startup):
-1. Uncomment the COLLECT section in `pleth_app.spec`
+1. Uncomment the COLLECT section in `physiometrics.spec`
 2. Comment out the single-file EXE section
 3. Rebuild the application
-4. Distribute the entire `dist/PlethApp/` folder
+4. Distribute the entire `dist/PhysioMetrics/` folder
 
 ### Creating an Installer (Optional)
 For professional distribution, consider creating an installer using:
@@ -195,13 +195,13 @@ To update the application:
 
 ### Custom Icons
 - Replace icons in the `images/` directory
-- Update the icon path in `pleth_app.spec`
+- Update the icon path in `physiometrics.spec`
 - Rebuild the executable
 
 ### Adding Modules
 To add new Python modules:
 1. Add to `requirements.txt`
-2. Add to `hidden_imports` in `pleth_app.spec` if needed
+2. Add to `hidden_imports` in `physiometrics.spec` if needed
 3. Test and rebuild
 
 ### Platform Support

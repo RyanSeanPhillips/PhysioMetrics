@@ -50,8 +50,8 @@ from dialogs import GMMClusteringDialog, SpectralAnalysisDialog, OutlierMetricsD
 from version_info import VERSION_STRING
 
 
-ORG = "PlethApp"
-APP = "PlethApp"
+ORG = "PhysioMetrics"
+APP = "PhysioMetrics"
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
             if w.property("startHidden") is True:
                 w.hide()
 
-        self.setWindowTitle(f"PlethAnalysis v{VERSION_STRING}")
+        self.setWindowTitle(f"PhysioMetrics v{VERSION_STRING}")
 
         # Style status bar to match dark theme
         self.statusBar().setStyleSheet("""
@@ -594,7 +594,7 @@ class MainWindow(QMainWindow):
 
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Select File(s)", last_dir,
-            "All Supported (*.abf *.smrx *.edf *.pleth.npz);;Data Files (*.abf *.smrx *.edf);;PlethApp Sessions (*.pleth.npz);;ABF Files (*.abf);;SMRX Files (*.smrx);;EDF Files (*.edf);;All Files (*.*)"
+            "All Supported (*.abf *.smrx *.edf *.pleth.npz);;Data Files (*.abf *.smrx *.edf);;PhysioMetrics Sessions (*.pleth.npz);;ABF Files (*.abf);;SMRX Files (*.smrx);;EDF Files (*.edf);;All Files (*.*)"
         )
         if not paths:
             return
@@ -1024,7 +1024,7 @@ class MainWindow(QMainWindow):
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Save Session State",
             str(default_path),
-            "PlethApp Session (*.pleth.npz);;All Files (*)"
+            "PhysioMetrics Session (*.pleth.npz);;All Files (*)"
         )
 
         if not save_path:
@@ -1157,7 +1157,7 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import Qt
 
         progress = QProgressDialog(f"Loading session...\n{npz_path.name}", None, 0, 100, self)
-        progress.setWindowTitle("Loading PlethApp Session")
+        progress.setWindowTitle("Loading PhysioMetrics Session")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setCancelButton(None)
@@ -2201,20 +2201,73 @@ class MainWindow(QMainWindow):
         n_sweeps = any_chan.shape[1]
         st.peaks_by_sweep.clear()
         st.breath_by_sweep.clear()
+        st.all_peaks_by_sweep.clear()  # ML training data: ALL peaks with labels
+        st.all_breaths_by_sweep.clear()  # ML training data: breath events for ALL peaks
         # st.sigh_by_sweep.clear()
 
 
         for s in range(n_sweeps):
             y_proc = self._get_processed_for(st.analyze_chan, s)
-            pks, breaths = peakdet.detect_peaks_and_breaths(
+
+            # Step 1: Detect ALL peaks (no threshold filtering)
+            # Note: User found that thresh=0 + min_distance works best (no prominence)
+            all_peak_indices = peakdet.detect_peaks(
                 y=y_proc, sr_hz=st.sr_hz,
-                thresh=thresh,
-                prominence=prom,
+                thresh=None,  # Don't filter by threshold yet
+                prominence=None,  # Don't use prominence for initial detection
                 min_dist_samples=min_dist_samples,
                 direction=direction,
+                return_all=True  # Return ALL detected peaks
             )
-            st.peaks_by_sweep[s] = pks
-            st.breath_by_sweep[s] = breaths  # dict with 'onsets', 'offsets', 'expmins'
+
+            # Step 2: Compute breath features for ALL peaks (including noise)
+            # This is needed for ML training - noise peaks need features too
+            if peakdet._USE_NUMBA_VERSION:
+                all_breaths = peakdet.compute_breath_events_numba(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+            else:
+                all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+
+            st.all_breaths_by_sweep[s] = all_breaths  # Store for ML metric computation
+
+            # Step 3: Label peaks using auto-detected threshold
+            all_peaks_data = peakdet.label_peaks_by_threshold(
+                y=y_proc,
+                peak_indices=all_peak_indices,
+                thresh=thresh,
+                direction=direction
+            )
+            st.all_peaks_by_sweep[s] = all_peaks_data
+
+            # Step 4: Extract only labeled breaths for display (backward compatibility)
+            labeled_mask = all_peaks_data['labels'] == 1
+            labeled_indices = all_peaks_data['indices'][labeled_mask]
+            st.peaks_by_sweep[s] = labeled_indices
+
+            # Recompute breath events for only labeled peaks (for display)
+            # This is simpler than trying to filter the all_breaths dict
+            if peakdet._USE_NUMBA_VERSION:
+                breaths = peakdet.compute_breath_events_numba(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+            else:
+                breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+
+            st.breath_by_sweep[s] = breaths
+
+            # Debug: Show peak detection stats
+            n_all = len(all_peak_indices)
+            n_labeled = len(labeled_indices)
+            n_noise = n_all - n_labeled
+            if s == 0:  # Only print for first sweep to avoid spam
+                print(f"[peak-detection] Sweep {s}: {n_all} total peaks ({n_labeled} breaths, {n_noise} noise)")
+
+        # Summary statistics for ML training data
+        total_all_peaks = sum(len(data['indices']) for data in st.all_peaks_by_sweep.values())
+        total_labeled_breaths = sum(len(pks) for pks in st.peaks_by_sweep.values())
+        total_noise_peaks = total_all_peaks - total_labeled_breaths
+        print(f"[peak-detection] ML training data: {total_all_peaks} total peaks ({total_labeled_breaths} breaths, {total_noise_peaks} noise)")
+
+        # Compute normalization statistics for relative metrics (Group B)
+        print("[peak-detection] Computing normalization statistics for relative metrics...")
+        self._compute_and_store_normalization_stats()
 
         # If a Y2 metric is selected, recompute it now that peaks/breaths changed
         if getattr(self.state, "y2_metric_key", None):
@@ -2273,6 +2326,124 @@ class MainWindow(QMainWindow):
         # Disable Apply button after successful peak detection
         # Will be re-enabled if channel, filter, or file changes
         self.ApplyPeakFindPushButton.setEnabled(False)
+
+    def _compute_and_store_normalization_stats(self):
+        """
+        Compute global normalization statistics for relative metrics.
+
+        This computes mean and std for key metrics across ALL detected peaks
+        in all sweeps, enabling normalized (z-score) versions of metrics.
+        """
+        from scipy.signal import peak_prominences
+        from core import metrics as core_metrics
+
+        st = self.state
+        if not st.peaks_by_sweep or not st.breath_by_sweep:
+            return
+
+        # Collect raw values across all sweeps
+        all_amp_insp = []
+        all_amp_exp = []
+        all_peak_to_trough = []
+        all_prominences = []
+        all_ibi = []
+        all_ti = []
+        all_te = []
+
+        for s in range(len(st.peaks_by_sweep)):
+            if s not in st.peaks_by_sweep or s not in st.breath_by_sweep:
+                continue
+
+            pks = st.peaks_by_sweep[s]
+            breaths = st.breath_by_sweep[s]
+
+            if len(pks) == 0:
+                continue
+
+            y_proc = self._get_processed_for(st.analyze_chan, s)
+            t = st.t  # Time vector
+
+            onsets = breaths.get('onsets', np.array([]))
+            offsets = breaths.get('offsets', np.array([]))
+            expmins = breaths.get('expmins', np.array([]))
+
+            # Compute prominences for all peaks
+            if len(pks) > 0:
+                proms = peak_prominences(y_proc, pks)[0]
+                all_prominences.extend(proms)
+
+            # Compute amp_insp for each breath cycle
+            for i in range(len(onsets) - 1):
+                onset_idx = int(onsets[i])
+                next_onset_idx = int(onsets[i + 1])
+
+                # Find peak in this cycle
+                pk_mask = (pks >= onset_idx) & (pks < next_onset_idx)
+                if not np.any(pk_mask):
+                    continue
+                pk_idx = int(pks[pk_mask][0])
+
+                # Amp insp
+                amp_insp = y_proc[pk_idx] - y_proc[onset_idx]
+                all_amp_insp.append(amp_insp)
+
+                # Amp exp (if expmin exists)
+                em_mask = (expmins >= onset_idx) & (expmins < next_onset_idx)
+                if np.any(em_mask):
+                    em_idx = int(expmins[em_mask][0])
+                    amp_exp = y_proc[next_onset_idx] - y_proc[em_idx]
+                    all_amp_exp.append(amp_exp)
+
+                    # Peak to trough
+                    peak_to_trough = y_proc[pk_idx] - y_proc[em_idx]
+                    all_peak_to_trough.append(peak_to_trough)
+
+                # Ti
+                if i < len(offsets):
+                    offset_idx = int(offsets[i])
+                    if onset_idx < offset_idx <= next_onset_idx:
+                        ti = t[offset_idx] - t[onset_idx]
+                        all_ti.append(ti)
+
+                        # Te
+                        te = t[next_onset_idx] - t[offset_idx]
+                        all_te.append(te)
+
+            # Compute IBI (inter-breath interval)
+            for i in range(len(pks) - 1):
+                ibi = t[pks[i + 1]] - t[pks[i]]
+                all_ibi.append(ibi)
+
+        # Compute global statistics
+        stats = {}
+
+        if len(all_amp_insp) > 0:
+            stats['amp_insp'] = {'mean': float(np.nanmean(all_amp_insp)), 'std': float(np.nanstd(all_amp_insp))}
+
+        if len(all_amp_exp) > 0:
+            stats['amp_exp'] = {'mean': float(np.nanmean(all_amp_exp)), 'std': float(np.nanstd(all_amp_exp))}
+
+        if len(all_peak_to_trough) > 0:
+            stats['peak_to_trough'] = {'mean': float(np.nanmean(all_peak_to_trough)), 'std': float(np.nanstd(all_peak_to_trough))}
+
+        if len(all_prominences) > 0:
+            stats['prominence'] = {'mean': float(np.nanmean(all_prominences)), 'std': float(np.nanstd(all_prominences))}
+
+        if len(all_ibi) > 0:
+            stats['ibi'] = {'mean': float(np.nanmean(all_ibi)), 'std': float(np.nanstd(all_ibi))}
+
+        if len(all_ti) > 0:
+            stats['ti'] = {'mean': float(np.nanmean(all_ti)), 'std': float(np.nanstd(all_ti))}
+
+        if len(all_te) > 0:
+            stats['te'] = {'mean': float(np.nanmean(all_te)), 'std': float(np.nanstd(all_te))}
+
+        # Store statistics in metrics module
+        core_metrics.set_normalization_stats(stats)
+
+        print(f"[normalization] Computed stats for {len(stats)} metric types")
+        if 'prominence' in stats:
+            print(f"[normalization]   prominence: mean={stats['prominence']['mean']:.4f}, std={stats['prominence']['std']:.4f}")
 
     def _compute_eupnea_from_gmm(self, sweep_idx: int, signal_length: int) -> np.ndarray:
         """
@@ -3515,7 +3686,7 @@ if __name__ == "__main__":
 
     # Add loading message
     splash.showMessage(
-        "Loading PlethApp...",
+        "Loading PhysioMetrics...",
         Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
         Qt.GlobalColor.white
     )
@@ -3534,7 +3705,7 @@ if __name__ == "__main__":
             app.processEvents()
             warmup_numba()
             splash.showMessage(
-                "Loading PlethApp...",
+                "Loading PhysioMetrics...",
                 Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
                 Qt.GlobalColor.white
             )

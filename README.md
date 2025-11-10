@@ -1,10 +1,22 @@
-# PlethApp - Breath Analysis Tool
+# PhysioMetrics - Respiratory Signal Analysis
 
-**PlethApp** is a desktop application for advanced respiratory signal analysis, providing comprehensive tools for breath pattern detection, eupnea/apnea identification, and breathing regularity assessment.
+**PhysioMetrics** is a desktop application for advanced respiratory signal analysis, providing comprehensive tools for breath pattern detection, eupnea/apnea identification, and breathing regularity assessment.
 
 ![Version](https://img.shields.io/badge/version-1.0.11-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+
+## Author & Funding
+
+**Developed by:** Ryan Sean Phillips
+**Institution:** Seattle Children's Research Institute, Norcliffe Foundation Center for Integrative Brain Research
+**Contact:** ryan.phillips@seattlechildrens.org
+**ORCID:** [0000-0002-8570-2348](https://orcid.org/0000-0002-8570-2348)
+
+**Funding:** This work was supported by the National Institute on Drug Abuse (NIDA) K01 Award K01DA058543.
+
+PhysioMetrics was developed as part of independent research funded by an NIH K01 Career Development Award to support respiratory signal analysis and breathing pattern characterization.
 
 ## Features
 
@@ -19,9 +31,9 @@
 
 ## Download
 
-**[Download PlethApp v1.0.11 for Windows](https://github.com/RyanSeanPhillips/plethapp_GUI/releases/latest)**
+**[Download PhysioMetrics v1.0.11 for Windows](https://github.com/RyanSeanPhillips/PhysioMetrics/releases/latest)**
 
-Download the ZIP file, extract it, and run `PlethApp_v1.0.11.exe` - no installation required!
+Download the ZIP file, extract it, and run `PhysioMetrics_v1.0.11.exe` - no installation required!
 
 ## Requirements
 
@@ -37,8 +49,8 @@ Download the ZIP file, extract it, and run `PlethApp_v1.0.11.exe` - no installat
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/RyanSeanPhillips/plethapp_GUI.git
-   cd plethapp_GUI
+   git clone https://github.com/RyanSeanPhillips/PhysioMetrics.git
+   cd PhysioMetrics
    ```
 
 2. **Install dependencies**
@@ -60,7 +72,7 @@ Download the ZIP file, extract it, and run `PlethApp_v1.0.11.exe` - no installat
 
 ## Quick Start
 
-1. Launch PlethApp
+1. Launch PhysioMetrics
 2. Load a data file (ABF, SMRX, or EDF format)
 3. Adjust filter settings if needed
 4. Click "Auto-Detect" to identify breath peaks
@@ -78,22 +90,36 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Citation
 
-If you use PlethApp in your research, please cite:
+If you use PhysioMetrics in your research, please cite:
 
 ```
-PlethApp: Advanced Breath Analysis Tool
-Ryan Phillips (2024)
-https://github.com/RyanSeanPhillips/plethapp_GUI
+Phillips, R.S. (2025). PhysioMetrics: Advanced Respiratory Signal Analysis Software (Version 1.0.11) [Software].
+GitHub. https://github.com/RyanSeanPhillips/PhysioMetrics
+DOI: [Zenodo DOI will be added upon first major release]
+```
+
+**BibTeX:**
+```bibtex
+@software{phillips2025physiometrics,
+  author = {Phillips, Ryan Sean},
+  title = {PhysioMetrics: Advanced Respiratory Signal Analysis Software},
+  year = {2025},
+  version = {1.0.11},
+  url = {https://github.com/RyanSeanPhillips/PhysioMetrics},
+  note = {Funded by NIDA K01 Award K01DA058543}
+}
 ```
 
 ## Support
 
 For issues, questions, or feature requests, please open an issue on GitHub:
-https://github.com/RyanSeanPhillips/plethapp_GUI/issues
+https://github.com/RyanSeanPhillips/PhysioMetrics/issues
 
 ## Acknowledgments
 
-PlethApp uses the following open-source libraries:
+This software was developed by Ryan Sean Phillips with support from the National Institute on Drug Abuse (NIDA) K01 Award K01DA058543.
+
+PhysioMetrics uses the following open-source libraries:
 - PyQt6 for the user interface
 - NumPy and SciPy for signal processing
 - Matplotlib for data visualization
@@ -103,5 +129,8 @@ PlethApp uses the following open-source libraries:
 ---
 
 **Version**: 1.0.11
-**Author**: Ryan Phillips
-**Repository**: https://github.com/RyanSeanPhillips/plethapp_GUI
+**Developer**: Ryan Sean Phillips
+**Institution**: Seattle Children's Research Institute
+**License**: MIT
+**Funding**: NIDA K01DA058543
+**Repository**: https://github.com/RyanSeanPhillips/PhysioMetrics

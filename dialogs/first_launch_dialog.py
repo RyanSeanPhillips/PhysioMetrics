@@ -1,5 +1,5 @@
 """
-First-launch dialog for PlethApp.
+First-launch dialog for PhysioMetrics.
 
 Shows welcome message and telemetry opt-in/opt-out on first run.
 """
@@ -25,7 +25,7 @@ class FirstLaunchDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Welcome to PlethApp")
+        self.setWindowTitle("Welcome to PhysioMetrics")
         self.setModal(True)
         self.resize(600, 500)
 
@@ -42,7 +42,7 @@ class FirstLaunchDialog(QDialog):
         layout.setSpacing(15)
 
         # Header
-        header = QLabel(f"<h2 style='color: #2a7fff;'>Welcome to PlethApp {VERSION_STRING}</h2>")
+        header = QLabel(f"<h2 style='color: #2a7fff;'>Welcome to PhysioMetrics {VERSION_STRING}</h2>")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
@@ -72,12 +72,12 @@ class FirstLaunchDialog(QDialog):
         layout.addWidget(whats_new)
 
         # Telemetry explanation group
-        telemetry_group = QGroupBox("Help Improve PlethApp")
+        telemetry_group = QGroupBox("Help Improve PhysioMetrics")
         telemetry_layout = QVBoxLayout()
 
         # Intro text
         intro_label = QLabel(
-            "<p>Share anonymous usage statistics to help improve PlethApp. "
+            "<p>Share anonymous usage statistics to help improve PhysioMetrics. "
             "Your data is completely anonymous and helps prioritize features and fix bugs.</p>"
         )
         intro_label.setWordWrap(True)
@@ -238,13 +238,13 @@ class FirstLaunchDialog(QDialog):
             <h3 style="color: #2a7fff;">What Data is Collected?</h3>
 
             <h4>Usage Data</h4>
-            <p>When you use PlethApp, we collect anonymous usage statistics:</p>
+            <p>When you use PhysioMetrics, we collect anonymous usage statistics:</p>
             <ul>
                 <li><b>File types:</b> Whether you load ABF, SMRX, or EDF files (not file names)</li>
                 <li><b>Features used:</b> Which tools you use (GMM, manual editing, spectral analysis)</li>
                 <li><b>Export types:</b> What you export (PDF, CSV, NPZ)</li>
                 <li><b>Session duration:</b> How long you use the app</li>
-                <li><b>System info:</b> OS, Python version, PlethApp version</li>
+                <li><b>System info:</b> OS, Python version, PhysioMetrics version</li>
             </ul>
 
             <h4>Crash Reports</h4>
@@ -269,7 +269,7 @@ class FirstLaunchDialog(QDialog):
             </ul>
 
             <h4>Why Opt-Out by Default?</h4>
-            <p>PlethApp uses an "opt-out" model (checkboxes pre-checked) because:</p>
+            <p>PhysioMetrics uses an "opt-out" model (checkboxes pre-checked) because:</p>
             <ul>
                 <li>This is academic research software (not commercial spyware)</li>
                 <li>All data is completely anonymous</li>

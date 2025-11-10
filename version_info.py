@@ -1,5 +1,5 @@
 """
-Version information for PlethApp Windows executable
+Version information for PhysioMetrics Windows executable
 This file contains metadata that will be embedded in the .exe file
 """
 
@@ -27,12 +27,12 @@ VSVersionInfo(
           u'040904B0',
           [
             StringStruct(u'CompanyName', u'Breath Analysis Lab'),
-            StringStruct(u'FileDescription', u'PlethApp - Advanced Breath Analysis Tool'),
+            StringStruct(u'FileDescription', u'PhysioMetrics - Advanced Breath Analysis Tool'),
             StringStruct(u'FileVersion', u'{VERSION_STRING}'),
-            StringStruct(u'InternalName', u'PlethApp'),
+            StringStruct(u'InternalName', u'PhysioMetrics'),
             StringStruct(u'LegalCopyright', u'Copyright © 2024 Ryan Phillips'),
-            StringStruct(u'OriginalFilename', u'PlethApp.exe'),
-            StringStruct(u'ProductName', u'PlethApp Breath Analysis'),
+            StringStruct(u'OriginalFilename', u'PhysioMetrics.exe'),
+            StringStruct(u'ProductName', u'PhysioMetrics Breath Analysis'),
             StringStruct(u'ProductVersion', u'{VERSION_STRING}'),
             StringStruct(u'Comments', u'Advanced respiratory signal analysis with eupnea and apnea detection')
           ]

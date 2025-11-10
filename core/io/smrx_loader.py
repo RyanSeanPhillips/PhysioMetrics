@@ -31,7 +31,7 @@ def load_smrx(file_path: str, progress_callback=None) -> Tuple[float, Dict[str, 
         - channel_names: List of channel names
         - t: Time vector in seconds
 
-    Compatible with PlethApp's ABF loader interface
+    Compatible with PhysioMetrics's ABF loader interface
     """
     file_path = Path(file_path)
 

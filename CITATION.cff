@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Phillips
+    given-names: Ryan Sean
+    orcid: https://orcid.org/0000-0002-8570-2348
+    affiliation: Seattle Children's Research Institute, Norcliffe Foundation Center for Integrative Brain Research
+    email: ryan.phillips@seattlechildrens.org
+title: "PhysioMetrics: Advanced Respiratory Signal Analysis Software"
+version: 1.0.13
+date-released: 2025-01-XX
+url: "https://github.com/RyanSeanPhillips/PhysioMetrics"
+repository-code: "https://github.com/RyanSeanPhillips/PhysioMetrics"
+license: MIT
+keywords:
+  - respiratory analysis
+  - breathing patterns
+  - signal processing
+  - breath detection
+  - plethysmography
+  - physiology
+  - neuroscience
+abstract: "PhysioMetrics is a desktop application for advanced respiratory signal analysis, providing comprehensive tools for breath pattern detection, eupnea/apnea identification, and breathing regularity assessment. Developed with support from NIDA K01 Award K01DA058543."

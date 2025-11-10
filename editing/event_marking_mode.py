@@ -1,5 +1,5 @@
 """
-Event Marking Mode for PlethApp.
+Event Marking Mode for PhysioMetrics.
 
 Handles manual event region marking with drag-and-drop functionality:
 - Click and drag to create new event regions

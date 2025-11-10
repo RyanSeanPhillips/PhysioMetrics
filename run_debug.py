@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Debug launcher for PlethApp
+Debug launcher for PhysioMetrics
 Use this to test the application before building the executable
 """
 
@@ -40,9 +40,9 @@ def check_imports():
     for name, module in imports:
         try:
             __import__(module)
-            print(f"  ✓ {name}")
+            print(f"  [OK] {name}")
         except ImportError as e:
-            print(f"  ✗ {name}: {e}")
+            print(f"  [FAIL] {name}: {e}")
             failed_imports.append(name)
 
     if failed_imports:
@@ -55,7 +55,7 @@ def check_imports():
 def main():
     """Main debug launcher."""
     print("="*50)
-    print("PlethApp Debug Launcher")
+    print("PhysioMetrics Debug Launcher")
     print("="*50)
 
     # Debug: Show environment variables
@@ -69,7 +69,7 @@ def main():
         if response.lower() != 'y':
             sys.exit(1)
 
-    print("\nLaunching PlethApp...")
+    print("\nLaunching PhysioMetrics...")
     print("Close the application window to return to this prompt.")
     print("-" * 50)
 
@@ -143,7 +143,7 @@ def main():
         splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
         splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         splash.showMessage(
-            f"Loading PlethApp v{VERSION_STRING}...",
+            f"Loading PhysioMetrics v{VERSION_STRING}...",
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
             Qt.GlobalColor.white
         )

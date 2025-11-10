@@ -1,5 +1,5 @@
 """
-Spectral Analysis Dialog for PlethApp.
+Spectral Analysis Dialog for PhysioMetrics.
 
 This dialog provides comprehensive spectral analysis tools for identifying
 and filtering oscillatory noise contamination in respiratory signals.

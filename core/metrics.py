@@ -21,6 +21,15 @@ Inputs:
 # Module-level storage for GMM probabilities (set by main window before computing metrics)
 _current_gmm_probabilities: Optional[Dict[int, float]] = None
 
+# Module-level storage for normalization statistics (for relative metrics)
+# Dict keys: 'amp_insp', 'amp_exp', 'peak_to_trough', 'prominence', 'ibi', 'ti', 'te'
+# Dict values: {'mean': float, 'std': float}
+_normalization_stats: Optional[Dict[str, Dict[str, float]]] = None
+
+# Module-level storage for auto-threshold model parameters (exp + 2 Gaussians)
+# Used to compute P(noise) and P(breath) for each peak
+_threshold_model_params: Optional[Dict[str, float]] = None
+
 
 def set_gmm_probabilities(probs: Optional[Dict[int, float]]):
     """
@@ -32,6 +41,55 @@ def set_gmm_probabilities(probs: Optional[Dict[int, float]]):
     """
     global _current_gmm_probabilities
     _current_gmm_probabilities = probs
+
+
+def set_normalization_stats(stats: Optional[Dict[str, Dict[str, float]]]):
+    """
+    Set normalization statistics for computing relative metrics.
+
+    This should be called by the main window after peak detection, providing
+    global mean and std for all detected peaks in the sweep.
+
+    Args:
+        stats: Dict with keys like 'amp_insp', 'prominence', etc.
+               Each value is a dict with 'mean' and 'std' keys.
+               None to clear statistics.
+
+    Example:
+        stats = {
+            'amp_insp': {'mean': 0.5, 'std': 0.15},
+            'prominence': {'mean': 0.3, 'std': 0.1},
+            ...
+        }
+    """
+    global _normalization_stats
+    _normalization_stats = stats
+
+
+def set_threshold_model_params(params: Optional[Dict[str, float]]):
+    """
+    Set auto-threshold model parameters (exponential + 2 Gaussians).
+
+    This should be called by the auto-threshold dialog after fitting the model.
+
+    Args:
+        params: Dict with model parameters:
+            - 'lambda_exp': Exponential decay rate
+            - 'mu1', 'sigma1', 'w_g1': First Gaussian (eupnea)
+            - 'mu2', 'sigma2', 'w_g2': Second Gaussian (sniffing)
+            - 'w_exp': Weight of exponential component
+            None to clear model parameters.
+
+    Example:
+        params = {
+            'lambda_exp': 5.0,
+            'mu1': 0.3, 'sigma1': 0.1, 'w_g1': 0.4,
+            'mu2': 0.6, 'sigma2': 0.15, 'w_g2': 0.3,
+            'w_exp': 0.3
+        }
+    """
+    global _threshold_model_params
+    _threshold_model_params = params
 
 # (human label, key)
 METRIC_SPECS: List[Tuple[str, str]] = [
@@ -52,6 +110,39 @@ METRIC_SPECS: List[Tuple[str, str]] = [
     ("Breathing regularity score (RMSSD)",    "regularity"),
     ("Sniffing confidence (GMM)",             "sniff_conf"),
     ("Eupnea confidence (GMM)",               "eupnea_conf"),
+    # Phase 2.1: Half-width features for ML
+    ("FWHM (full width at half max)",        "fwhm"),
+    ("Width at 25% of peak",                  "width_25"),
+    ("Width at 75% of peak",                  "width_75"),
+    ("Width ratio (75% / 25%)",               "width_ratio"),
+    # Phase 2.2: Sigh detection features for ML
+    ("Inflection point count",                "n_inflections"),
+    ("Rise phase variability (std of d/dt)",  "rise_variability"),
+    ("Shoulder peak count",                   "n_shoulder_peaks"),
+    ("Shoulder prominence (max)",             "shoulder_prominence"),
+    ("Rise phase autocorrelation",            "rise_autocorr"),
+    ("Peak sharpness (curvature)",            "peak_sharpness"),
+    ("Trough sharpness (curvature)",          "trough_sharpness"),
+    ("Skewness (asymmetry)",                  "skewness"),
+    ("Kurtosis (peakedness, excess)",         "kurtosis"),
+    # Phase 2.3 Group A: Shape & Ratio metrics
+    ("Peak-to-trough amplitude",              "peak_to_trough"),
+    ("Amplitude ratio (insp/exp)",            "amp_ratio"),
+    ("Ti/Te ratio (duty cycle)",              "ti_te_ratio"),
+    ("Area ratio (insp/exp)",                 "area_ratio"),
+    ("Total area (|insp| + |exp|)",           "total_area"),
+    ("IBI (inter-breath interval)",           "ibi"),
+    # Phase 2.3 Group B: Normalized metrics (z-scores)
+    ("Amp insp (normalized)",                 "amp_insp_norm"),
+    ("Amp exp (normalized)",                  "amp_exp_norm"),
+    ("Peak-to-trough (normalized)",           "peak_to_trough_norm"),
+    ("Prominence (normalized)",               "prominence_norm"),
+    ("IBI (normalized)",                      "ibi_norm"),
+    ("Ti (normalized)",                       "ti_norm"),
+    ("Te (normalized)",                       "te_norm"),
+    # Phase 2.3 Group C: Probability from auto-threshold
+    ("P(noise) - auto-threshold model",       "p_noise"),
+    ("P(breath) - auto-threshold model",      "p_breath"),
 ]
 
 
@@ -1256,6 +1347,1245 @@ def compute_area_exp_debug(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs
     print("==========================================\n")
     return result
 
+################################################################################
+##### Phase 2.1: Half-Width Features (ML Breath Classification)
+################################################################################
+
+def compute_fwhm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Full Width at Half Maximum (FWHM) per breath cycle.
+
+    Measures breath duration at 50% of peak amplitude (robust to noise).
+    For each breath: find time span where signal > (baseline + 0.5 * peak_amplitude).
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        # Find first peak in this cycle
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        # Half-maximum level
+        baseline = y[i0]
+        peak_amp = y[p] - baseline
+        half_max = baseline + 0.5 * peak_amp
+
+        # Find crossings of half-max level
+        breath_segment = y[i0:i1]
+        above_half = breath_segment >= half_max
+
+        if not np.any(above_half):
+            vals.append(np.nan)
+            continue
+
+        # Find first and last sample above half-max
+        above_indices = np.where(above_half)[0]
+        i_start = i0 + above_indices[0]
+        i_end = i0 + above_indices[-1]
+
+        # FWHM in seconds
+        fwhm_sec = float(t[i_end] - t[i_start])
+        vals.append(fwhm_sec if fwhm_sec > 0 else np.nan)
+
+    # Extend last span
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_width_25(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Width at 25% of peak amplitude (broader than FWHM, more stable for small peaks).
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        baseline = y[i0]
+        peak_amp = y[p] - baseline
+        level_25 = baseline + 0.25 * peak_amp
+
+        breath_segment = y[i0:i1]
+        above_25 = breath_segment >= level_25
+
+        if not np.any(above_25):
+            vals.append(np.nan)
+            continue
+
+        above_indices = np.where(above_25)[0]
+        i_start = i0 + above_indices[0]
+        i_end = i0 + above_indices[-1]
+
+        width_sec = float(t[i_end] - t[i_start])
+        vals.append(width_sec if width_sec > 0 else np.nan)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_width_75(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Width at 75% of peak amplitude (narrower than FWHM, sensitive to peak shape).
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        baseline = y[i0]
+        peak_amp = y[p] - baseline
+        level_75 = baseline + 0.75 * peak_amp
+
+        breath_segment = y[i0:i1]
+        above_75 = breath_segment >= level_75
+
+        if not np.any(above_75):
+            vals.append(np.nan)
+            continue
+
+        above_indices = np.where(above_75)[0]
+        i_start = i0 + above_indices[0]
+        i_end = i0 + above_indices[-1]
+
+        width_sec = float(t[i_end] - t[i_start])
+        vals.append(width_sec if width_sec > 0 else np.nan)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_width_ratio(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Width ratio: width_75 / width_25 (shape descriptor, ~0.3-0.5 for normal breaths).
+
+    - Ratio near 1.0: rectangular/flat peak (unusual)
+    - Ratio near 0.3-0.5: normal Gaussian-like peak
+    - Ratio near 0: very sharp peak (may be noise/artifact)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        baseline = y[i0]
+        peak_amp = y[p] - baseline
+        level_25 = baseline + 0.25 * peak_amp
+        level_75 = baseline + 0.75 * peak_amp
+
+        breath_segment = y[i0:i1]
+
+        # Width at 25%
+        above_25 = breath_segment >= level_25
+        if not np.any(above_25):
+            vals.append(np.nan)
+            continue
+        above_indices_25 = np.where(above_25)[0]
+        width_25 = float(t[i0 + above_indices_25[-1]] - t[i0 + above_indices_25[0]])
+
+        # Width at 75%
+        above_75 = breath_segment >= level_75
+        if not np.any(above_75):
+            vals.append(np.nan)
+            continue
+        above_indices_75 = np.where(above_75)[0]
+        width_75 = float(t[i0 + above_indices_75[-1]] - t[i0 + above_indices_75[0]])
+
+        # Ratio (avoid division by zero)
+        ratio = (width_75 / width_25) if width_25 > 0 else np.nan
+        vals.append(ratio)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+################################################################################
+##### Phase 2.2: Sigh Detection Features (ML Breath Classification)
+################################################################################
+
+def compute_n_inflections(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Count inflection points in rising phase (onset → peak).
+
+    Inflection points = sign changes in 2nd derivative (d²/dt²).
+    Normal breaths: 0-1 inflections
+    Sighs (double-hump): 2-4 inflections
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        # Rising phase: onset → peak
+        if p - i0 < 5:  # Too short to compute 2nd derivative
+            vals.append(np.nan)
+            continue
+
+        rising_phase = y[i0:p+1]
+
+        # Compute 2nd derivative (simple finite difference)
+        d2 = np.diff(rising_phase, n=2)
+
+        # Count sign changes in d2 (inflection points)
+        sign_changes = np.sum(np.diff(np.sign(d2)) != 0)
+        vals.append(float(sign_changes))
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_rise_variability(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Variability of derivative in rising phase (standard deviation of d/dt).
+
+    High variability → irregular, bumpy rise (sigh or noise)
+    Low variability → smooth rise (normal breath)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        if p - i0 < 3:
+            vals.append(np.nan)
+            continue
+
+        rising_phase = y[i0:p+1]
+        d1 = np.diff(rising_phase)
+
+        # Standard deviation of derivative
+        rise_var = float(np.std(d1))
+        vals.append(rise_var)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_n_shoulder_peaks(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Count secondary peaks (shoulders) in rising phase.
+
+    Uses scipy.signal.find_peaks to detect local maxima in rising phase.
+    Normal breaths: 0-1 shoulder peaks
+    Sighs: 1-3 shoulder peaks (double/triple hump)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    try:
+        from scipy.signal import find_peaks as scipy_find_peaks
+    except ImportError:
+        # Fallback: return NaN if scipy not available
+        return np.full(len(y), np.nan, dtype=float)
+
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        if p - i0 < 10:  # Too short to reliably detect shoulders
+            vals.append(np.nan)
+            continue
+
+        rising_phase = y[i0:p+1]
+
+        # Find local maxima (excluding the main peak at end)
+        # Use low prominence threshold to catch subtle shoulders
+        min_prom = np.std(rising_phase) * 0.1  # 10% of local variability
+        shoulders, _ = scipy_find_peaks(rising_phase[:-1], prominence=min_prom)
+
+        vals.append(float(len(shoulders)))
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_shoulder_prominence(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Maximum prominence of secondary peaks (shoulders) in rising phase.
+
+    High shoulder prominence → strong double-hump (sigh)
+    Low/zero prominence → smooth rise (normal breath)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    try:
+        from scipy.signal import find_peaks as scipy_find_peaks
+    except ImportError:
+        return np.full(len(y), np.nan, dtype=float)
+
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        if p - i0 < 10:
+            vals.append(np.nan)
+            continue
+
+        rising_phase = y[i0:p+1]
+        min_prom = np.std(rising_phase) * 0.1
+        shoulders, props = scipy_find_peaks(rising_phase[:-1], prominence=min_prom)
+
+        if len(shoulders) > 0 and 'prominences' in props:
+            max_prom = float(np.max(props['prominences']))
+            vals.append(max_prom)
+        else:
+            vals.append(0.0)  # No shoulders = zero prominence
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_rise_autocorr(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Autocorrelation of rising phase at lag = 25% of rise duration.
+
+    High autocorrelation → periodic/oscillatory rise (double-hump sigh)
+    Low autocorrelation → aperiodic smooth rise (normal breath)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        if p - i0 < 20:  # Too short for meaningful autocorrelation
+            vals.append(np.nan)
+            continue
+
+        rising_phase = y[i0:p+1]
+
+        # Zero-mean the signal
+        rising_centered = rising_phase - np.mean(rising_phase)
+
+        # Lag = 25% of rise duration (to detect double-hump periodicity)
+        lag = max(1, int(len(rising_centered) * 0.25))
+
+        if lag >= len(rising_centered):
+            vals.append(np.nan)
+            continue
+
+        # Autocorrelation at lag
+        c0 = np.dot(rising_centered, rising_centered)  # Variance
+        c_lag = np.dot(rising_centered[:-lag], rising_centered[lag:])
+
+        autocorr = (c_lag / c0) if c0 > 0 else 0.0
+        vals.append(float(autocorr))
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_peak_sharpness(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Curvature at peak (negative of 2nd derivative at peak index).
+
+    High sharpness → pointy peak (normal breath or noise)
+    Low sharpness → rounded peak (sigh, slow breath)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        mask = (pk >= i0) & (pk < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask][0])
+
+        # Need at least 2 samples on each side of peak for 2nd derivative
+        if p < 2 or p >= N - 2:
+            vals.append(np.nan)
+            continue
+
+        # 2nd derivative at peak (central difference)
+        d2_peak = y[p+1] + y[p-1] - 2*y[p]
+
+        # Curvature = -d2 (negative because peak is a local maximum)
+        curvature = float(-d2_peak)
+        vals.append(curvature)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_trough_sharpness(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Curvature at expiratory minimum (2nd derivative at expmin index).
+
+    High sharpness → pointy trough (abrupt expiration)
+    Low sharpness → rounded trough (gradual expiration)
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or expmins is None or len(expmins) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    em = np.asarray(expmins, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        # Find expmin in this cycle
+        mask = (em >= i0) & (em < i1)
+        if not np.any(mask):
+            vals.append(np.nan)
+            continue
+        expmin_idx = int(em[mask][0])
+
+        if expmin_idx < 2 or expmin_idx >= N - 2:
+            vals.append(np.nan)
+            continue
+
+        # 2nd derivative at expmin
+        d2_trough = y[expmin_idx+1] + y[expmin_idx-1] - 2*y[expmin_idx]
+
+        # Curvature = +d2 (positive because trough is a local minimum)
+        curvature = float(d2_trough)
+        vals.append(curvature)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_skewness(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Statistical skewness of breath segment (onset → next onset).
+
+    Skewness > 0: Right-skewed (long tail toward peak) - gradual rise, fast fall
+    Skewness < 0: Left-skewed (long tail toward trough) - fast rise, gradual fall
+    Skewness ≈ 0: Symmetric breath
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    try:
+        from scipy.stats import skew
+    except ImportError:
+        # Fallback: manual skewness calculation
+        def skew(x):
+            x_centered = x - np.mean(x)
+            std = np.std(x)
+            if std == 0:
+                return 0.0
+            return np.mean((x_centered / std) ** 3)
+
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        if i1 - i0 < 5:  # Too short for meaningful statistics
+            vals.append(np.nan)
+            continue
+
+        breath_segment = y[i0:i1]
+        skewness = float(skew(breath_segment))
+        vals.append(skewness)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_kurtosis(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Statistical kurtosis of breath segment (onset → next onset).
+
+    Kurtosis > 3: Leptokurtic (heavy tails, sharp peak) - spiky breath
+    Kurtosis = 3: Normal distribution (Gaussian-like)
+    Kurtosis < 3: Platykurtic (light tails, flat peak) - rounded sigh
+
+    Returns excess kurtosis (kurtosis - 3) for easier interpretation:
+    - Excess > 0: Sharper than Gaussian
+    - Excess = 0: Gaussian-like
+    - Excess < 0: Flatter than Gaussian
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    try:
+        from scipy.stats import kurtosis as scipy_kurtosis
+    except ImportError:
+        # Fallback: manual kurtosis calculation
+        def scipy_kurtosis(x, fisher=True):
+            x_centered = x - np.mean(x)
+            std = np.std(x)
+            if std == 0:
+                return 0.0
+            kurt = np.mean((x_centered / std) ** 4)
+            return (kurt - 3.0) if fisher else kurt
+
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        if i1 - i0 < 5:
+            vals.append(np.nan)
+            continue
+
+        breath_segment = y[i0:i1]
+        # Fisher=True returns excess kurtosis (kurtosis - 3)
+        kurt = float(scipy_kurtosis(breath_segment, fisher=True))
+        vals.append(kurt)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+################################################################################
+##### Phase 2.3: Relative Features & Shape Metrics (ML Breath Classification)
+################################################################################
+
+# ========== GROUP A: SHAPE & RATIO METRICS (context-independent) ==========
+
+def compute_peak_to_trough(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Full breath amplitude: inspiratory peak → expiratory minimum.
+
+    Measures total vertical excursion of breath cycle.
+    Sighs typically have 2-3× larger peak-to-trough than normal breaths.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+    if expmins is None or len(expmins) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    em = np.asarray(expmins, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        # Find peak in this cycle
+        mask_pk = (pk >= i0) & (pk < i1)
+        if not np.any(mask_pk):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask_pk][0])
+
+        # Find expmin in this cycle
+        mask_em = (em >= i0) & (em < i1)
+        if not np.any(mask_em):
+            vals.append(np.nan)
+            continue
+        e = int(em[mask_em][0])
+
+        # Peak to trough amplitude
+        amplitude = float(y[p] - y[e])
+        vals.append(amplitude)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_amp_ratio(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Amplitude ratio: amp_insp / amp_exp (breath symmetry).
+
+    - Ratio > 1: Larger inspiration than expiration
+    - Ratio = 1: Symmetric breath
+    - Ratio < 1: Larger expiration (unusual)
+
+    Sighs often have different symmetry than normal breaths.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) == 0 or peaks is None or len(peaks) == 0:
+        return out
+    if expmins is None or len(expmins) == 0:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    pk = np.asarray(peaks, dtype=int)
+    em = np.asarray(expmins, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0, i1 = int(on[i]), int(on[i + 1])
+
+        # Inspiratory amplitude
+        mask_pk = (pk >= i0) & (pk < i1)
+        if not np.any(mask_pk):
+            vals.append(np.nan)
+            continue
+        p = int(pk[mask_pk][0])
+        amp_insp = y[p] - y[i0]
+
+        # Expiratory amplitude
+        mask_em = (em >= i0) & (em < i1)
+        if not np.any(mask_em):
+            vals.append(np.nan)
+            continue
+        e = int(em[mask_em][0])
+
+        # Next onset for expiratory amplitude
+        if i + 1 < len(on):
+            next_onset = int(on[i + 1])
+            amp_exp = y[next_onset] - y[e]
+        else:
+            amp_exp = np.nan
+
+        # Ratio (avoid division by zero)
+        if amp_exp > 0:
+            ratio = amp_insp / amp_exp
+            vals.append(float(ratio))
+        else:
+            vals.append(np.nan)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_ti_te_ratio(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Duty cycle ratio: Ti / Te (inspiration time / expiration time).
+
+    - Ratio > 1: Longer inspiration (unusual in mice)
+    - Ratio = 0.5-0.8: Normal mouse breathing
+    - Ratio < 0.5: Very short inspiration
+
+    Sighs may have different duty cycle than normal breaths.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) < 2 or offsets is None or len(offsets) < 1:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    off = np.asarray(offsets, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0 = int(on[i])
+        i1 = int(on[i + 1])
+
+        # Ti: onset → offset
+        if i >= len(off):
+            vals.append(np.nan)
+            continue
+        oi = int(off[i])
+        if not (i0 < oi <= i1):
+            vals.append(np.nan)
+            continue
+        ti = float(t[oi] - t[i0])
+
+        # Te: offset → next onset
+        te = float(t[i1] - t[oi])
+
+        # Ratio (avoid division by zero)
+        if te > 0:
+            ratio = ti / te
+            vals.append(float(ratio))
+        else:
+            vals.append(np.nan)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_area_ratio(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Area ratio: area_insp / area_exp (volume symmetry).
+
+    Measures relative "volume" of inspiration vs expiration.
+    - Ratio > 1: More inspiratory volume
+    - Ratio = 1: Symmetric volume
+    - Ratio < 1: More expiratory volume
+
+    Sighs often have different volume ratios than normal breaths.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) < 2 or offsets is None or len(offsets) < 1:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    off = np.asarray(offsets, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0 = int(on[i])
+        i1 = int(on[i + 1])
+
+        # Check offset exists and is valid
+        if i >= len(off):
+            vals.append(np.nan)
+            continue
+        oi = int(off[i])
+        if not (i0 < oi <= i1):
+            vals.append(np.nan)
+            continue
+
+        # Inspiratory area (onset → offset)
+        area_insp = _trapz_seg(t, y, i0, oi)
+
+        # Expiratory area (offset → next onset), take absolute value
+        area_exp = abs(_trapz_seg(t, y, oi, i1))
+
+        # Ratio (avoid division by zero)
+        if area_exp > 0 and not np.isnan(area_insp) and not np.isnan(area_exp):
+            ratio = area_insp / area_exp
+            vals.append(float(ratio))
+        else:
+            vals.append(np.nan)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_ibi(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Inter-breath interval (IBI): time to next peak in seconds.
+
+    Measures spacing between consecutive breaths.
+    - Normal breathing: ~0.3-0.5s IBI (2-3 Hz)
+    - Post-sigh pause: Often 1.5-2× longer IBI
+
+    Critical for detecting post-sigh breathing pattern changes.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if peaks is None or len(peaks) < 2:
+        return out
+
+    pk = np.asarray(peaks, dtype=int)
+
+    # Use peaks as boundaries for spans (not onsets)
+    spans = _spans_from_bounds(pk, N)
+
+    vals: list[float] = []
+    for i in range(len(pk) - 1):
+        p0 = int(pk[i])
+        p1 = int(pk[i + 1])
+
+        # Time between peaks
+        ibi = float(t[p1] - t[p0])
+        vals.append(ibi)
+
+    # Last breath has no next peak
+    vals.append(np.nan)
+    return _step_fill(N, spans, vals)
+
+
+def compute_total_area(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Total breath area: |area_insp| + |area_exp| (total volume per breath).
+
+    Measures total "volume" of breath cycle (inspiration + expiration).
+    Sighs have much larger total area than normal breaths.
+
+    More robust than individual area metrics since it doesn't depend on
+    accurate onset/offset detection - just sums all movement in cycle.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if onsets is None or len(onsets) < 2 or offsets is None or len(offsets) < 1:
+        return out
+
+    on = np.asarray(onsets, dtype=int)
+    off = np.asarray(offsets, dtype=int)
+    spans = _spans_from_bounds(on, N)
+
+    vals: list[float] = []
+    for i in range(len(on) - 1):
+        i0 = int(on[i])
+        i1 = int(on[i + 1])
+
+        # Check offset exists and is valid
+        if i >= len(off):
+            vals.append(np.nan)
+            continue
+        oi = int(off[i])
+        if not (i0 < oi <= i1):
+            vals.append(np.nan)
+            continue
+
+        # Inspiratory area (onset → offset)
+        area_insp = _trapz_seg(t, y, i0, oi)
+
+        # Expiratory area (offset → next onset), take absolute value
+        area_exp = abs(_trapz_seg(t, y, oi, i1))
+
+        # Total area
+        if not np.isnan(area_insp) and not np.isnan(area_exp):
+            total = abs(area_insp) + area_exp  # Take abs of insp too for consistency
+            vals.append(float(total))
+        else:
+            vals.append(np.nan)
+
+    vals.append(vals[-1] if len(vals) else np.nan)
+    return _step_fill(N, spans, vals)
+
+
+# ========== GROUP B: NORMALIZED METRICS (ML-ready, context-dependent) ==========
+
+def _compute_normalized_metric(base_metric_data: np.ndarray, stat_key: str) -> np.ndarray:
+    """
+    Helper: Compute z-score normalization for a metric using global statistics.
+
+    Args:
+        base_metric_data: Raw metric values (can contain NaN)
+        stat_key: Key to look up in _normalization_stats (e.g., 'amp_insp')
+
+    Returns:
+        Z-score normalized array (same shape as input)
+    """
+    if _normalization_stats is None or stat_key not in _normalization_stats:
+        # No normalization stats available - return NaN
+        return np.full_like(base_metric_data, np.nan, dtype=float)
+
+    stats = _normalization_stats[stat_key]
+    mean_val = stats.get('mean', 0.0)
+    std_val = stats.get('std', 1.0)
+
+    # Z-score: (x - mean) / std
+    if std_val > 0:
+        return (base_metric_data - mean_val) / std_val
+    else:
+        # Zero std - all values identical, return zeros
+        return np.zeros_like(base_metric_data, dtype=float)
+
+
+def compute_amp_insp_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized inspiratory amplitude (z-score relative to all peaks in sweep).
+
+    Z-score = (amp_insp - mean_all) / std_all
+
+    Sighs typically have amp_insp_norm > 2.0 (2+ standard deviations above mean).
+    Normal breaths: -1.0 to 1.0
+    Small/noise breaths: < -1.0
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    # Compute raw metric
+    raw = compute_amp_insp(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs)
+    # Normalize
+    return _compute_normalized_metric(raw, 'amp_insp')
+
+
+def compute_amp_exp_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized expiratory amplitude (z-score relative to all peaks in sweep).
+
+    Z-score = (amp_exp - mean_all) / std_all
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    raw = compute_amp_exp(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs)
+    return _compute_normalized_metric(raw, 'amp_exp')
+
+
+def compute_peak_to_trough_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized peak-to-trough amplitude (z-score relative to all peaks).
+
+    Z-score = (peak_to_trough - mean_all) / std_all
+
+    Most robust amplitude metric for sigh detection.
+    Sighs: norm > 2.0
+    Normal: -1.0 to 1.0
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    raw = compute_peak_to_trough(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs)
+    return _compute_normalized_metric(raw, 'peak_to_trough')
+
+
+def compute_prominence_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized peak prominence (z-score relative to all peaks).
+
+    Z-score = (prominence - mean_all) / std_all
+
+    CRITICAL for ML: This is what auto-threshold uses!
+    Peaks with norm < 0 are typically classified as noise.
+    Peaks with norm > 0 are typically real breaths.
+
+    Returns stepwise-constant array over peak-bounded spans.
+    """
+    # We need to compute prominence for each peak
+    # This requires accessing scipy.signal.find_peaks with return_properties
+    from scipy.signal import find_peaks, peak_prominences
+
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if peaks is None or len(peaks) == 0:
+        return out
+
+    pk = np.asarray(peaks, dtype=int)
+
+    # Compute prominences
+    proms = peak_prominences(y, pk)[0]
+
+    # Use peaks as boundaries for spans
+    spans = _spans_from_bounds(pk, N)
+
+    # Fill with prominence values
+    for i, ((i0, i1), prom) in enumerate(zip(spans, proms)):
+        out[i0:i1] = float(prom)
+
+    # Normalize
+    return _compute_normalized_metric(out, 'prominence')
+
+
+def compute_ibi_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized inter-breath interval (z-score relative to all peaks).
+
+    Z-score = (ibi - mean_all) / std_all
+
+    CRITICAL for post-sigh detection!
+    - Normal IBI: -0.5 to 0.5
+    - Post-sigh pause: > 1.5 (significantly longer than average)
+
+    Returns stepwise-constant array over peak-bounded spans.
+    """
+    raw = compute_ibi(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs)
+    return _compute_normalized_metric(raw, 'ibi')
+
+
+def compute_ti_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized inspiratory time (z-score relative to all peaks).
+
+    Z-score = (ti - mean_all) / std_all
+
+    Sighs often have longer Ti than normal breaths.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    raw = compute_ti(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs)
+    return _compute_normalized_metric(raw, 'ti')
+
+
+def compute_te_norm(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Normalized expiratory time (z-score relative to all peaks).
+
+    Z-score = (te - mean_all) / std_all
+
+    Post-sigh breaths often have longer Te.
+
+    Returns stepwise-constant array over onset→next-onset spans.
+    """
+    raw = compute_te(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs)
+    return _compute_normalized_metric(raw, 'te')
+
+
+# ========== GROUP C: PROBABILITY FROM AUTO-THRESHOLD MODEL ==========
+
+def _evaluate_threshold_model(h: float) -> tuple[float, float]:
+    """
+    Evaluate exponential + 2 Gaussians model at height h.
+
+    Returns:
+        (p_noise, p_breath): Probabilities that peak is noise vs real breath
+    """
+    if _threshold_model_params is None:
+        return (np.nan, np.nan)
+
+    p = _threshold_model_params
+
+    # Exponential component (noise)
+    lambda_exp = p.get('lambda_exp', 1.0)
+    w_exp = p.get('w_exp', 0.3)
+    exp_val = lambda_exp * np.exp(-lambda_exp * h) * w_exp
+
+    # Gaussian 1 (eupnea)
+    mu1 = p.get('mu1', 0.3)
+    sigma1 = p.get('sigma1', 0.1)
+    w_g1 = p.get('w_g1', 0.4)
+    g1_val = (1.0 / (np.sqrt(2 * np.pi) * sigma1)) * np.exp(-0.5 * ((h - mu1) / sigma1) ** 2) * w_g1
+
+    # Gaussian 2 (sniffing)
+    mu2 = p.get('mu2', 0.6)
+    sigma2 = p.get('sigma2', 0.15)
+    w_g2 = p.get('w_g2', 0.3)
+    g2_val = (1.0 / (np.sqrt(2 * np.pi) * sigma2)) * np.exp(-0.5 * ((h - mu2) / sigma2) ** 2) * w_g2
+
+    # Normalize to probabilities
+    total = exp_val + g1_val + g2_val
+    if total > 0:
+        p_noise = exp_val / total
+        p_breath = (g1_val + g2_val) / total
+    else:
+        p_noise = 0.5
+        p_breath = 0.5
+
+    return (float(p_noise), float(p_breath))
+
+
+def compute_p_noise(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Probability that peak is noise based on auto-threshold model.
+
+    Uses exponential + 2 Gaussians fit from auto-threshold dialog.
+    P(noise | peak_height) = exp_component / (exp + gauss1 + gauss2)
+
+    - p_noise near 1.0: Almost certainly noise
+    - p_noise near 0.5: Ambiguous (near threshold)
+    - p_noise near 0.0: Almost certainly real breath
+
+    Returns stepwise-constant array over peak-bounded spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if peaks is None or len(peaks) == 0:
+        return out
+    if _threshold_model_params is None:
+        # Model not available - return NaN
+        return out
+
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(pk, N)
+
+    for i, (p_idx, (i0, i1)) in enumerate(zip(pk, spans)):
+        peak_height = float(y[p_idx])
+        p_noise, _ = _evaluate_threshold_model(peak_height)
+        out[i0:i1] = p_noise
+
+    return out
+
+
+def compute_p_breath(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None) -> np.ndarray:
+    """
+    Probability that peak is a real breath based on auto-threshold model.
+
+    Uses exponential + 2 Gaussians fit from auto-threshold dialog.
+    P(breath | peak_height) = (gauss1 + gauss2) / (exp + gauss1 + gauss2)
+
+    - p_breath near 1.0: Almost certainly real breath
+    - p_breath near 0.5: Ambiguous (near threshold)
+    - p_breath near 0.0: Almost certainly noise
+
+    Returns stepwise-constant array over peak-bounded spans.
+    """
+    N = len(y)
+    out = np.full(N, np.nan, dtype=float)
+
+    if peaks is None or len(peaks) == 0:
+        return out
+    if _threshold_model_params is None:
+        # Model not available - return NaN
+        return out
+
+    pk = np.asarray(peaks, dtype=int)
+    spans = _spans_from_bounds(pk, N)
+
+    for i, (p_idx, (i0, i1)) in enumerate(zip(pk, spans)):
+        peak_height = float(y[p_idx])
+        _, p_breath = _evaluate_threshold_model(peak_height)
+        out[i0:i1] = p_breath
+
+    return out
+
+
 # Set this to True to enable detailed diagnostic output for Te and area_exp
 ENABLE_DEBUG_OUTPUT = False
 
@@ -1278,6 +2608,39 @@ METRICS: Dict[str, Callable] = {
     "regularity":  compute_regularity_score,
     "sniff_conf":  compute_sniff_confidence,
     "eupnea_conf": compute_eupnea_confidence,
+    # Phase 2.1: Half-width features for ML
+    "fwhm":        compute_fwhm,
+    "width_25":    compute_width_25,
+    "width_75":    compute_width_75,
+    "width_ratio": compute_width_ratio,
+    # Phase 2.2: Sigh detection features for ML
+    "n_inflections":       compute_n_inflections,
+    "rise_variability":    compute_rise_variability,
+    "n_shoulder_peaks":    compute_n_shoulder_peaks,
+    "shoulder_prominence": compute_shoulder_prominence,
+    "rise_autocorr":       compute_rise_autocorr,
+    "peak_sharpness":      compute_peak_sharpness,
+    "trough_sharpness":    compute_trough_sharpness,
+    "skewness":            compute_skewness,
+    "kurtosis":            compute_kurtosis,
+    # Phase 2.3 Group A: Shape & Ratio metrics
+    "peak_to_trough":      compute_peak_to_trough,
+    "amp_ratio":           compute_amp_ratio,
+    "ti_te_ratio":         compute_ti_te_ratio,
+    "area_ratio":          compute_area_ratio,
+    "total_area":          compute_total_area,
+    "ibi":                 compute_ibi,
+    # Phase 2.3 Group B: Normalized metrics
+    "amp_insp_norm":       compute_amp_insp_norm,
+    "amp_exp_norm":        compute_amp_exp_norm,
+    "peak_to_trough_norm": compute_peak_to_trough_norm,
+    "prominence_norm":     compute_prominence_norm,
+    "ibi_norm":            compute_ibi_norm,
+    "ti_norm":             compute_ti_norm,
+    "te_norm":             compute_te_norm,
+    # Phase 2.3 Group C: Probability from auto-threshold
+    "p_noise":             compute_p_noise,
+    "p_breath":            compute_p_breath,
 }
 
 # Optional: Enable robust metrics mode

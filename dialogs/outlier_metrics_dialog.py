@@ -1,5 +1,5 @@
 """
-Outlier Metrics Selection Dialog for PlethApp.
+Outlier Metrics Selection Dialog for PhysioMetrics.
 
 This dialog allows users to select which breath metrics should be used for
 outlier detection during breathing analysis.

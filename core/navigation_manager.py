@@ -1,5 +1,5 @@
 """
-NavigationManager - Handles all navigation functionality for PlethApp.
+NavigationManager - Handles all navigation functionality for PhysioMetrics.
 
 This module manages:
 - Sweep navigation (prev/next sweep)

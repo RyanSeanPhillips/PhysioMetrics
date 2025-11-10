@@ -1,5 +1,5 @@
 """
-GMM Clustering Dialog for PlethApp.
+GMM Clustering Dialog for PhysioMetrics.
 
 This dialog provides an interface for Gaussian Mixture Model (GMM) clustering
 of breath patterns to identify eupnea and sniffing behaviors.

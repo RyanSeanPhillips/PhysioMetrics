@@ -1,5 +1,5 @@
 """
-PlethApp Help Dialog
+PhysioMetrics Help Dialog
 
 Quick reference guide with workflow and exported data documentation.
 """
@@ -17,7 +17,7 @@ class HelpDialog(QDialog):
 
     def __init__(self, parent=None, update_info=None):
         super().__init__(parent)
-        self.setWindowTitle("PlethApp - Quick Reference")
+        self.setWindowTitle("PhysioMetrics - Quick Reference")
         self.resize(850, 700)
         self.update_info = update_info  # Pre-checked update info from main window
 
@@ -29,7 +29,7 @@ class HelpDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Header with app info
-        header = QLabel("<h1>PlethApp - Quick Reference Guide</h1>")
+        header = QLabel("<h1>PhysioMetrics - Quick Reference Guide</h1>")
         header.setStyleSheet("color: #2a7fff; padding: 10px;")
         layout.addWidget(header)
 
@@ -144,7 +144,7 @@ class HelpDialog(QDialog):
                 <li><b>.abf</b> - Axon Binary Format (pCLAMP)</li>
                 <li><b>.smrx</b> - Spike2 64-bit format (requires son64.dll)</li>
                 <li><b>.edf</b> - European Data Format</li>
-                <li><b>.pleth.npz</b> - PlethApp session files (save/load complete analysis)</li>
+                <li><b>.pleth.npz</b> - PhysioMetrics session files (save/load complete analysis)</li>
             </ul>
 
         </body>
@@ -175,7 +175,7 @@ class HelpDialog(QDialog):
 
             <h3 style="color: #2a7fff; margin-top: 20px;">2. Session State (always saved)</h3>
             <p><b>Filename:</b> <code>[name]_session.npz</code> <i>(~8 MB, <1s to save)</i></p>
-            <p><b>Contains:</b> Complete analysis session state including detected peaks, manual labels, filter settings, GMM clustering results, and all parameters. Enables resuming work later - when you open a file that was previously analyzed, PlethApp prompts: "Resume analysis or start over?"</p>
+            <p><b>Contains:</b> Complete analysis session state including detected peaks, manual labels, filter settings, GMM clustering results, and all parameters. Enables resuming work later - when you open a file that was previously analyzed, PhysioMetrics prompts: "Resume analysis or start over?"</p>
 
             <h3 style="color: #2a7fff; margin-top: 20px;">3. Breaths CSV (optional)</h3>
             <p><b>Filename:</b> <code>[name]_breaths.csv</code> <i>(~1-2s to save)</i></p>
@@ -385,8 +385,17 @@ class HelpDialog(QDialog):
 
         # Create widget to hold content
         widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        main_layout = QVBoxLayout(widget)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Create three-column layout
+        from PyQt6.QtWidgets import QHBoxLayout
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(15)
+
+        # LEFT COLUMN
+        left_column = QVBoxLayout()
+        left_column.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
         # Add splash screen image
         image_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -394,30 +403,30 @@ class HelpDialog(QDialog):
         if os.path.exists(image_path):
             image_label = QLabel()
             pixmap = QPixmap(image_path)
-            # Scale image to half size
-            scaled_pixmap = pixmap.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio,
+            # Scale image to smaller size for three-column layout
+            scaled_pixmap = pixmap.scaled(130, 130, Qt.AspectRatioMode.KeepAspectRatio,
                                          Qt.TransformationMode.SmoothTransformation)
             image_label.setPixmap(scaled_pixmap)
             image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(image_label)
+            left_column.addWidget(image_label)
 
         # Add version info
-        version_label = QLabel(f"<h2 style='color: #2a7fff;'>PlethApp</h2><p style='font-size: 14pt;'>Version {VERSION_STRING}</p>")
+        version_label = QLabel(f"<h2 style='color: #2a7fff;'>PhysioMetrics</h2><p style='font-size: 11pt;'>Version {VERSION_STRING}</p>")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(version_label)
+        left_column.addWidget(version_label)
 
         # Check for updates button
         from PyQt6.QtWidgets import QPushButton
         check_update_btn = QPushButton("Check for Updates")
-        check_update_btn.setMaximumWidth(200)
+        check_update_btn.setMaximumWidth(160)
         check_update_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3a3a3a;
                 color: #e0e0e0;
                 border: 1px solid #4a4a4a;
-                padding: 8px 16px;
+                padding: 5px 10px;
                 border-radius: 3px;
-                font-size: 10pt;
+                font-size: 9pt;
             }
             QPushButton:hover {
                 background-color: #4a4a4a;
@@ -427,9 +436,9 @@ class HelpDialog(QDialog):
             }
         """)
         check_update_btn.clicked.connect(self._on_check_updates_clicked)
-        layout.addWidget(check_update_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        left_column.addWidget(check_update_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        layout.addSpacing(10)
+        left_column.addSpacing(8)
 
         # Update status label
         self.update_label = QLabel()
@@ -437,25 +446,74 @@ class HelpDialog(QDialog):
         self.update_label.setOpenExternalLinks(True)
         self.update_label.setTextFormat(Qt.TextFormat.RichText)
         self.update_label.setWordWrap(True)
-        self.update_label.setMaximumWidth(500)
-        layout.addWidget(self.update_label)
+        self.update_label.setMaximumWidth(220)
+        left_column.addWidget(self.update_label)
 
         # Perform initial update check asynchronously to avoid blocking UI
         self._check_for_updates_async()
 
-        # Add description
-        description = QLabel(
-            "<p style='text-align: center; max-width: 500px;'>"
-            "Advanced respiratory signal analysis tool for breath pattern detection, "
-            "eupnea/apnea identification, and breathing regularity assessment."
-            "</p>"
-        )
-        description.setWordWrap(True)
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(description)
+        left_column.addStretch()
 
-        # Add spacing before telemetry settings
-        layout.addSpacing(30)
+        # MIDDLE COLUMN
+        middle_column = QVBoxLayout()
+        middle_column.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Add author and citation information
+        info_html = """
+            <div style='text-align: left; padding: 5px;'>
+                <p style='font-size: 9pt; margin-bottom: 8px;'>
+                    <b>Advanced respiratory signal analysis tool for breath pattern detection<br>
+                    and eupnea/apnea identification.</b>
+                </p>
+
+                <p style='font-size: 9pt; margin-top: 8px; margin-bottom: 3px;'>
+                    <b style='color: #2a7fff;'>Developer</b><br>
+                    Ryan Sean Phillips<br>
+                    <span style='font-size: 8pt;'>
+                    Seattle Children's Research Institute, Norcliffe Foundation Center<br>
+                    <a href='mailto:ryan.phillips@seattlechildrens.org' style='color: #2a7fff;'>ryan.phillips@seattlechildrens.org</a> |
+                    ORCID: <a href='https://orcid.org/0000-0002-8570-2348' style='color: #2a7fff;'>0000-0002-8570-2348</a>
+                    </span>
+                </p>
+
+                <p style='font-size: 9pt; margin-top: 10px; margin-bottom: 3px;'>
+                    <b style='color: #2a7fff;'>Funding</b><br>
+                    <span style='font-size: 8pt;'>
+                    NIDA K01 Award K01DA058543
+                    </span>
+                </p>
+
+                <p style='font-size: 9pt; margin-top: 10px; margin-bottom: 3px;'>
+                    <b style='color: #2a7fff;'>Citation</b><br>
+                    <span style='font-size: 8pt; font-family: monospace;'>
+                    Phillips, R.S. (2025). PhysioMetrics v""" + VERSION_STRING + """.<br>
+                    DOI: <a href='https://doi.org/10.5281/zenodo.XXXXXXX' style='color: #2a7fff;'>10.5281/zenodo.XXXXXXX</a>
+                    <span style='font-size: 7pt;'>(DOI pending first release)</span>
+                    </span>
+                </p>
+
+                <p style='font-size: 8pt; margin-top: 10px;'>
+                    <a href='https://github.com/RyanSeanPhillips/PhysioMetrics' style='color: #2a7fff;'>
+                    GitHub</a> |
+                    <a href='https://github.com/RyanSeanPhillips/PhysioMetrics/releases' style='color: #2a7fff;'>
+                    Releases</a> |
+                    <a href='https://github.com/RyanSeanPhillips/PhysioMetrics/issues' style='color: #2a7fff;'>
+                    Issues</a>
+                </p>
+            </div>
+        """
+
+        info_label = QLabel(info_html)
+        info_label.setWordWrap(True)
+        info_label.setOpenExternalLinks(True)
+        info_label.setTextFormat(Qt.TextFormat.RichText)
+        middle_column.addWidget(info_label)
+
+        middle_column.addStretch()
+
+        # RIGHT COLUMN
+        right_column = QVBoxLayout()
+        right_column.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Telemetry settings group
         from core import config as app_config
@@ -467,28 +525,36 @@ class HelpDialog(QDialog):
         # Telemetry checkbox
         self.telemetry_checkbox = QCheckBox("Share anonymous usage statistics")
         self.telemetry_checkbox.setChecked(app_config.is_telemetry_enabled())
-        self.telemetry_checkbox.setStyleSheet("font-size: 10pt;")
+        self.telemetry_checkbox.setStyleSheet("font-size: 9pt;")
         self.telemetry_checkbox.toggled.connect(self._on_telemetry_toggled)
         telemetry_layout.addWidget(self.telemetry_checkbox)
 
         # Crash reports checkbox
         self.crash_reports_checkbox = QCheckBox("Send crash reports")
         self.crash_reports_checkbox.setChecked(app_config.is_crash_reports_enabled())
-        self.crash_reports_checkbox.setStyleSheet("font-size: 10pt;")
+        self.crash_reports_checkbox.setStyleSheet("font-size: 9pt;")
         self.crash_reports_checkbox.toggled.connect(self._on_crash_reports_toggled)
         telemetry_layout.addWidget(self.crash_reports_checkbox)
 
         # Learn more link
-        learn_more_label = QLabel('<a href="#details" style="color: #2a7fff;">What data is collected?</a>')
+        learn_more_label = QLabel('<a href="#details" style="color: #2a7fff; font-size: 8pt;">What data is collected?</a>')
         learn_more_label.setOpenExternalLinks(False)
         learn_more_label.linkActivated.connect(self._show_telemetry_details)
         telemetry_layout.addWidget(learn_more_label)
 
         telemetry_group.setLayout(telemetry_layout)
-        telemetry_group.setMaximumWidth(400)
-        layout.addWidget(telemetry_group, alignment=Qt.AlignmentFlag.AlignHCenter)
+        telemetry_group.setMaximumWidth(280)
+        right_column.addWidget(telemetry_group)
 
-        layout.addStretch()
+        right_column.addStretch()
+
+        # Add columns to layout
+        columns_layout.addLayout(left_column)
+        columns_layout.addLayout(middle_column)
+        columns_layout.addLayout(right_column)
+
+        main_layout.addLayout(columns_layout)
+        main_layout.addStretch()
 
         return widget
 
@@ -518,13 +584,13 @@ class HelpDialog(QDialog):
             <h3 style="color: #2a7fff;">What Data is Collected?</h3>
 
             <h4>Usage Data</h4>
-            <p>When you use PlethApp, we collect anonymous usage statistics:</p>
+            <p>When you use PhysioMetrics, we collect anonymous usage statistics:</p>
             <ul>
                 <li><b>File types:</b> Whether you load ABF, SMRX, or EDF files (not file names)</li>
                 <li><b>Features used:</b> Which tools you use (GMM, manual editing, spectral analysis)</li>
                 <li><b>Export types:</b> What you export (PDF, CSV, NPZ)</li>
                 <li><b>Session duration:</b> How long you use the app</li>
-                <li><b>System info:</b> OS, Python version, PlethApp version</li>
+                <li><b>System info:</b> OS, Python version, PhysioMetrics version</li>
             </ul>
 
             <h4>Crash Reports</h4>

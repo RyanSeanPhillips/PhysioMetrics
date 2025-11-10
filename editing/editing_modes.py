@@ -1,5 +1,5 @@
 """
-EditingModes class for PlethApp.
+EditingModes class for PhysioMetrics.
 
 Handles all interactive editing modes:
 - Add/Delete Peaks

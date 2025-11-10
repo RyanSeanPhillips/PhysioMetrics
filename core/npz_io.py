@@ -1,5 +1,5 @@
 """
-NPZ I/O Module - Save/Load PlethApp analysis sessions
+NPZ I/O Module - Save/Load PhysioMetrics analysis sessions
 
 This module handles saving and loading complete analysis states to/from .npz files.
 Supports per-channel session files that link to original data (no duplication).
@@ -91,7 +91,7 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
     data = {}
 
     # ===== METADATA =====
-    data['version'] = '1.0.9'  # PlethApp version
+    data['version'] = '1.0.9'  # PhysioMetrics version
     data['saved_timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     data['original_file_path'] = str(state.in_path)
 

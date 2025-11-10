@@ -1,6 +1,6 @@
 """
 MATLAB .mat file loader for Spike2 exports
-Compatible with PlethApp's data loading interface
+Compatible with PhysioMetrics's data loading interface
 """
 import h5py
 import numpy as np
@@ -18,7 +18,7 @@ def load_mat(file_path: str, progress_callback=None) -> Tuple[float, Dict[str, n
 
     Returns:
         (sr_hz, sweeps_by_channel, channel_names, t)
-        Compatible with PlethApp's ABF loader interface
+        Compatible with PhysioMetrics's ABF loader interface
     """
     file_path = Path(file_path)
 

@@ -1,5 +1,5 @@
 """
-Dialog classes for PlethApp.
+Dialog classes for PhysioMetrics.
 
 This package contains dialog windows used in the main application.
 """
