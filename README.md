@@ -2,10 +2,10 @@
 
 **PhysioMetrics** is a desktop application for advanced respiratory signal analysis, providing comprehensive tools for breath pattern detection, eupnea/apnea identification, and breathing regularity assessment.
 
-![Version](https://img.shields.io/badge/version-1.0.11-blue)
+![Version](https://img.shields.io/badge/version-1.0.14-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17575911.svg)](https://doi.org/10.5281/zenodo.17575911)
 
 ## Author & Funding
 
@@ -31,9 +31,9 @@ PhysioMetrics was developed as part of independent research funded by an NIH K01
 
 ## Download
 
-**[Download PhysioMetrics v1.0.11 for Windows](https://github.com/RyanSeanPhillips/PhysioMetrics/releases/latest)**
+**[Download PhysioMetrics v1.0.14 for Windows](https://github.com/RyanSeanPhillips/PhysioMetrics/releases/latest)**
 
-Download the ZIP file, extract it, and run `PhysioMetrics_v1.0.11.exe` - no installation required!
+Download the ZIP file, extract it, and run `PhysioMetrics_v1.0.14.exe` - no installation required!
 
 ## Requirements
 
@@ -93,19 +93,20 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 If you use PhysioMetrics in your research, please cite:
 
 ```
-Phillips, R.S. (2025). PhysioMetrics: Advanced Respiratory Signal Analysis Software (Version 1.0.11) [Software].
+Phillips, R.S. (2024). PhysioMetrics: Advanced Respiratory Signal Analysis Software (Version 1.0.14) [Software].
 GitHub. https://github.com/RyanSeanPhillips/PhysioMetrics
-DOI: [Zenodo DOI will be added upon first major release]
+DOI: 10.5281/zenodo.17575911
 ```
 
 **BibTeX:**
 ```bibtex
-@software{phillips2025physiometrics,
+@software{phillips2024physiometrics,
   author = {Phillips, Ryan Sean},
   title = {PhysioMetrics: Advanced Respiratory Signal Analysis Software},
-  year = {2025},
-  version = {1.0.11},
+  year = {2024},
+  version = {1.0.14},
   url = {https://github.com/RyanSeanPhillips/PhysioMetrics},
+  doi = {10.5281/zenodo.17575911},
   note = {Funded by NIDA K01 Award K01DA058543}
 }
 ```
@@ -128,9 +129,10 @@ PhysioMetrics uses the following open-source libraries:
 
 ---
 
-**Version**: 1.0.11
+**Version**: 1.0.14
 **Developer**: Ryan Sean Phillips
 **Institution**: Seattle Children's Research Institute
 **License**: MIT
 **Funding**: NIDA K01DA058543
+**DOI**: 10.5281/zenodo.17575911
 **Repository**: https://github.com/RyanSeanPhillips/PhysioMetrics

@@ -486,9 +486,8 @@ class HelpDialog(QDialog):
                 <p style='font-size: 9pt; margin-top: 10px; margin-bottom: 3px;'>
                     <b style='color: #2a7fff;'>Citation</b><br>
                     <span style='font-size: 8pt; font-family: monospace;'>
-                    Phillips, R.S. (2025). PhysioMetrics v""" + VERSION_STRING + """.<br>
-                    DOI: <a href='https://doi.org/10.5281/zenodo.XXXXXXX' style='color: #2a7fff;'>10.5281/zenodo.XXXXXXX</a>
-                    <span style='font-size: 7pt;'>(DOI pending first release)</span>
+                    Phillips, R.S. (2024). PhysioMetrics v""" + VERSION_STRING + """.<br>
+                    DOI: <a href='https://doi.org/10.5281/zenodo.17575911' style='color: #2a7fff;'>10.5281/zenodo.17575911</a>
                     </span>
                 </p>
 

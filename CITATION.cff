@@ -9,6 +9,7 @@ authors:
 title: "PhysioMetrics: Advanced Respiratory Signal Analysis Software"
 version: 1.0.14
 date-released: 2024-11-10
+doi: 10.5281/zenodo.17575911
 url: "https://github.com/RyanSeanPhillips/PhysioMetrics"
 repository-code: "https://github.com/RyanSeanPhillips/PhysioMetrics"
 license: MIT
