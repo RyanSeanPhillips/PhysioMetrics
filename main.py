@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
         from core.project_manager import ProjectManager
         self.project_manager = ProjectManager()
 
-        ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_03_horizontal.ui"
+        ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_04_horizontal.ui"
         uic.loadUi(ui_file, self)
 
         # icon_path = Path(__file__).parent / "assets" / "plethapp_thumbnail_light_02.ico"
@@ -76,6 +76,9 @@ class MainWindow(QMainWindow):
                 w.hide()
 
         self.setWindowTitle(f"PhysioMetrics v{VERSION_STRING}")
+
+        # Enable dark title bar on Windows 11
+        self._enable_dark_title_bar()
 
         # Style status bar to match dark theme
         self.statusBar().setStyleSheet("""
@@ -94,6 +97,9 @@ class MainWindow(QMainWindow):
         # Add message history tracking and dropdown
         self._status_message_history = []
         self._setup_status_history_dropdown()
+
+        # Add filename display to status bar (right side, before history button)
+        self._setup_filename_display()
 
         self.settings = QSettings(ORG, APP)
         self.state = AppState()
@@ -168,10 +174,10 @@ class MainWindow(QMainWindow):
         self.peak_detec_combo.addItems(["Threshold", "XGBoost", "Random Forest", "MLP"])
 
         self.eup_sniff_combo.clear()
-        self.eup_sniff_combo.addItems(["GMM", "XGBoost", "Random Forest", "MLP"])
+        self.eup_sniff_combo.addItems(["None (Clear)", "All Eupnea", "GMM", "XGBoost", "Random Forest", "MLP"])
 
         self.digh_combo.clear()
-        self.digh_combo.addItems(["Manual", "XGBoost", "Random Forest", "MLP"])
+        self.digh_combo.addItems(["None (Clear)", "Manual", "XGBoost", "Random Forest", "MLP"])
 
         # Auto-load ML models from last used directory (if available)
         # This must happen BEFORE setting defaults and connecting signals
@@ -218,13 +224,13 @@ class MainWindow(QMainWindow):
         # Spectral Analysis button
         self.SpectralAnalysisButton.clicked.connect(self.on_spectral_analysis_clicked)
 
-        # Outlier Threshold button
-        self.OutlierThreshButton.clicked.connect(self.on_outlier_thresh_clicked)
+        # Outlier Threshold button - REMOVED (moved to Analysis Options dialog)
+        # self.OutlierThreshButton.clicked.connect(self.on_outlier_thresh_clicked)
 
         # Eupnea Threshold button
 
-        # GMM Clustering button
-        self.GMMClusteringButton.clicked.connect(self.on_gmm_clustering_clicked)
+        # GMM Clustering button - REMOVED (moved to Analysis Options dialog)
+        # self.GMMClusteringButton.clicked.connect(self.on_gmm_clustering_clicked)
 
         # Peak Navigator/Editor button
         self.editor_pushButton.clicked.connect(self.on_peak_navigator_clicked)
@@ -255,22 +261,22 @@ class MainWindow(QMainWindow):
         # Connect the "More Options" button to open multi-tabbed analysis options dialog
         self.ThreshOptions.clicked.connect(self._open_analysis_options)
 
-        # Apply button just applies peaks with current parameters
-        self.ApplyPeakFindPushButton.setText("Apply")
+        # Detect button applies peaks with current parameters
         self.ApplyPeakFindPushButton.setEnabled(False)  # stays disabled until prominence detected
         self.ApplyPeakFindPushButton.clicked.connect(self._apply_peak_detection)
 
+        # PeakPromValueSpinBox removed - prominence/threshold now set in Analysis Options dialog
         # Re-enable Apply button when user manually edits prominence (use spinbox)
-        self.PeakPromValueSpinBox.valueChanged.connect(lambda: self.ApplyPeakFindPushButton.setEnabled(True) if self.state.analyze_chan else None)
+        # self.PeakPromValueSpinBox.valueChanged.connect(lambda: self.ApplyPeakFindPushButton.setEnabled(True) if self.state.analyze_chan else None)
 
         # Connect spinbox to update threshold line on main plot
-        self.PeakPromValueSpinBox.valueChanged.connect(self._on_prominence_spinbox_changed)
+        # self.PeakPromValueSpinBox.valueChanged.connect(self._on_prominence_spinbox_changed)
 
         # Configure spinbox for fine-grained control (0.01 increments for second decimal place)
-        self.PeakPromValueSpinBox.setSingleStep(0.01)
-        self.PeakPromValueSpinBox.setDecimals(4)  # Show 4 decimal places
-        self.PeakPromValueSpinBox.setMinimum(0.0001)  # Minimum prominence value
-        self.PeakPromValueSpinBox.setMaximum(1000.0)  # Maximum prominence value
+        # self.PeakPromValueSpinBox.setSingleStep(0.01)
+        # self.PeakPromValueSpinBox.setDecimals(4)  # Show 4 decimal places
+        # self.PeakPromValueSpinBox.setMinimum(0.0001)  # Minimum prominence value
+        # self.PeakPromValueSpinBox.setMaximum(1000.0)  # Maximum prominence value
 
         # Store peak detection parameters (auto-populated when channel selected)
         self.peak_prominence = None
@@ -279,11 +285,22 @@ class MainWindow(QMainWindow):
 
         # Default values for eupnea and apnea thresholds
         self.ApneaThresh.setText("0.5")   # seconds - gaps longer than this are apnea
-        self.OutlierSD.setText("3.0")     # SD - standard deviations for outlier detection
 
-        # Connect signals for apnea/outlier threshold changes to trigger redraw
+        # OutlierSD moved to Analysis Options dialog (Outlier Detection tab)
+        # Create a simple object to store the value (mimics QLineEdit.text() interface)
+        class OutlierSDHolder:
+            def __init__(self, value="3.0"):
+                self._value = value
+            def text(self):
+                return self._value
+            def setText(self, value):
+                self._value = str(value)
+
+        self.OutlierSD = OutlierSDHolder("3.0")  # Default: 3.0 SD for outlier detection
+
+        # Connect signals for apnea threshold changes to trigger redraw
         self.ApneaThresh.textChanged.connect(self._on_region_threshold_changed)
-        self.OutlierSD.textChanged.connect(self._on_region_threshold_changed)
+        # OutlierSD changes are handled in the Analysis Options dialog
 
         # --- y2 metric dropdown (choices only; plotting later) ---
         self.y2plot_dropdown.clear()
@@ -342,6 +359,19 @@ class MainWindow(QMainWindow):
             self.Outliers_checkBox.setChecked(self.state.outliers_use_shade)
             self.Outliers_checkBox.toggled.connect(self.on_outliers_display_toggled)
 
+        # Dark mode toggle (for plot background)
+        if hasattr(self, 'checkBox'):  # Generic name from UI - should be renamed to DarkModeCheckBox
+            # Load saved dark mode preference (default to True = dark mode)
+            dark_mode_enabled = self.settings.value("plot_dark_mode", True, type=bool)
+
+            # Apply the theme to plot_host
+            theme = "dark" if dark_mode_enabled else "light"
+            self.plot_host.set_plot_theme(theme)
+
+            # Set checkbox state to match loaded preference
+            self.checkBox.setChecked(dark_mode_enabled)
+            self.checkBox.toggled.connect(self.on_dark_mode_toggled)
+
         # Initialize editing modes manager
         self.editing_modes = EditingModes(self)
 
@@ -354,10 +384,6 @@ class MainWindow(QMainWindow):
         # --- Wire omit button ---
         self.OmitSweepButton.setCheckable(True)
         self.OmitSweepButton.clicked.connect(self.on_omit_sweep_clicked)
-
-
-        # Button in your UI: objectName 'addSighButton'
-        self.addSighButton.setCheckable(True)
 
         # --- Move Point mode ---
         self._is_dragging = False  # Track if currently dragging a point
@@ -451,14 +477,15 @@ class MainWindow(QMainWindow):
         # === Project Builder Connections ===
         self.browseDirectoryButton.clicked.connect(self.on_project_browse_directory)
         self.scanFilesButton.clicked.connect(self.on_project_scan_files)
-        self.addToProjectButton.clicked.connect(self.on_project_add_files)
+        # NOTE: addToProjectButton, addExperimentButton, removeExperimentButton, exportExperimentButton
+        # are hidden - no longer using experiment-based workflow (see _setup_master_file_list)
         self.clearFilesButton.clicked.connect(self.on_project_clear_files)
-        self.addExperimentButton.clicked.connect(self.on_project_add_experiment)
-        self.removeExperimentButton.clicked.connect(self.on_project_remove_experiment)
-        self.exportExperimentButton.clicked.connect(self.on_project_export_experiment)
         self.newProjectButton.clicked.connect(self.on_project_new)
         self.saveProjectButton.clicked.connect(self.on_project_save)
         self.loadProjectCombo.currentIndexChanged.connect(self.on_project_load)
+
+        # Add "Scan Saved Data" button programmatically
+        self._add_scan_saved_data_button()
 
         # Project Builder state
         self._project_directory = None
@@ -529,17 +556,25 @@ class MainWindow(QMainWindow):
         if target_layout and widget_index >= 0:
             # Insert edit button right after the name edit
             target_layout.insertWidget(widget_index + 1, self.editProjectNameButton)
-            print(f"[project-builder] ✓ Inserted edit button next to project name")
+            print(f"[project-builder] OK Inserted edit button next to project name")
         else:
             # Fallback: try adding to parent layout
             if parent_layout:
                 parent_layout.addWidget(self.editProjectNameButton)
-                print(f"[project-builder] ⚠ Added edit button to parent layout (fallback)")
+                print(f"[project-builder] WARNING Added edit button to parent layout (fallback)")
             else:
-                print(f"[project-builder] ✗ Could not find layout for edit button")
+                print(f"[project-builder] ERROR: Could not find layout for edit button")
 
         # Populate recent projects dropdown
         self._populate_load_project_combo()
+
+        # === Master File List Setup ===
+        # Hide the Project Organization section (right column) - we're using a flat master list instead
+        self._setup_master_file_list()
+
+        # Store file list data (each row = one analysis task: file + channel + animal)
+        self._master_file_list = []  # List of task dicts
+        self._active_master_list_row = None  # Track which row is being analyzed
 
         # optional: keep a handle to the chosen dir
         self._curation_dir = None
@@ -676,6 +711,77 @@ class MainWindow(QMainWindow):
         # Add to status bar (right side)
         self.statusBar().addPermanentWidget(self.history_button)
 
+    def _setup_filename_display(self):
+        """Add a label to the status bar to display the current filename."""
+        from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtCore import Qt
+
+        # Create label for filename display
+        self.filename_label = QLabel("No file loaded", self)
+        self.filename_label.setStyleSheet("""
+            QLabel {
+                color: #d4d4d4;
+                padding: 2px 8px;
+                margin-right: 10px;
+            }
+        """)
+        self.filename_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # Add to status bar (right side, before history button)
+        self.statusBar().addPermanentWidget(self.filename_label)
+
+    def _update_filename_display(self):
+        """Update the filename display in status bar with file metadata."""
+        st = self.state
+        if not hasattr(st, 'file_info') or not st.file_info:
+            self.filename_label.setText("No file loaded")
+            return
+
+        file_info = st.file_info[0]
+        filename = file_info['path'].name
+
+        # Build metadata string for ABF files
+        metadata_parts = []
+        if file_info.get('protocol'):
+            metadata_parts.append(file_info['protocol'])
+        if file_info.get('n_channels'):
+            metadata_parts.append(f"{file_info['n_channels']} ch")
+
+        if len(st.file_info) == 1:
+            if metadata_parts:
+                self.filename_label.setText(f"File: {filename}  [{', '.join(metadata_parts)}]")
+            else:
+                self.filename_label.setText(f"File: {filename}")
+        else:
+            if metadata_parts:
+                self.filename_label.setText(f"Files: {len(st.file_info)} files ({filename}, ...)  [{', '.join(metadata_parts)}]")
+            else:
+                self.filename_label.setText(f"Files: {len(st.file_info)} files ({filename}, ...)")
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+
+                # DWMWA_USE_IMMERSIVE_DARK_MODE
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+
+                # Get window handle
+                hwnd = int(self.winId())
+
+                # Set dark mode (1 = dark, 0 = light)
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    byref(value),
+                    sizeof(value)
+                )
+            except Exception as e:
+                # Silently fail if not supported (Windows 10 older builds)
+                pass
+
     def _show_message_history(self):
         """Show a menu with recent status bar messages."""
         from PyQt6.QtWidgets import QMenu
@@ -780,11 +886,11 @@ class MainWindow(QMainWindow):
         # Store the directory of the first file
         self.settings.setValue("last_dir", str(file_paths[0].parent))
 
-        # Update UI with file info
+        # Update filename display in status bar
         if len(file_paths) == 1:
-            self.BrowseFilePath.setText(str(file_paths[0]))
+            self.filename_label.setText(f"File: {file_paths[0].name}")
         else:
-            self.BrowseFilePath.setText(f"{len(file_paths)} files selected: {file_paths[0].name}, ...")
+            self.filename_label.setText(f"Files: {len(file_paths)} files ({file_paths[0].name}, ...)")
 
         # Check if any files are .pleth.npz (session files)
         npz_files = [f for f in file_paths if f.suffix == '.npz' or f.name.endswith('.pleth.npz')]
@@ -836,8 +942,8 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
-            # Load data file (supports .abf and .smrx)
-            sr, sweeps_by_ch, ch_names, t = abf_io.load_data_file(path, progress_callback=update_progress)
+            # Load data file (supports .abf, .smrx, .edf)
+            sr, sweeps_by_ch, ch_names, t, file_metadata = abf_io.load_data_file(path, progress_callback=update_progress)
         except Exception as e:
             progress.close()
             self._show_error("Load error", str(e))
@@ -853,7 +959,8 @@ class MainWindow(QMainWindow):
         st.file_info = [{
             'path': path,
             'sweep_start': 0,
-            'sweep_end': n_sweeps - 1
+            'sweep_end': n_sweeps - 1,
+            **file_metadata  # Include protocol, n_channels, file_type, etc.
         }]
         st.sr_hz = sr
         st.sweeps = sweeps_by_ch
@@ -861,6 +968,9 @@ class MainWindow(QMainWindow):
         st.t = t
         st.sweep_idx = 0
         self.navigation_manager.reset_window_state()
+
+        # Update filename display with metadata
+        self._update_filename_display()
 
         # Log telemetry: file loaded with enhanced metrics
         file_ext = path.suffix.lower()[1:]  # .abf -> abf
@@ -960,35 +1070,127 @@ class MainWindow(QMainWindow):
         self.state.omitted_ranges.clear()
         self._refresh_omit_button_label()
 
+        # Auto-detect stimulus and analysis channels
+        # Note: auto_analysis is only returned if there's exactly one non-stim channel
+        auto_stim, auto_analysis = abf_io.auto_select_channels(st.sweeps, ch_names)
 
+        if auto_stim:
+            # Found a stimulus channel - select it
+            stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
+            self.StimChanSelect.setCurrentIndex(stim_idx)
+            st.stim_chan = auto_stim
 
+            # Trigger stim detection
+            self.on_stim_channel_changed(stim_idx)
 
+            if auto_analysis:
+                # Only one analysis channel available - auto-select it
+                analysis_idx = ch_names.index(auto_analysis) + 1  # +1 because "All Channels" is at index 0
+                self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
+                st.analyze_chan = auto_analysis
+                self.single_panel_mode = True
 
-        # Start in grid mode (All Channels view)
-        st.analyze_chan = None  # None = grid mode showing all channels
-        self.single_panel_mode = False  # Start in grid mode
+                # Trigger analysis channel change
+                self.on_analyze_channel_changed(analysis_idx)
 
-        # No stim selected by default
-        st.stim_chan = None
-        st.stim_onsets_by_sweep.clear()
-        st.stim_offsets_by_sweep.clear()
-        st.stim_spans_by_sweep.clear()
-        st.stim_metrics_by_sweep.clear()
+                # Show completion message with auto-detection info
+                t_elapsed = time.time() - t_start
+                self._log_status_message(
+                    f"File loaded ({t_elapsed:.1f}s) - Auto-detected: stim={auto_stim}, analysis={auto_analysis}",
+                    4000
+                )
+            else:
+                # Multiple analysis channels available - start in grid mode, let user choose
+                st.analyze_chan = None
+                self.single_panel_mode = False
+                self.plot_host.clear_saved_view("grid")
+                self.plot_all_channels()
 
-        # Start in multi-panel (all channels) view
-        self.single_panel_mode = False
-        self.plot_host.clear_saved_view("grid")  # fresh autoscale for grid
-        self.plot_all_channels()
+                t_elapsed = time.time() - t_start
+                self._log_status_message(
+                    f"File loaded ({t_elapsed:.1f}s) - Auto-detected stim: {auto_stim}",
+                    4000
+                )
+        else:
+            # No stimulus channel detected - start in grid mode
+            st.analyze_chan = None
+            self.single_panel_mode = False
+
+            st.stim_chan = None
+            st.stim_onsets_by_sweep.clear()
+            st.stim_offsets_by_sweep.clear()
+            st.stim_spans_by_sweep.clear()
+            st.stim_metrics_by_sweep.clear()
+
+            self.plot_host.clear_saved_view("grid")
+            self.plot_all_channels()
+
+            # Show completion message
+            t_elapsed = time.time() - t_start
+            self._log_status_message(f"File loaded ({t_elapsed:.1f}s)", 3000)
+
+        # Apply pending channel selections from Project Builder (if any)
+        self._apply_pending_channel_selections(ch_names)
 
         # Refresh Analysis Options dialog tabs if open (file data now available)
-        if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog.isVisible():
+        if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog is not None and self._analysis_options_dialog.isVisible():
             # Note: Don't refresh Peak Detection tab here since no channel selected yet (in grid mode)
             # Peak Detection tab will update when user selects a channel
             pass
 
-        # Show completion message with elapsed time
-        t_elapsed = time.time() - t_start
-        self._log_status_message(f"✓ File loaded ({t_elapsed:.1f}s)", 3000)
+    def _apply_pending_channel_selections(self, ch_names):
+        """
+        Apply pending channel selections from Project Builder after file loads.
+
+        When a file is opened from the Project Builder, we may have pre-selected
+        analysis and stim channels that should be applied after loading.
+        """
+        st = self.state
+
+        # Check for pending analysis channel
+        pending_analysis = getattr(self, '_pending_analysis_channel', '')
+        pending_stim = getattr(self, '_pending_stim_channels', [])
+
+        if not pending_analysis and not pending_stim:
+            return  # Nothing to apply
+
+        print(f"[channel-selection] Applying pending selections: analysis={pending_analysis}, stim={pending_stim}")
+
+        # Apply pending stim channel (first one if multiple)
+        if pending_stim:
+            # Take first stim channel from list
+            stim_channel = pending_stim[0] if isinstance(pending_stim, list) else pending_stim
+
+            # Find the channel in the dropdown
+            # StimChanSelect has "None" at index 0, then channel names
+            if stim_channel in ch_names:
+                stim_idx = ch_names.index(stim_channel) + 1  # +1 for "None"
+                self.StimChanSelect.setCurrentIndex(stim_idx)
+                st.stim_chan = stim_channel
+                self.on_stim_channel_changed(stim_idx)
+                print(f"[channel-selection] Applied stim channel: {stim_channel}")
+
+        # Apply pending analysis channel
+        if pending_analysis:
+            # Find the channel in the dropdown
+            # AnalyzeChanSelect has "All Channels" at index 0, then channel names
+            if pending_analysis in ch_names:
+                analysis_idx = ch_names.index(pending_analysis) + 1  # +1 for "All Channels"
+                self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
+                st.analyze_chan = pending_analysis
+                self.single_panel_mode = True
+                self.on_analyze_channel_changed(analysis_idx)
+                print(f"[channel-selection] Applied analysis channel: {pending_analysis}")
+
+                self._log_status_message(
+                    f"Loaded with pre-selected channels: analysis={pending_analysis}"
+                    + (f", stim={pending_stim[0]}" if pending_stim else ""),
+                    4000
+                )
+
+        # Clear pending selections
+        self._pending_analysis_channel = ''
+        self._pending_stim_channels = []
 
     def load_multiple_files(self, file_paths: List[Path]):
         """Load and concatenate multiple ABF files."""
@@ -1119,21 +1321,47 @@ class MainWindow(QMainWindow):
         self.zscore_global_mean = None
         self.zscore_global_std = None
 
-        # Start in grid mode (All Channels view)
-        st.analyze_chan = None  # None = grid mode showing all channels
-        self.single_panel_mode = False  # Start in grid mode
+        # Auto-detect stimulus and analysis channels
+        # Note: auto_analysis is only returned if there's exactly one non-stim channel
+        auto_stim, auto_analysis = abf_io.auto_select_channels(st.sweeps, ch_names)
 
-        # No stim selected by default
-        st.stim_chan = None
-        st.stim_onsets_by_sweep.clear()
-        st.stim_offsets_by_sweep.clear()
-        st.stim_spans_by_sweep.clear()
-        st.stim_metrics_by_sweep.clear()
+        if auto_stim:
+            # Found a stimulus channel - select it
+            stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
+            self.StimChanSelect.setCurrentIndex(stim_idx)
+            st.stim_chan = auto_stim
 
-        # Start in multi-panel (all channels) view
-        self.single_panel_mode = False
-        self.plot_host.clear_saved_view("grid")  # fresh autoscale for grid
-        self.plot_all_channels()
+            # Trigger stim detection
+            self.on_stim_channel_changed(stim_idx)
+
+            if auto_analysis:
+                # Only one analysis channel available - auto-select it
+                analysis_idx = ch_names.index(auto_analysis) + 1  # +1 because "All Channels" is at index 0
+                self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
+                st.analyze_chan = auto_analysis
+                self.single_panel_mode = True
+
+                # Trigger analysis channel change
+                self.on_analyze_channel_changed(analysis_idx)
+            else:
+                # Multiple analysis channels available - start in grid mode, let user choose
+                st.analyze_chan = None
+                self.single_panel_mode = False
+                self.plot_host.clear_saved_view("grid")
+                self.plot_all_channels()
+        else:
+            # No stimulus channel detected - start in grid mode
+            st.analyze_chan = None
+            self.single_panel_mode = False
+
+            st.stim_chan = None
+            st.stim_onsets_by_sweep.clear()
+            st.stim_offsets_by_sweep.clear()
+            st.stim_spans_by_sweep.clear()
+            st.stim_metrics_by_sweep.clear()
+
+            self.plot_host.clear_saved_view("grid")
+            self.plot_all_channels()
 
         # Show success message with file info
         total_sweeps = next(iter(sweeps_by_ch.values())).shape[1]
@@ -1156,6 +1384,12 @@ class MainWindow(QMainWindow):
         message = f"Loaded {len(file_paths)} files with {total_sweeps} total sweeps:\n\n{file_summary}"
         if padded_count > 0:
             message += f"\n\nNote: {padded_count} file(s) had different sweep lengths and were padded with NaN values."
+
+        # Add auto-detection info to message
+        if auto_stim:
+            message += f"\n\nAuto-detected stimulus channel: {auto_stim}"
+            if auto_analysis:
+                message += f"\nAuto-selected analysis channel: {auto_analysis}"
 
         self._show_info("Files Loaded Successfully", message)
 
@@ -1270,7 +1504,7 @@ class MainWindow(QMainWindow):
             file_size_mb = save_path.stat().st_size / (1024 * 1024)
 
             self._log_status_message(
-                f"✓ Session saved: {save_path.name} ({file_size_mb:.1f} MB, {t_elapsed:.1f}s)",
+                f"Session saved: {save_path.name} ({file_size_mb:.1f} MB, {t_elapsed:.1f}s)",
                 timeout=5000
             )
 
@@ -1379,11 +1613,8 @@ class MainWindow(QMainWindow):
 
             # ===== RESTORE UI ELEMENTS =====
 
-            # Update file path display
-            if len(st.file_info) == 1:
-                self.BrowseFilePath.setText(str(st.file_info[0]['path']))
-            else:
-                self.BrowseFilePath.setText(f"{len(st.file_info)} files: {st.file_info[0]['path'].name}, ...")
+            # Update filename display in status bar (with metadata if available)
+            self._update_filename_display()
 
             progress.setValue(60)
             QApplication.processEvents()
@@ -1512,7 +1743,7 @@ class MainWindow(QMainWindow):
             file_size_mb = npz_path.stat().st_size / (1024 * 1024)
 
             self._log_status_message(
-                f"✓ Session loaded: {npz_path.name} ({file_size_mb:.1f} MB, {t_elapsed:.1f}s) - "
+                f"Session loaded: {npz_path.name} ({file_size_mb:.1f} MB, {t_elapsed:.1f}s) - "
                 f"Channel: {st.analyze_chan}, {metadata['n_peaks']} peaks",
                 timeout=8000
             )
@@ -1989,7 +2220,7 @@ class MainWindow(QMainWindow):
                 self._update_classifier_dropdowns()
 
                 print(f"[Auto-load] Successfully loaded {len(loaded_models)} models from {models_path}")
-                self.statusBar().showMessage(f"✓ Auto-loaded {len(loaded_models)} ML models", 3000)
+                self.statusBar().showMessage(f"Auto-loaded {len(loaded_models)} ML models", 3000)
             else:
                 print(f"[Auto-load] Failed to load any models from {models_path}")
 
@@ -2019,7 +2250,7 @@ class MainWindow(QMainWindow):
             if new_classifier != 'threshold':
                 if not self.state.loaded_ml_models:
                     print(f"[Classifier] ERROR: No ML models loaded at all!")
-                    self.statusBar().showMessage(f"⚠ No ML models loaded. Load models from ML Training tab first.", 5000)
+                    self.statusBar().showMessage(f"WARNING: No ML models loaded. Load models from ML Training tab first.", 5000)
                     # Revert to threshold
                     self.peak_detec_combo.blockSignals(True)
                     self.peak_detec_combo.setCurrentText("Threshold")
@@ -2034,7 +2265,7 @@ class MainWindow(QMainWindow):
 
                     if not matching_keys:
                         print(f"[Classifier] ERROR: No model matching {model_key_prefix} found in loaded models!")
-                        self.statusBar().showMessage(f"⚠ {text} models not loaded. Load models from ML Training tab first.", 5000)
+                        self.statusBar().showMessage(f"WARNING: {text} models not loaded. Load models from ML Training tab first.", 5000)
                         # Revert to threshold
                         self.peak_detec_combo.blockSignals(True)
                         self.peak_detec_combo.setCurrentText("Threshold")
@@ -2094,11 +2325,7 @@ class MainWindow(QMainWindow):
             # Recompute breath events for labeled peaks
             y_proc = self._get_processed_for(st.analyze_chan, s)
             import core.peaks as peakdet
-            if peakdet._USE_NUMBA_VERSION:
-                breaths = peakdet.compute_breath_events_numba(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-            else:
-                breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-
+            breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
             st.breath_by_sweep[s] = breaths
 
     def on_eupnea_sniff_classifier_changed(self, text: str):
@@ -2107,7 +2334,9 @@ class MainWindow(QMainWindow):
             "GMM": "gmm",
             "XGBoost": "xgboost",
             "Random Forest": "rf",
-            "MLP": "mlp"
+            "MLP": "mlp",
+            "All Eupnea": "all_eupnea",
+            "None (Clear)": "none"
         }
         # Reverse mapping for reverting
         classifier_reverse = {v: k for k, v in classifier_map.items()}
@@ -2121,8 +2350,16 @@ class MainWindow(QMainWindow):
         if old_classifier != new_classifier:
             print(f"[Eupnea/Sniff Classifier] Switched to: {new_classifier}")
 
-        # Check if predictions are available
-        if new_classifier == 'gmm':
+        # Handle different classifier types
+        if new_classifier == 'all_eupnea':
+            # Label all breaths as eupnea (class 0)
+            self._set_all_breaths_eupnea_sniff_class(0)
+            print(f"[Eupnea/Sniff Classifier] Set all breaths to eupnea (for anesthesia experiments)")
+        elif new_classifier == 'none':
+            # Clear all labels - don't save any eupnea/sniff classification
+            self._clear_all_eupnea_sniff_labels()
+            print(f"[Eupnea/Sniff Classifier] Cleared all eupnea/sniff labels")
+        elif new_classifier == 'gmm':
             # Check if GMM has been run (gmm_class_ro should exist)
             first_sweep_peaks = self.state.all_peaks_by_sweep.get(0, {})
             if 'gmm_class_ro' not in first_sweep_peaks or first_sweep_peaks['gmm_class_ro'] is None:
@@ -2130,29 +2367,19 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Running GMM clustering with default settings...", 2000)
 
                 # Run GMM clustering with default settings
-                import core.gmm_clustering as gmm_clustering
-                try:
-                    gmm_clustering.build_eupnea_sniffing_regions(self.state, verbose=False)
-                    print(f"[Eupnea/Sniff Classifier] GMM clustering complete")
-                except Exception as e:
-                    print(f"[Eupnea/Sniff Classifier] ERROR: Failed to run GMM clustering: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.statusBar().showMessage(f"⚠ Failed to run GMM clustering. Try running manually from Breath Char. tab.", 5000)
-                    # Revert to previous classifier
-                    self.eup_sniff_combo.blockSignals(True)
-                    self.eup_sniff_combo.setCurrentText(classifier_reverse.get(old_classifier, "GMM"))
-                    self.eup_sniff_combo.blockSignals(False)
-                    self.state.active_eupnea_sniff_classifier = old_classifier
-                    return
+                self._run_automatic_gmm_clustering()
+                print(f"[Eupnea/Sniff Classifier] GMM clustering complete")
+
+            # Update gmm_class from GMM predictions
+            self._update_eupnea_sniff_from_classifier()
         else:
-            # Check if ML models are loaded
+            # ML model selected - check if loaded
             model_key_prefix = f'model3_{new_classifier}'
             matching_keys = [k for k in self.state.loaded_ml_models.keys() if k.startswith(model_key_prefix)]
 
             if not matching_keys:
                 print(f"[Eupnea/Sniff Classifier] ERROR: Model {model_key_prefix} not found!")
-                self.statusBar().showMessage(f"⚠ {text} model not loaded. Load Model 3 from ML Training tab.", 5000)
+                self.statusBar().showMessage(f"WARNING: {text} model not loaded. Load Model 3 from ML Training tab.", 5000)
                 # Revert to GMM
                 self.eup_sniff_combo.blockSignals(True)
                 self.eup_sniff_combo.setCurrentText("GMM")
@@ -2160,10 +2387,10 @@ class MainWindow(QMainWindow):
                 self.state.active_eupnea_sniff_classifier = "gmm"
                 return
 
-        # Update gmm_class from selected classifier
-        self._update_eupnea_sniff_from_classifier()
+            # Update gmm_class from ML model predictions
+            self._update_eupnea_sniff_from_classifier()
 
-        # Rebuild sniff regions for display
+        # Rebuild sniff/eupnea regions for display
         try:
             import core.gmm_clustering as gmm_clustering
             gmm_clustering.build_eupnea_sniffing_regions(self.state, verbose=False)
@@ -2220,13 +2447,85 @@ class MainWindow(QMainWindow):
                     else:
                         print(f"[Eupnea/Sniff Update] Sweep {s}: Key does not exist in all_peaks")
 
+    def _set_all_breaths_eupnea_sniff_class(self, class_value: int):
+        """
+        Set all breaths to a specific eupnea/sniff class.
+
+        Args:
+            class_value: 0 = eupnea, 1 = sniffing, -1 = unclassified/other
+        """
+        import numpy as np
+        st = self.state
+
+        for s in st.all_peaks_by_sweep.keys():
+            all_peaks = st.all_peaks_by_sweep[s]
+
+            if 'indices' in all_peaks and all_peaks['indices'] is not None:
+                n_breaths = len(all_peaks['indices'])
+                # Set all to the specified class
+                all_peaks['gmm_class'] = np.full(n_breaths, class_value, dtype=int)
+                all_peaks['eupnea_sniff_source'] = np.array([st.active_eupnea_sniff_classifier] * n_breaths)
+
+                if s == 0:
+                    print(f"[Eupnea/Sniff] Sweep {s}: Set {n_breaths} breaths to class {class_value}")
+
+    def _clear_all_eupnea_sniff_labels(self):
+        """
+        Clear all eupnea/sniff labels - used when user selects 'None (Clear)'.
+
+        This removes the gmm_class array entirely so labels won't be saved.
+        Also clears the sniff and eupnea regions from the display.
+        """
+        st = self.state
+
+        for s in st.all_peaks_by_sweep.keys():
+            all_peaks = st.all_peaks_by_sweep[s]
+
+            # Remove gmm_class array - labels won't be saved
+            if 'gmm_class' in all_peaks:
+                del all_peaks['gmm_class']
+            if 'eupnea_sniff_source' in all_peaks:
+                del all_peaks['eupnea_sniff_source']
+
+            if s == 0:
+                print(f"[Eupnea/Sniff] Sweep {s}: Cleared all labels")
+
+        # Clear the region dictionaries for display
+        st.sniff_regions_by_sweep.clear()
+        st.eupnea_regions_by_sweep.clear()
+
+    def _clear_all_sigh_labels(self):
+        """
+        Clear all sigh labels - used when user selects 'None (Clear)'.
+
+        This removes the sigh_class array entirely so labels won't be saved.
+        Also clears sigh_by_sweep for display.
+        """
+        st = self.state
+
+        for s in st.all_peaks_by_sweep.keys():
+            all_peaks = st.all_peaks_by_sweep[s]
+
+            # Remove sigh_class array - labels won't be saved
+            if 'sigh_class' in all_peaks:
+                del all_peaks['sigh_class']
+            if 'sigh_source' in all_peaks:
+                del all_peaks['sigh_source']
+
+            if s == 0:
+                print(f"[Sigh] Sweep {s}: Cleared all labels")
+
+        # Clear sigh_by_sweep for display
+        st.sigh_by_sweep.clear()
+
     def on_sigh_classifier_changed(self, text: str):
         """Handle sigh classifier selection change."""
         classifier_map = {
             "Manual": "manual",
             "XGBoost": "xgboost",
             "Random Forest": "rf",
-            "MLP": "mlp"
+            "MLP": "mlp",
+            "None (Clear)": "none"
         }
         # Reverse mapping for reverting
         classifier_reverse = {v: k for k, v in classifier_map.items()}
@@ -2240,14 +2539,22 @@ class MainWindow(QMainWindow):
         if old_classifier != new_classifier:
             print(f"[Sigh Classifier] Switched to: {new_classifier}")
 
-        # Check if ML models are loaded (for ML classifiers)
-        if new_classifier != 'manual':
+        # Handle different classifier types
+        if new_classifier == 'none':
+            # Clear all sigh labels
+            self._clear_all_sigh_labels()
+            print(f"[Sigh Classifier] Cleared all sigh labels")
+        elif new_classifier == 'manual':
+            # Update from manual annotations
+            self._update_sigh_from_classifier()
+        else:
+            # ML model - check if loaded
             model_key_prefix = f'model2_{new_classifier}'
             matching_keys = [k for k in self.state.loaded_ml_models.keys() if k.startswith(model_key_prefix)]
 
             if not matching_keys:
                 print(f"[Sigh Classifier] ERROR: Model {model_key_prefix} not found!")
-                self.statusBar().showMessage(f"⚠ {text} model not loaded. Load Model 2 from ML Training tab.", 5000)
+                self.statusBar().showMessage(f"WARNING: {text} model not loaded. Load Model 2 from ML Training tab.", 5000)
                 # Revert to Manual
                 self.digh_combo.blockSignals(True)
                 self.digh_combo.setCurrentText("Manual")
@@ -2255,8 +2562,8 @@ class MainWindow(QMainWindow):
                 self.state.active_sigh_classifier = "manual"
                 return
 
-        # Update sigh_class from selected classifier
-        self._update_sigh_from_classifier()
+            # Update from ML model predictions
+            self._update_sigh_from_classifier()
 
         # Redraw plot
         # Guard: Only redraw if plot_manager exists (avoid error during initialization)
@@ -2265,6 +2572,7 @@ class MainWindow(QMainWindow):
 
     def _update_sigh_from_classifier(self):
         """Copy selected classifier's predictions to sigh_class array and update sigh_by_sweep."""
+        import numpy as np
         st = self.state
 
         for s in st.all_peaks_by_sweep.keys():
@@ -2272,7 +2580,8 @@ class MainWindow(QMainWindow):
 
             # Get read-only predictions from active classifier
             if st.active_sigh_classifier == 'manual':
-                # For manual mode, restore from sigh_manual_ro (preserves original manual annotations)
+                # For manual mode, restore from sigh_manual_ro (preserves only manual annotations)
+                # This clears ML predictions and only shows manually-added sighs
                 if 'sigh_manual_ro' in all_peaks and all_peaks['sigh_manual_ro'] is not None:
                     all_peaks['sigh_class'] = all_peaks['sigh_manual_ro'].copy()
                     all_peaks['sigh_source'] = np.array(['manual'] * len(all_peaks['indices']))
@@ -2280,18 +2589,25 @@ class MainWindow(QMainWindow):
                         n_sighs = np.sum(all_peaks['sigh_class'] == 1)
                         print(f"[Sigh Update] Sweep {s}: Restored manual annotations from sigh_manual_ro ({n_sighs} sighs)")
                 else:
-                    # Fallback: initialize from sigh_by_sweep if sigh_manual_ro doesn't exist
-                    if 'sigh_class' not in all_peaks or all_peaks['sigh_class'] is None:
-                        all_peaks['sigh_class'] = np.zeros(len(all_peaks['indices']), dtype=np.int8)
+                    # No manual annotations saved - clear all sighs (start fresh)
+                    n_breaths = len(all_peaks['indices']) if 'indices' in all_peaks else 0
+                    if n_breaths > 0:
+                        all_peaks['sigh_class'] = np.zeros(n_breaths, dtype=np.int8)
+                        # Mark deleted peaks as unclassified
                         if 'labels' in all_peaks:
                             all_peaks['sigh_class'][all_peaks['labels'] == 0] = -1
-                        if s in st.sigh_by_sweep:
-                            for sigh_idx in st.sigh_by_sweep[s]:
-                                peak_mask = all_peaks['indices'] == sigh_idx
-                                if peak_mask.any():
-                                    all_peaks['sigh_class'][peak_mask] = 1
+                        all_peaks['sigh_source'] = np.array(['manual'] * n_breaths)
                     if s == 0:
-                        print(f"[Sigh Update] Sweep {s}: Using sigh_by_sweep (sigh_manual_ro not available)")
+                        print(f"[Sigh Update] Sweep {s}: Cleared all sighs (manual mode, no saved annotations)")
+
+                # Also clear sigh_by_sweep for this sweep
+                if s in st.sigh_by_sweep:
+                    # Only keep sighs that are in sigh_manual_ro
+                    if 'sigh_manual_ro' in all_peaks and all_peaks['sigh_manual_ro'] is not None:
+                        manual_sigh_mask = all_peaks['sigh_manual_ro'] == 1
+                        st.sigh_by_sweep[s] = all_peaks['indices'][manual_sigh_mask].tolist()
+                    else:
+                        st.sigh_by_sweep[s] = []
                 continue
             else:
                 source_key = f'sigh_{st.active_sigh_classifier}_ro'
@@ -2628,6 +2944,8 @@ class MainWindow(QMainWindow):
             tab (str, optional): Tab to open ('peak_detection', 'gmm', 'outliers', 'ml')
         """
         from dialogs.analysis_options_dialog import AnalysisOptionsDialog
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
 
         st = self.state
 
@@ -2638,14 +2956,25 @@ class MainWindow(QMainWindow):
             self._analysis_options_dialog.raise_()
             self._analysis_options_dialog.activateWindow()
         else:
-            # Create and show the dialog (non-blocking)
-            # Note: Individual tabs handle their own data requirements (e.g., ML Settings works without data)
-            self._analysis_options_dialog = AnalysisOptionsDialog(st, parent=self)
-            self._analysis_options_dialog.show()
+            # Show loading cursor while creating dialog (may take a moment for tab initialization)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            QApplication.processEvents()  # Ensure cursor change is visible
+            try:
+                # Create and show the dialog (non-blocking)
+                # Note: Individual tabs handle their own data requirements (e.g., ML Settings works without data)
+                self._analysis_options_dialog = AnalysisOptionsDialog(st, parent=self)
+                self._analysis_options_dialog.finished.connect(self._on_analysis_options_closed)
+                self._analysis_options_dialog.show()
+            finally:
+                QApplication.restoreOverrideCursor()
 
         # Switch to requested tab if specified
         if tab:
             self._analysis_options_dialog.set_active_tab(tab)
+
+    def _on_analysis_options_closed(self):
+        """Clear analysis options dialog reference when closed so it can be reopened."""
+        self._analysis_options_dialog = None
 
     def _open_prominence_histogram(self):
         """
@@ -2869,7 +3198,8 @@ class MainWindow(QMainWindow):
             # Store and populate spinbox with auto-detected value
             # Use same value for both height and prominence thresholds
             self.peak_prominence = chosen_threshold
-            self.PeakPromValueSpinBox.setValue(chosen_threshold)
+            # PeakPromValueSpinBox removed - threshold now shown in Analysis Options dialog
+            # self.PeakPromValueSpinBox.setValue(chosen_threshold)
 
             # Store the height threshold value (will be used in peak detection)
             self.peak_height_threshold = chosen_threshold
@@ -2902,15 +3232,16 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
-    def _on_prominence_spinbox_changed(self):
-        """Update threshold line on plot when spinbox value changes."""
-        new_value = self.PeakPromValueSpinBox.value()
-        if new_value > 0:
-            self.peak_height_threshold = new_value
-            self.plot_host.update_threshold_line(new_value)
-
-            # Synchronize with auto-threshold workflow: fit model for p_noise calculation
-            self._fit_threshold_model_for_manual_slider()
+    # PeakPromValueSpinBox removed - prominence/threshold now set in Analysis Options dialog
+    # def _on_prominence_spinbox_changed(self):
+    #     """Update threshold line on plot when spinbox value changes."""
+    #     new_value = self.PeakPromValueSpinBox.value()
+    #     if new_value > 0:
+    #         self.peak_height_threshold = new_value
+    #         self.plot_host.update_threshold_line(new_value)
+    #
+    #         # Synchronize with auto-threshold workflow: fit model for p_noise calculation
+    #         self._fit_threshold_model_for_manual_slider()
 
     def _fit_threshold_model_for_manual_slider(self):
         """
@@ -3054,7 +3385,7 @@ class MainWindow(QMainWindow):
                             print(f"[Background] Warning: {algorithm} prediction failed: {e}")
 
                 t_elapsed = time.time() - t_start
-                print(f"[Background] ✓ Pre-computed {len(need_to_compute)} classifiers in {t_elapsed:.1f}s")
+                print(f"[Background] Pre-computed {len(need_to_compute)} classifiers in {t_elapsed:.1f}s")
                 print(f"[Background] Classifier switching is now instant!")
 
             except Exception as e:
@@ -3079,10 +3410,11 @@ class MainWindow(QMainWindow):
 
         self._log_status_message("Detecting peaks and breath features...")
 
-        # Get prominence from UI spinbox (user can edit auto-detected value)
-        prom = self.PeakPromValueSpinBox.value()
-        if prom <= 0:
-            self._show_warning("Invalid Prominence", "Please enter a valid prominence value (must be > 0).")
+        # Get prominence from stored value (set during auto-detect or in Analysis Options dialog)
+        prom = getattr(self, 'peak_prominence', None)
+        if prom is None or prom <= 0:
+            self._show_warning("Invalid Prominence",
+                             "No prominence threshold set. Please select an analysis channel first to auto-detect the threshold.")
             return
 
         # Use stored height threshold (set during auto-detect, same as prominence)
@@ -3121,11 +3453,7 @@ class MainWindow(QMainWindow):
 
             # Step 2: Compute breath features for ALL peaks (including noise)
             # This is needed for ML training - noise peaks need features too
-            if peakdet._USE_NUMBA_VERSION:
-                all_breaths = peakdet.compute_breath_events_numba(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-            else:
-                all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-
+            all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
             st.all_breaths_by_sweep[s] = all_breaths  # Store for ML metric computation
 
             # Step 3: Label peaks using auto-detected threshold
@@ -3357,11 +3685,7 @@ class MainWindow(QMainWindow):
 
             # Recompute breath events for only labeled peaks (for display)
             # This is simpler than trying to filter the all_breaths dict
-            if peakdet._USE_NUMBA_VERSION:
-                breaths = peakdet.compute_breath_events_numba(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-            else:
-                breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-
+            breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
             st.breath_by_sweep[s] = breaths
 
             # Recalculate current_peak_metrics_by_sweep using ONLY labeled peaks as neighbors
@@ -3484,7 +3808,7 @@ class MainWindow(QMainWindow):
                                  threshold=thresh if thresh else prom,
                                  prominence=prom)
 
-        self._log_status_message(f"✓ Peak detection complete ({t_elapsed:.1f}s)", 3000)
+        self._log_status_message(f"Peak detection complete ({t_elapsed:.1f}s)", 3000)
 
         # Refresh GMM tab if it was marked for refresh after channel change
         # (Peak Detection tab was already refreshed after auto-detect)
@@ -3809,7 +4133,7 @@ class MainWindow(QMainWindow):
             )
 
             n_sniffing_breaths = np.sum(cluster_labels == sniffing_cluster_id)
-            print(f"[auto-gmm] ✓ Identified {n_sniffing_breaths} sniffing breaths and applied to plot")
+            print(f"[auto-gmm] Identified {n_sniffing_breaths} sniffing breaths and applied to plot")
 
             # Cache results for fast dialog loading
             self._cached_gmm_results = {
@@ -3840,7 +4164,7 @@ class MainWindow(QMainWindow):
                 silhouette_score=round(silhouette, 3)
             )
 
-            self._log_status_message(f"✓ GMM clustering complete ({t_elapsed:.1f}s)", 2000)
+            self._log_status_message(f"GMM clustering complete ({t_elapsed:.1f}s)", 2000)
 
         except Exception as e:
             print(f"[auto-gmm] Error during automatic GMM clustering: {e}")
@@ -3851,7 +4175,7 @@ class MainWindow(QMainWindow):
                                operation='gmm_clustering',
                                num_breaths=len(feature_matrix) if 'feature_matrix' in locals() else 0)
 
-            self._log_status_message(f"✗ GMM clustering failed ({t_elapsed:.1f}s)", 3000)
+            self._log_status_message(f"GMM clustering failed ({t_elapsed:.1f}s)", 3000)
             import traceback
             traceback.print_exc()
 
@@ -3995,10 +4319,10 @@ class MainWindow(QMainWindow):
         # Validate quality (warn but don't block)
         sniff_stats = cluster_stats[sniffing_cluster_id]
         if silhouette < 0.25:
-            print(f"[auto-gmm] ⚠️ Warning: Low cluster separation (silhouette={silhouette:.3f})")
+            print(f"[auto-gmm] WARNING: Low cluster separation (silhouette={silhouette:.3f})")
             print(f"[auto-gmm]   Breathing patterns may be very similar (e.g., anesthetized mouse)")
         if if_idx is not None and sniff_stats['mean_if'] < 5.0:
-            print(f"[auto-gmm] ⚠️ Warning: 'Sniffing' cluster has low IF ({sniff_stats['mean_if']:.2f} Hz)")
+            print(f"[auto-gmm] WARNING: 'Sniffing' cluster has low IF ({sniff_stats['mean_if']:.2f} Hz)")
             print(f"[auto-gmm]   May be normal variation, not true sniffing (typical sniffing: 5-8 Hz)")
 
         return sniffing_cluster_id
@@ -4032,17 +4356,29 @@ class MainWindow(QMainWindow):
                 self.state.gmm_sniff_probabilities[sweep_idx] = {}
             self.state.gmm_sniff_probabilities[sweep_idx][breath_idx] = sniff_prob
 
-        # Store classifications in all_peaks_by_sweep['gmm_class'] field
-        # This makes classifications persist through manual peak edits
+        # Check if GMM is the active classifier
+        is_gmm_active = self.state.active_eupnea_sniff_classifier == 'gmm'
+
+        # Store classifications in all_peaks_by_sweep
+        # - Always store to gmm_class_ro (for switching classifiers later)
+        # - Only update gmm_class (editable) if GMM is the active classifier
         n_classified = gmm_clustering.store_gmm_classifications_in_peaks(
             self.state, breath_cycles, cluster_labels, sniffing_cluster_id,
-            cluster_probabilities, confidence_threshold=0.5
+            cluster_probabilities, confidence_threshold=0.5,
+            update_editable=is_gmm_active
         )
 
-        # Build BOTH eupnea AND sniffing regions from stored classifications
-        results = gmm_clustering.build_eupnea_sniffing_regions(
-            self.state, verbose=False, log_prefix="[auto-gmm]"
-        )
+        # Only build regions if GMM is the active classifier
+        # (otherwise, the active classifier's predictions are already in gmm_class)
+        if is_gmm_active:
+            # Build BOTH eupnea AND sniffing regions from stored classifications
+            results = gmm_clustering.build_eupnea_sniffing_regions(
+                self.state, verbose=False, log_prefix="[auto-gmm]"
+            )
+        else:
+            # Just return dummy results - regions will be built from ML predictions
+            results = {'n_sniffing': 0, 'n_eupnea': 0, 'total_sniff_regions': 0, 'total_eupnea_regions': 0}
+            print(f"[auto-gmm] GMM results cached but not applied (active classifier: {self.state.active_eupnea_sniff_classifier})")
 
         # Calculate probability statistics
         all_sniff_probs = []
@@ -4060,7 +4396,7 @@ class MainWindow(QMainWindow):
                 uncertain_count = np.sum((sniff_probs_of_sniff_breaths >= 0.5) & (sniff_probs_of_sniff_breaths < 0.7))
                 print(f"[auto-gmm]   Sniffing probability: mean={mean_conf:.3f}, min={min_conf:.3f}")
                 if uncertain_count > 0:
-                    print(f"[auto-gmm]   ⚠️ {uncertain_count} breaths have uncertain classification (50-70% sniffing probability)")
+                    print(f"[auto-gmm]   WARNING: {uncertain_count} breaths have uncertain classification (50-70% sniffing probability)")
 
         # Report results
         print(f"[auto-gmm]   Created {results['total_sniff_regions']} sniffing region(s) across sweeps")
@@ -4111,7 +4447,7 @@ class MainWindow(QMainWindow):
                 uncertain_count = np.sum((sniff_probs_of_sniff_breaths >= 0.5) & (sniff_probs_of_sniff_breaths < 0.7))
                 print(f"[auto-gmm]   Sniffing probability: mean={mean_conf:.3f}, min={min_conf:.3f}")
                 if uncertain_count > 0:
-                    print(f"[auto-gmm]   ⚠️ {uncertain_count} breaths have uncertain classification (50-70% sniffing probability)")
+                    print(f"[auto-gmm]   WARNING: {uncertain_count} breaths have uncertain classification (50-70% sniffing probability)")
 
     ##################################################
     ##y2 plotting                                   ##
@@ -4229,6 +4565,17 @@ class MainWindow(QMainWindow):
         self._log_status_message(f"Outliers display: {mode}", 2000)
         self.redraw_main_plot()
 
+    def on_dark_mode_toggled(self, checked: bool):
+        """Toggle plot dark mode (dark vs light background)."""
+        theme = "dark" if checked else "light"
+        self.plot_host.set_plot_theme(theme)
+
+        # Save preference
+        self.settings.setValue("plot_dark_mode", checked)
+
+        mode_text = "Dark mode" if checked else "Light mode"
+        self._log_status_message(f"Plot theme: {mode_text}", 2000)
+
     ##################################################
     ## Turn Off All Edit Modes ##
     ##################################################
@@ -4242,7 +4589,7 @@ class MainWindow(QMainWindow):
 
 
     def on_update_eupnea_sniffing_clicked(self):
-        """Handle Update Eupnea/Sniffing Detection button - manually rerun GMM and apply."""
+        """Handle Update Eupnea/Sniffing Detection button - rerun current classifier and apply."""
         import time
         from PyQt6.QtCore import QTimer
 
@@ -4252,11 +4599,30 @@ class MainWindow(QMainWindow):
             return
 
         t_start = time.time()
-        print("[update-eupnea] Manually updating eupnea/sniffing detection...")
-        self._log_status_message("Updating eupnea/sniffing detection...")
+        current_classifier = st.active_eupnea_sniff_classifier
+        print(f"[update-eupnea] Manually updating eupnea/sniffing detection using: {current_classifier}")
+        self._log_status_message(f"Updating eupnea/sniffing detection ({current_classifier})...")
 
-        # Run GMM clustering and apply sniffing regions
-        self._run_automatic_gmm_clustering()
+        # Handle based on current classifier selection
+        if current_classifier == 'all_eupnea':
+            # Set all breaths to eupnea
+            self._set_all_breaths_eupnea_sniff_class(0)
+        elif current_classifier == 'none':
+            # Clear all labels
+            self._clear_all_eupnea_sniff_labels()
+        elif current_classifier == 'gmm':
+            # Run GMM clustering
+            self._run_automatic_gmm_clustering()
+        else:
+            # ML model - re-run predictions and update
+            self._update_eupnea_sniff_from_classifier()
+
+        # Rebuild regions for display
+        try:
+            import core.gmm_clustering as gmm_clustering
+            gmm_clustering.build_eupnea_sniffing_regions(self.state, verbose=False)
+        except Exception as e:
+            print(f"[update-eupnea] Warning: Could not rebuild regions: {e}")
 
         # Clear out-of-date flag
         self.eupnea_sniffing_out_of_date = False
@@ -4267,8 +4633,8 @@ class MainWindow(QMainWindow):
 
         # Show completion message with elapsed time
         t_elapsed = time.time() - t_start
-        print(f"[update-eupnea] ✓ Eupnea/sniffing detection updated ({t_elapsed:.1f}s)")
-        self._log_status_message(f"✓ Eupnea/sniffing detection updated ({t_elapsed:.1f}s)", 2000)
+        print(f"[update-eupnea] Eupnea/sniffing detection updated ({t_elapsed:.1f}s)")
+        self._log_status_message(f"Eupnea/sniffing detection updated ({t_elapsed:.1f}s)", 2000)
         # Clear again after the success message disappears
         QTimer.singleShot(2100, lambda: self.statusBar().clearMessage())
 
@@ -4353,8 +4719,13 @@ class MainWindow(QMainWindow):
 
         # Create non-modal dialog
         self.help_dialog = HelpDialog(self, update_info=self.update_info)
+        self.help_dialog.finished.connect(self._on_help_dialog_closed)
         self.help_dialog.show()  # Non-modal - doesn't block
         telemetry.log_screen_view('Help Dialog', screen_class='info_dialog')
+
+    def _on_help_dialog_closed(self):
+        """Clear help dialog reference when closed so it can be reopened."""
+        self.help_dialog = None
 
     def _check_for_updates_on_startup(self):
         """Check for updates in background and update UI if available."""
@@ -4864,6 +5235,2153 @@ class MainWindow(QMainWindow):
 
     # ========== PROJECT BUILDER METHODS ==========
 
+    def _setup_master_file_list(self):
+        """Set up the master file list by hiding Project Organization and reconfiguring table."""
+        from PyQt6.QtWidgets import QHeaderView, QComboBox, QPushButton, QHBoxLayout, QWidget
+        from PyQt6.QtCore import Qt
+
+        # === Hide the Project Organization section (right column) ===
+        # Hide all widgets in the right column
+        if hasattr(self, 'projectOrganizationLabel'):
+            self.projectOrganizationLabel.hide()
+        if hasattr(self, 'experimentsTreeWidget'):
+            self.experimentsTreeWidget.hide()
+        if hasattr(self, 'experimentDetailsGroup'):
+            self.experimentDetailsGroup.hide()
+        if hasattr(self, 'removeExperimentButton'):
+            self.removeExperimentButton.hide()
+        if hasattr(self, 'exportExperimentButton'):
+            self.exportExperimentButton.hide()
+        if hasattr(self, 'addExperimentButton'):
+            self.addExperimentButton.hide()
+        if hasattr(self, 'experimentsInProjectLabel'):
+            self.experimentsInProjectLabel.hide()
+
+        # Hide the vertical line separator between columns
+        if hasattr(self, 'line_vertical'):
+            self.line_vertical.hide()
+
+        # Hide the "Add to Project" button since we're not using experiments
+        if hasattr(self, 'addToProjectButton'):
+            self.addToProjectButton.hide()
+
+        # Make the left column stretch to fill available space
+        # Find the two-column horizontal layout and adjust stretch factors
+        from PyQt6.QtWidgets import QHBoxLayout
+        two_col_layout = self.findChild(QHBoxLayout, 'projectTwoColumnLayout')
+        if two_col_layout:
+            # Set stretch factors: left column gets all space, right column gets none
+            two_col_layout.setStretch(0, 1)  # leftColumnLayout
+            two_col_layout.setStretch(1, 0)  # line_vertical (hidden)
+            two_col_layout.setStretch(2, 0)  # rightColumnLayout (hidden)
+
+        # === Reconfigure the table columns ===
+        table = self.discoveredFilesTable
+
+        # Column structure:
+        # 0: File Name
+        # 1: Protocol
+        # 2: Avail Ch (available channels count)
+        # 3: Sweeps (number of sweeps)
+        # 4: Channel (selected for analysis)
+        # 5: Stim Ch (detected stimulus channel)
+        # 6: Keywords
+        # 7: Strain (editable)
+        # 8: Stim Type (auto-detected from stim frequency)
+        # 9: Power (editable, auto-fill)
+        # 10: Sex (editable)
+        # 11: Animal ID (editable)
+        # 12: Status
+        # 13: Actions (+/- buttons)
+
+        new_columns = [
+            "File Name",      # 0
+            "Protocol",       # 1
+            "Avail Ch",       # 2 (available channels)
+            "Sweeps",         # 3 (number of sweeps)
+            "Keywords",       # 4 (path keywords - parent level info)
+            "Experiment",     # 5 (user-defined experiment grouping) - NEW
+            "Channel",        # 6 (analyzed channel - filled on save)
+            "Stim Ch",        # 7 (stim channel - filled on save)
+            "Events Ch",      # 8 (events channel - filled on save)
+            "Strain",         # 9
+            "Stim Type",      # 10 (auto-detected or manual)
+            "Power",          # 11
+            "Sex",            # 12
+            "Animal ID",      # 13
+            "Status",         # 14
+            "",               # 15 (actions - Analyze/+ buttons)
+            "Exports"         # 16 (export summary with tooltip)
+        ]
+
+        table.setColumnCount(len(new_columns))
+        table.setHorizontalHeaderLabels(new_columns)
+
+        # Disable default sorting - we'll implement custom grouped sorting
+        table.setSortingEnabled(False)
+
+        # Set column properties
+        header = table.horizontalHeader()
+
+        # Connect header click for custom grouped sorting
+        header.sectionClicked.connect(self._on_header_sort_clicked)
+
+        # 0: File name "File Name"
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(0, 70)
+        # 1: Protocol "Protocol"
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(1, 58)
+        # 2: Available channels "Avail Ch"
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(2, 52)
+        # 3: Sweeps "Sweeps"
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(3, 50)
+        # 4: Keywords "Keywords"
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(4, 62)
+        # 5: Experiment "Experiment" - NEW user-defined grouping
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(5, 70)
+        # 6: Channel "Channel"
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(6, 55)
+        # 7: Stim Ch "Stim Ch"
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(7, 52)
+        # 8: Events Ch "Events Ch"
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(8, 62)
+        # 9: Strain "Strain"
+        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(9, 45)
+        # 10: Stim Type "Stim Type"
+        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(10, 62)
+        # 11: Power "Power"
+        header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(11, 45)
+        # 12: Sex "Sex"
+        header.setSectionResizeMode(12, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(12, 30)
+        # 13: Animal ID "Animal ID"
+        header.setSectionResizeMode(13, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(13, 62)
+        # 14: Status "Status"
+        header.setSectionResizeMode(14, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(14, 45)
+        # 15: Actions "" (no header) - needs room for Analyze/+/- buttons
+        header.setSectionResizeMode(15, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(15, 85)
+        # 16: Exports "Exports"
+        header.setSectionResizeMode(16, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(16, 55)
+
+        # Connect cell changed signal for editable columns
+        table.cellChanged.connect(self._on_master_list_cell_changed)
+
+        # Connect double-click to open file for analysis
+        table.cellDoubleClicked.connect(self._on_master_list_double_click)
+
+        # Enable context menu for bulk editing
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._on_master_list_context_menu)
+
+        # Install event filter to handle resize events for auto-fit columns
+        table.viewport().installEventFilter(self)
+        self._table_resize_timer = None  # For debouncing resize events
+
+        print("[project-builder] Master file list configured with new columns")
+
+    def _format_exports_summary(self, task: dict) -> str:
+        """
+        Format a compact summary of exports for display in the Exports column.
+
+        Example output: "1 PDF, 3 CSV, 1 NPZ"
+        """
+        exports = task.get('exports', {})
+        if not exports:
+            return ''
+
+        parts = []
+
+        # Count CSVs
+        csv_count = sum([
+            1 if exports.get('timeseries_csv') else 0,
+            1 if exports.get('breaths_csv') else 0,
+            1 if exports.get('events_csv') else 0,
+        ])
+
+        if exports.get('pdf'):
+            parts.append('1 PDF')
+        if csv_count > 0:
+            parts.append(f'{csv_count} CSV')
+        if exports.get('npz'):
+            parts.append('1 NPZ')
+        if exports.get('ml_training'):
+            parts.append('ML')
+        if exports.get('session_state'):
+            parts.append('Session')
+
+        return ', '.join(parts) if parts else ''
+
+    def _format_exports_tooltip(self, task: dict) -> str:
+        """
+        Format a detailed tooltip for the Exports column.
+
+        Shows what was exported, when, where, and app version.
+        """
+        exports = task.get('exports', {})
+        export_path = task.get('export_path', '')
+        export_date = task.get('export_date', '')
+        export_version = task.get('export_version', '')
+
+        if not exports and not export_path:
+            return 'No exports yet'
+
+        lines = []
+
+        # Header with date
+        if export_date:
+            # Format ISO date nicely
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(export_date)
+                date_str = dt.strftime('%Y-%m-%d %H:%M')
+            except:
+                date_str = export_date
+            lines.append(f"Exported: {date_str}")
+
+        # App version
+        if export_version:
+            lines.append(f"App version: {export_version}")
+
+        # Export path
+        if export_path:
+            lines.append(f"Location: {export_path}")
+
+        lines.append('')  # Blank line
+
+        # List of exports
+        lines.append("Files saved:")
+        if exports.get('pdf'):
+            lines.append("  ✓ Summary PDF")
+        if exports.get('timeseries_csv'):
+            lines.append("  ✓ Timeseries CSV")
+        if exports.get('breaths_csv'):
+            lines.append("  ✓ Breaths CSV")
+        if exports.get('events_csv'):
+            lines.append("  ✓ Events CSV")
+        if exports.get('npz'):
+            lines.append("  ✓ NPZ Bundle")
+        if exports.get('session_state'):
+            lines.append("  ✓ Session State")
+        if exports.get('ml_training'):
+            lines.append("  ✓ ML Training Data")
+
+        return '\n'.join(lines)
+
+    def _create_exports_table_item(self, task: dict):
+        """Create a QTableWidgetItem for the Exports column with summary and tooltip."""
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        summary = self._format_exports_summary(task)
+        tooltip = self._format_exports_tooltip(task)
+
+        item = QTableWidgetItem(summary)
+        item.setToolTip(tooltip)
+
+        return item
+
+    def _on_header_sort_clicked(self, column):
+        """
+        Custom sorting that keeps parent rows with their sub-rows.
+        Sorts groups by the parent's value in the clicked column.
+        """
+        if not self._master_file_list:
+            return
+
+        # Track sort direction (toggle on repeated clicks)
+        if not hasattr(self, '_sort_column'):
+            self._sort_column = -1
+            self._sort_ascending = True
+
+        if self._sort_column == column:
+            self._sort_ascending = not self._sort_ascending
+        else:
+            self._sort_column = column
+            self._sort_ascending = True
+
+        # Group tasks by parent file path
+        groups = {}  # file_path -> {'parent': task, 'sub_rows': [tasks]}
+        parent_order = []  # Track order of parents for sorting
+
+        for task in self._master_file_list:
+            file_path = str(task.get('file_path', ''))
+            is_sub_row = task.get('is_sub_row', False)
+
+            if file_path not in groups:
+                groups[file_path] = {'parent': None, 'sub_rows': []}
+                parent_order.append(file_path)
+
+            if is_sub_row:
+                groups[file_path]['sub_rows'].append(task)
+            else:
+                groups[file_path]['parent'] = task
+
+        # Get sort key for a group (uses parent's column value)
+        def get_sort_key(file_path):
+            group = groups[file_path]
+            parent = group['parent']
+            if not parent:
+                # No parent, use first sub-row
+                if group['sub_rows']:
+                    parent = group['sub_rows'][0]
+                else:
+                    return ''
+
+            # Get value from the appropriate column
+            # Map column index to task field
+            column_to_field = {
+                0: 'file_name',
+                1: 'protocol',
+                2: 'channel_count',
+                3: 'sweep_count',
+                4: 'keywords_display',
+                5: 'channel',
+                6: 'stim_channel',
+                7: 'events_channel',
+                8: 'strain',
+                9: 'stim_type',
+                10: 'power',
+                11: 'sex',
+                12: 'animal_id',
+                13: 'status',
+                15: 'export_path',
+            }
+            field = column_to_field.get(column, 'file_name')
+            value = parent.get(field, '')
+            # Convert to string for consistent sorting
+            return str(value).lower() if value else ''
+
+        # Sort parent_order by the sort key
+        parent_order.sort(key=get_sort_key, reverse=not self._sort_ascending)
+
+        # Rebuild _master_file_list with sorted groups
+        new_master_list = []
+        for file_path in parent_order:
+            group = groups[file_path]
+            if group['parent']:
+                new_master_list.append(group['parent'])
+            new_master_list.extend(group['sub_rows'])
+
+        self._master_file_list = new_master_list
+
+        # Rebuild the table
+        self._rebuild_table_from_master_list()
+
+        # Show sort indicator
+        direction = "↑" if self._sort_ascending else "↓"
+        col_name = self.discoveredFilesTable.horizontalHeaderItem(column).text() if self.discoveredFilesTable.horizontalHeaderItem(column) else f"Col {column}"
+        self._log_status_message(f"Sorted by {col_name} {direction}", 2000)
+
+    def _rebuild_table_from_master_list(self):
+        """Rebuild the table from the current _master_file_list order."""
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        table = self.discoveredFilesTable
+        table.blockSignals(True)
+        table.setRowCount(0)
+
+        for i, task in enumerate(self._master_file_list):
+            table.insertRow(i)
+            is_sub_row = task.get('is_sub_row', False)
+
+            # Column 0: File Name or channel for sub-rows
+            if is_sub_row:
+                # Show channel with filename in parentheses for clarity
+                file_name = task.get('file_name', '')
+                channel = task.get('channel', '')
+                item = QTableWidgetItem(f"  ↳ {channel}")
+                item.setToolTip(f"File: {file_name}\nChannel: {channel}")
+                table.setItem(i, 0, item)
+            else:
+                table.setItem(i, 0, QTableWidgetItem(task.get('file_name', '')))
+
+            # Columns 1-4: Show parent info on sub-rows too (helps with sorting/filtering)
+            table.setItem(i, 1, QTableWidgetItem(task.get('protocol', '')))
+            if is_sub_row:
+                table.setItem(i, 2, QTableWidgetItem(''))  # Avail Ch not relevant for sub-row
+                table.setItem(i, 3, QTableWidgetItem(''))  # Sweeps not relevant for sub-row
+            else:
+                table.setItem(i, 2, QTableWidgetItem(str(task.get('channel_count', ''))))
+                table.setItem(i, 3, QTableWidgetItem(str(task.get('sweep_count', ''))))
+            table.setItem(i, 4, QTableWidgetItem(task.get('keywords_display', '')))
+
+            # Column 5: Experiment (user-defined grouping)
+            table.setItem(i, 5, QTableWidgetItem(task.get('experiment', '')))
+
+            # Columns 6-8: Channel, Stim Ch, Events Ch
+            table.setItem(i, 6, QTableWidgetItem(task.get('channel', '')))
+            table.setItem(i, 7, QTableWidgetItem(task.get('stim_channel', '')))
+            table.setItem(i, 8, QTableWidgetItem(task.get('events_channel', '')))
+
+            # Columns 9-13: Metadata
+            table.setItem(i, 9, QTableWidgetItem(task.get('strain', '')))
+            table.setItem(i, 10, QTableWidgetItem(task.get('stim_type', '')))
+            table.setItem(i, 11, QTableWidgetItem(task.get('power', '')))
+            table.setItem(i, 12, QTableWidgetItem(task.get('sex', '')))
+            table.setItem(i, 13, QTableWidgetItem(task.get('animal_id', '')))
+
+            # Column 14: Status (with warnings if applicable)
+            status = task.get('status', 'pending')
+            warnings = task.get('scan_warnings', {})
+            has_conflicts = bool(warnings.get('conflicts'))
+            has_older_files = warnings.get('older_npz_count', 0) > 0
+
+            if is_sub_row:
+                if status == 'completed':
+                    if has_conflicts:
+                        status_icon = '●⚠'
+                    elif has_older_files:
+                        status_icon = '●📁'
+                    else:
+                        status_icon = '●'
+                elif status == 'in_progress':
+                    status_icon = '◐'
+                else:
+                    status_icon = '○'
+
+                status_item = QTableWidgetItem(status_icon)
+
+                # Add tooltip for warnings
+                if has_conflicts or has_older_files:
+                    tooltip_parts = []
+                    if has_conflicts:
+                        tooltip_parts.append("⚠ Data conflicts (table vs NPZ):")
+                        for c in warnings['conflicts']:
+                            tooltip_parts.append(f"  • {c}")
+                    if has_older_files:
+                        count = warnings['older_npz_count']
+                        tooltip_parts.append(f"📁 {count} older NPZ file(s) found:")
+                        for older in warnings.get('older_npz_files', [])[:3]:
+                            tooltip_parts.append(f"  • {Path(older['file']).name} ({older['date']})")
+                        if count > 3:
+                            tooltip_parts.append(f"  • ... and {count - 3} more")
+                    status_item.setToolTip('\n'.join(tooltip_parts))
+
+                table.setItem(i, 14, status_item)
+            else:
+                # Parent row - count completed sub-rows
+                status_icon = ''  # Will be set by _apply_all_row_styling
+                table.setItem(i, 14, QTableWidgetItem(status_icon))
+
+            # Column 15: Action buttons
+            if is_sub_row:
+                self._add_sub_row_action_buttons(i)
+            else:
+                self._add_row_action_button(i)
+
+            # Column 16: Exports
+            table.setItem(i, 16, self._create_exports_table_item(task))
+
+        table.blockSignals(False)
+
+        # Apply styling
+        self._apply_all_row_styling()
+
+    def _on_master_list_cell_changed(self, row, column):
+        """Handle cell edits in the master file list."""
+        # Editable columns: 5 (Experiment), 9 (Strain), 10 (Stim Type), 11 (Power), 12 (Sex), 13 (Animal ID)
+        editable_columns = {5: 'experiment', 9: 'strain', 10: 'stim_type', 11: 'power', 12: 'sex', 13: 'animal_id'}
+
+        if column not in editable_columns:
+            return
+
+        if row >= len(self._master_file_list):
+            return
+
+        field = editable_columns[column]
+        item = self.discoveredFilesTable.item(row, column)
+        if item:
+            value = item.text().strip()
+            self._master_file_list[row][field] = value
+            print(f"[master-list] Updated row {row} {field} = '{value}'")
+
+            # Track experiment names in history for autocomplete
+            if field == 'experiment' and value:
+                self._update_experiment_history(value)
+
+    def _get_experiment_history(self) -> list:
+        """Get list of previously used experiment names from QSettings."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+        history = settings.value("project_builder/experiment_history", [])
+        return history if isinstance(history, list) else []
+
+    def _update_experiment_history(self, experiment_name: str):
+        """Add an experiment name to history (max 50 entries, most recent first)."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+
+        history = self._get_experiment_history()
+
+        # Remove if already exists (to move to front)
+        if experiment_name in history:
+            history.remove(experiment_name)
+
+        # Add to front
+        history.insert(0, experiment_name)
+
+        # Keep max 50
+        history = history[:50]
+
+        settings.setValue("project_builder/experiment_history", history)
+
+    def _on_master_list_double_click(self, row, column):
+        """Handle double-click on master list row - open file for analysis."""
+        if row >= len(self._master_file_list):
+            return
+
+        task = self._master_file_list[row]
+        file_path = task.get('file_path')
+
+        if file_path and Path(file_path).exists():
+            print(f"[master-list] Opening file for analysis: {file_path}")
+            # Track which row is being analyzed
+            self._active_master_list_row = row
+
+            # Store pending channel selections from Project Builder
+            # These will be used after file loads to override auto-detection
+            self._pending_analysis_channel = task.get('channel', '')
+            self._pending_stim_channels = task.get('stim_channels', [])
+
+            # Log what we're planning to select
+            if self._pending_analysis_channel or self._pending_stim_channels:
+                print(f"[master-list] Pre-selecting: analysis={self._pending_analysis_channel}, stim={self._pending_stim_channels}")
+
+            self.load_file(Path(file_path))
+            # Switch to Analysis tab
+            if hasattr(self, 'mainTabWidget'):
+                self.mainTabWidget.setCurrentIndex(0)  # Analysis tab
+
+    def mark_active_analysis_complete(self, channel_used: str = None, stim_channel_used: str = None,
+                                       events_channel_used: str = None, export_info: dict = None):
+        """
+        Mark the currently active master list row as completed.
+        Called after successful export/save of analysis data.
+
+        Args:
+            channel_used: The channel that was analyzed (e.g., "AD0")
+            stim_channel_used: The stim channel used (e.g., "AD1")
+            events_channel_used: The events channel used (e.g., "AD2")
+            export_info: Dict with export metadata and file flags:
+                - export_path: Where files were saved
+                - export_date: When exported
+                - export_version: App version used
+                - exports: Dict of boolean flags for each export type
+                - strain, stim_type, power, sex, animal_id: Metadata from dialog
+        """
+        # Get current file path from state
+        current_file_path = str(self.state.in_path) if self.state.in_path else None
+
+        # Find matching row(s) by file path if active row not set
+        row = self._active_master_list_row
+
+        if row is None and current_file_path:
+            # Try to find a row matching the current file
+            # Priority: 1) Same file + same channel, 2) Same file + completed (different channel), 3) Same file + pending
+            from pathlib import Path
+            current_normalized = str(Path(current_file_path).resolve())
+
+            matching_rows = []  # [(row_idx, task), ...]
+            for i, task in enumerate(self._master_file_list):
+                task_path = task.get('file_path', '')
+                if task_path:
+                    task_normalized = str(Path(task_path).resolve())
+                    if task_normalized == current_normalized:
+                        matching_rows.append((i, task))
+
+            if matching_rows:
+                # Priority 1: Find row with same channel (to update existing)
+                for i, task in matching_rows:
+                    if task.get('channel', '') == channel_used:
+                        row = i
+                        print(f"[master-list] Found matching row {i} with same channel {channel_used}")
+                        break
+
+                # Priority 2: Find completed row with different channel (to create sub-row)
+                if row is None:
+                    for i, task in matching_rows:
+                        if task.get('status', 'pending') == 'completed':
+                            row = i
+                            print(f"[master-list] Found completed row {i} (channel: {task.get('channel', '')})")
+                            break
+
+                # Priority 3: Find any pending row (first time analysis)
+                if row is None:
+                    for i, task in matching_rows:
+                        if task.get('status', 'pending') == 'pending':
+                            row = i
+                            print(f"[master-list] Found pending row {i}")
+                            break
+
+                # Fallback: Use first matching row
+                if row is None and matching_rows:
+                    row = matching_rows[0][0]
+                    print(f"[master-list] Using first matching row {row}")
+
+        if row is None:
+            print(f"[master-list] No matching row found for file: {current_file_path}")
+            return
+
+        if row >= len(self._master_file_list):
+            return
+
+        task = self._master_file_list[row]
+
+        # Check if this is a parent row or sub-row
+        is_sub_row = task.get('is_sub_row', False)
+        existing_channel = task.get('channel', '')
+        existing_status = task.get('status', 'pending')
+
+        # Debug logging to understand the flow
+        print(f"[master-list] mark_active_analysis_complete called:")
+        print(f"  - Row: {row}")
+        print(f"  - File: {task.get('file_name', 'unknown')}")
+        print(f"  - Is sub-row: {is_sub_row}")
+        print(f"  - Existing channel in row: '{existing_channel}'")
+        print(f"  - Channel just analyzed: '{channel_used}'")
+        print(f"  - Existing status: '{existing_status}'")
+
+        # For parent rows, ALWAYS create sub-rows instead of updating the parent
+        # This keeps parent as a "header" row showing file-level info only
+        if not is_sub_row:
+            print(f"[master-list] ✓ Parent row detected - creating sub-row for {channel_used}")
+
+            # If parent had existing completed analysis, move it to sub-row first
+            if existing_channel and existing_status == 'completed':
+                # Check if there's already a sub-row for the existing channel
+                has_existing_subrow = False
+                for t in self._master_file_list:
+                    if (t.get('is_sub_row') and
+                        str(t.get('file_path')) == str(task.get('file_path')) and
+                        t.get('channel') == existing_channel):
+                        has_existing_subrow = True
+                        break
+
+                if not has_existing_subrow:
+                    # Move existing channel data to a sub-row first
+                    existing_export_info = {
+                        'export_path': task.get('export_path', ''),
+                        'export_date': task.get('export_date', ''),
+                        'export_version': task.get('export_version', ''),
+                        'exports': task.get('exports', {}),
+                        'strain': task.get('strain', ''),
+                        'stim_type': task.get('stim_type', ''),
+                        'power': task.get('power', ''),
+                        'sex': task.get('sex', ''),
+                        'animal_id': task.get('animal_id', ''),
+                    }
+                    self._create_sub_row_from_analysis(
+                        row, existing_channel,
+                        task.get('stim_channel', ''),
+                        task.get('events_channel', ''),
+                        existing_export_info
+                    )
+                    print(f"[master-list]   - Moved existing {existing_channel} to sub-row")
+
+            # Create sub-row for the new analysis
+            self._create_sub_row_from_analysis(
+                row, channel_used, stim_channel_used, events_channel_used, export_info
+            )
+            print(f"[master-list]   - Created sub-row for {channel_used}")
+
+            # Apply styling to update colors and clean parent
+            self._apply_all_row_styling()
+
+            self._active_master_list_row = None
+            return
+
+        # For sub-rows, update the existing sub-row
+        task['status'] = 'completed'
+        if channel_used:
+            task['channel'] = channel_used
+        if stim_channel_used:
+            task['stim_channel'] = stim_channel_used
+        if events_channel_used:
+            task['events_channel'] = events_channel_used
+
+        # Update export tracking info
+        if export_info:
+            task['export_path'] = export_info.get('export_path', '')
+            task['export_date'] = export_info.get('export_date', '')
+            task['export_version'] = export_info.get('export_version', '')
+            task['exports'] = export_info.get('exports', task.get('exports', {}))
+
+            # Update metadata from save dialog
+            if export_info.get('strain'):
+                task['strain'] = export_info['strain']
+            if export_info.get('stim_type'):
+                task['stim_type'] = export_info['stim_type']
+            if export_info.get('power'):
+                task['power'] = export_info['power']
+            if export_info.get('sex'):
+                task['sex'] = export_info['sex']
+            if export_info.get('animal_id'):
+                task['animal_id'] = export_info['animal_id']
+
+        # Update the table display
+        table = self.discoveredFilesTable
+        if row < table.rowCount():
+            from PyQt6.QtWidgets import QTableWidgetItem
+
+            # Status column (14) - show completed icon
+            status_item = table.item(row, 14)
+            if status_item:
+                status_item.setText('●')  # Filled circle for completed
+            else:
+                table.setItem(row, 14, QTableWidgetItem('●'))
+
+            # Channel column (6)
+            if channel_used:
+                channel_item = table.item(row, 6)
+                if channel_item:
+                    channel_item.setText(channel_used)
+                else:
+                    table.setItem(row, 6, QTableWidgetItem(channel_used))
+
+            # Stim Ch column (7)
+            if stim_channel_used:
+                stim_item = table.item(row, 7)
+                if stim_item:
+                    stim_item.setText(stim_channel_used)
+                else:
+                    table.setItem(row, 7, QTableWidgetItem(stim_channel_used))
+
+            # Events Ch column (8)
+            if events_channel_used:
+                events_item = table.item(row, 8)
+                if events_item:
+                    events_item.setText(events_channel_used)
+                else:
+                    table.setItem(row, 8, QTableWidgetItem(events_channel_used))
+
+            # Metadata columns (update if provided and currently empty)
+            if export_info:
+                # Strain column (9)
+                if export_info.get('strain'):
+                    strain_item = table.item(row, 9)
+                    if strain_item:
+                        strain_item.setText(export_info['strain'])
+                    else:
+                        table.setItem(row, 9, QTableWidgetItem(export_info['strain']))
+
+                # Stim Type column (10)
+                if export_info.get('stim_type'):
+                    stim_type_item = table.item(row, 10)
+                    if stim_type_item:
+                        stim_type_item.setText(export_info['stim_type'])
+                    else:
+                        table.setItem(row, 10, QTableWidgetItem(export_info['stim_type']))
+
+                # Power column (11)
+                if export_info.get('power'):
+                    power_item = table.item(row, 11)
+                    if power_item:
+                        power_item.setText(export_info['power'])
+                    else:
+                        table.setItem(row, 11, QTableWidgetItem(export_info['power']))
+
+                # Sex column (12)
+                if export_info.get('sex'):
+                    sex_item = table.item(row, 12)
+                    if sex_item:
+                        sex_item.setText(export_info['sex'])
+                    else:
+                        table.setItem(row, 12, QTableWidgetItem(export_info['sex']))
+
+                # Animal ID column (13)
+                if export_info.get('animal_id'):
+                    animal_item = table.item(row, 13)
+                    if animal_item:
+                        animal_item.setText(export_info['animal_id'])
+                    else:
+                        table.setItem(row, 13, QTableWidgetItem(export_info['animal_id']))
+
+            # Exports column (16) - update with summary and tooltip
+            table.setItem(row, 16, self._create_exports_table_item(task))
+
+        print(f"[master-list] Marked row {row} as completed:")
+        print(f"  - Channel: {channel_used}")
+        print(f"  - Stim Ch: {stim_channel_used}")
+        print(f"  - Events Ch: {events_channel_used}")
+        if export_info:
+            print(f"  - Export path: {export_info.get('export_path', 'N/A')}")
+            exports = export_info.get('exports', {})
+            saved = [k for k, v in exports.items() if v]
+            print(f"  - Saved: {', '.join(saved) if saved else 'none'}")
+
+        # Clear active row - analysis is done
+        self._active_master_list_row = None
+
+    def _create_sub_row_from_analysis(self, source_row: int, channel_used: str,
+                                       stim_channel_used: str, events_channel_used: str,
+                                       export_info: dict):
+        """
+        Create a new sub-row when user analyzes a different channel from an existing analyzed row.
+
+        This prevents overwriting previous analysis when the user analyzes the same file
+        but with a different channel.
+
+        Args:
+            source_row: Row index of the source task
+            channel_used: The channel that was analyzed
+            stim_channel_used: The stim channel used
+            events_channel_used: The events channel used
+            export_info: Export metadata dict from save dialog
+        """
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        if source_row >= len(self._master_file_list):
+            return
+
+        source_task = self._master_file_list[source_row]
+        table = self.discoveredFilesTable
+        file_path = source_task.get('file_path')
+
+        # Create new task based on source but with new channel and analysis info
+        new_task = {
+            'file_path': file_path,
+            'file_name': source_task.get('file_name', ''),
+            'protocol': source_task.get('protocol', ''),
+            'channel_count': source_task.get('channel_count', 0),
+            'sweep_count': source_task.get('sweep_count', 0),
+            'channel_names': source_task.get('channel_names', []),
+            'stim_channels': source_task.get('stim_channels', []),
+            'path_keywords': source_task.get('path_keywords', {}),
+            'keywords_display': source_task.get('keywords_display', ''),
+            # Analysis results
+            'channel': channel_used,
+            'stim_channel': stim_channel_used or '',
+            'events_channel': events_channel_used or '',
+            # Copy or update metadata
+            'strain': export_info.get('strain', '') if export_info else source_task.get('strain', ''),
+            'stim_type': export_info.get('stim_type', '') if export_info else source_task.get('stim_type', ''),
+            'power': export_info.get('power', '') if export_info else source_task.get('power', ''),
+            'sex': export_info.get('sex', '') if export_info else source_task.get('sex', ''),
+            'animal_id': export_info.get('animal_id', '') if export_info else '',
+            'status': 'completed',
+            'is_sub_row': True,
+            'parent_file': file_path,
+            # Export tracking
+            'export_path': export_info.get('export_path', '') if export_info else '',
+            'export_date': export_info.get('export_date', '') if export_info else '',
+            'export_version': export_info.get('export_version', '') if export_info else '',
+            'exports': export_info.get('exports', {}) if export_info else {
+                'npz': False,
+                'timeseries_csv': False,
+                'breaths_csv': False,
+                'events_csv': False,
+                'pdf': False,
+                'session_state': False,
+                'ml_training': False,
+            }
+        }
+
+        # Insert after the source row
+        insert_row = source_row + 1
+        self._master_file_list.insert(insert_row, new_task)
+
+        # Block signals while inserting
+        table.blockSignals(True)
+
+        # Insert table row with 16-column structure
+        table.insertRow(insert_row)
+        table.setItem(insert_row, 0, QTableWidgetItem(f"  ↳ {channel_used}"))  # Show channel, not filename
+        table.setItem(insert_row, 1, QTableWidgetItem(''))  # Leave protocol empty on sub-rows
+        table.setItem(insert_row, 2, QTableWidgetItem(''))  # Leave channel count empty on sub-rows
+        table.setItem(insert_row, 3, QTableWidgetItem(''))  # Leave sweep count empty on sub-rows
+        table.setItem(insert_row, 4, QTableWidgetItem(''))  # Leave keywords empty on sub-rows
+        table.setItem(insert_row, 5, QTableWidgetItem(channel_used))  # Channel
+        table.setItem(insert_row, 6, QTableWidgetItem(stim_channel_used or ''))  # Stim Ch
+        table.setItem(insert_row, 7, QTableWidgetItem(events_channel_used or ''))  # Events Ch
+        table.setItem(insert_row, 8, QTableWidgetItem(new_task['strain']))
+        table.setItem(insert_row, 9, QTableWidgetItem(new_task['stim_type']))
+        table.setItem(insert_row, 10, QTableWidgetItem(new_task['power']))
+        table.setItem(insert_row, 11, QTableWidgetItem(new_task['sex']))
+        table.setItem(insert_row, 12, QTableWidgetItem(new_task['animal_id']))
+        table.setItem(insert_row, 13, QTableWidgetItem('●'))  # Status - completed
+        # Add action buttons
+        self._add_sub_row_action_buttons(insert_row)
+        # Column 15: Exports
+        table.setItem(insert_row, 15, self._create_exports_table_item(new_task))
+
+        table.blockSignals(False)
+
+        # Apply sub-row styling
+        self._apply_row_styling(insert_row, is_sub_row=True)
+
+        print(f"[master-list] Created new sub-row at {insert_row} for channel {channel_used}")
+        print(f"  - This preserves the previous analysis of {source_task.get('channel', 'unknown')} in row {source_row}")
+
+    def _update_task_with_export_info(self, task: dict, info: dict, row: int, table):
+        """
+        Update a task dict and its table row with export info from saved data scan.
+
+        Args:
+            task: The task dict from _master_file_list
+            info: Export info dict from NPZ metadata
+            row: Table row index
+            table: The QTableWidget
+        """
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        # Track conflicts and multiple files
+        conflicts = []
+        older_files = info.get('older_npz_files', [])
+
+        # Check for conflicts between existing task data and NPZ data
+        metadata_fields = [
+            ('strain', 'strain', 'Strain'),
+            ('stim_type', 'stim_type', 'Stim Type'),
+            ('power', 'power', 'Power'),
+            ('sex', 'sex', 'Sex'),
+            ('animal_id', 'animal_id', 'Animal ID'),
+        ]
+        for task_key, info_key, display_name in metadata_fields:
+            task_val = task.get(task_key, '').strip()
+            info_val = (info.get(info_key, '') or '').strip()
+            if task_val and info_val and task_val != info_val:
+                conflicts.append(f"{display_name}: table='{task_val}' vs NPZ='{info_val}'")
+
+        # Store conflict info in task
+        if conflicts or older_files:
+            task['scan_warnings'] = {
+                'conflicts': conflicts,
+                'older_npz_count': len(older_files),
+                'older_npz_files': older_files,
+            }
+            if conflicts:
+                print(f"[scan-saved] Conflicts found for row {row}: {conflicts}")
+            if older_files:
+                print(f"[scan-saved] {len(older_files)} older NPZ file(s) found for row {row}")
+
+        # Update task with export info
+        task['export_path'] = info.get('export_path', '')
+        task['export_date'] = info.get('export_date', '')
+        task['status'] = 'completed'
+        task['exports'] = {
+            'npz': info.get('npz', False),
+            'timeseries_csv': info.get('timeseries_csv', False),
+            'breaths_csv': info.get('breaths_csv', False),
+            'events_csv': info.get('events_csv', False),
+            'pdf': info.get('pdf', False),
+            'session_state': info.get('session_state', False),
+            'ml_training': info.get('ml_training', False),
+        }
+
+        # Update metadata from NPZ if available and not already set (don't overwrite)
+        if info.get('strain') and not task.get('strain'):
+            task['strain'] = info['strain']
+        if info.get('stim_type') and not task.get('stim_type'):
+            task['stim_type'] = info['stim_type']
+        if info.get('power') and not task.get('power'):
+            task['power'] = info['power']
+        if info.get('sex') and not task.get('sex'):
+            task['sex'] = info['sex']
+        if info.get('animal_id') and not task.get('animal_id'):
+            task['animal_id'] = info['animal_id']
+        if info.get('stim_channel') and not task.get('stim_channel'):
+            task['stim_channel'] = info['stim_channel']
+        if info.get('events_channel') and not task.get('events_channel'):
+            task['events_channel'] = info['events_channel']
+
+        # Update table row
+        if row < table.rowCount():
+            # Status column - show warning if conflicts or multiple NPZ files
+            warnings = task.get('scan_warnings', {})
+            has_conflicts = bool(warnings.get('conflicts'))
+            has_older_files = warnings.get('older_npz_count', 0) > 0
+
+            if has_conflicts or has_older_files:
+                # Show warning indicator
+                status_text = '●⚠' if has_conflicts else '●📁'
+                status_item = QTableWidgetItem(status_text)
+                # Build tooltip
+                tooltip_parts = []
+                if has_conflicts:
+                    tooltip_parts.append("⚠ Data conflicts (table vs NPZ):")
+                    for c in warnings['conflicts']:
+                        tooltip_parts.append(f"  • {c}")
+                if has_older_files:
+                    count = warnings['older_npz_count']
+                    tooltip_parts.append(f"📁 {count} older NPZ file(s) found:")
+                    for older in warnings.get('older_npz_files', [])[:3]:  # Show first 3
+                        tooltip_parts.append(f"  • {Path(older['file']).name} ({older['date']})")
+                    if count > 3:
+                        tooltip_parts.append(f"  • ... and {count - 3} more")
+                status_item.setToolTip('\n'.join(tooltip_parts))
+                table.setItem(row, 13, status_item)
+            else:
+                table.setItem(row, 13, QTableWidgetItem('●'))  # Status completed, no warnings
+
+            table.setItem(row, 15, self._create_exports_table_item(task))
+
+            # Update channel columns from NPZ if available
+            if task.get('stim_channel'):
+                table.setItem(row, 6, QTableWidgetItem(task['stim_channel']))
+            if task.get('events_channel'):
+                table.setItem(row, 7, QTableWidgetItem(task['events_channel']))
+
+            # Update metadata columns from NPZ if available
+            if task.get('strain'):
+                table.setItem(row, 8, QTableWidgetItem(task['strain']))
+            if task.get('stim_type'):
+                table.setItem(row, 9, QTableWidgetItem(task['stim_type']))
+            if task.get('power'):
+                table.setItem(row, 10, QTableWidgetItem(task['power']))
+            if task.get('sex'):
+                table.setItem(row, 11, QTableWidgetItem(task['sex']))
+            if task.get('animal_id'):
+                table.setItem(row, 12, QTableWidgetItem(task['animal_id']))
+
+    def _create_sub_row_from_saved_data(self, source_task: dict, source_row: int,
+                                         channel: str, info: dict):
+        """
+        Create a new sub-row from scanned saved data for an additional channel.
+
+        Args:
+            source_task: The source task dict to base the new row on
+            source_row: Row index of the source task
+            channel: The channel for this saved data
+            info: Export info dict from NPZ metadata
+        """
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        table = self.discoveredFilesTable
+        file_path = source_task.get('file_path')
+
+        # Track any older/duplicate NPZ files found
+        older_files = info.get('older_npz_files', [])
+        scan_warnings = {}
+        if older_files:
+            scan_warnings = {
+                'conflicts': [],
+                'older_npz_count': len(older_files),
+                'older_npz_files': older_files,
+            }
+
+        # Create new task based on source but with new channel and analysis info
+        new_task = {
+            'file_path': file_path,
+            'file_name': source_task.get('file_name', ''),
+            'protocol': source_task.get('protocol', ''),
+            'channel_count': source_task.get('channel_count', 0),
+            'sweep_count': source_task.get('sweep_count', 0),
+            'channel_names': source_task.get('channel_names', []),
+            'stim_channels': source_task.get('stim_channels', []),
+            'path_keywords': source_task.get('path_keywords', {}),
+            'keywords_display': source_task.get('keywords_display', ''),
+            # Analysis results
+            'channel': channel,
+            'stim_channel': info.get('stim_channel', ''),
+            'events_channel': info.get('events_channel', ''),
+            # Metadata from NPZ
+            'strain': info.get('strain', '') or source_task.get('strain', ''),
+            'stim_type': info.get('stim_type', '') or source_task.get('stim_type', ''),
+            'power': info.get('power', '') or source_task.get('power', ''),
+            'sex': info.get('sex', '') or source_task.get('sex', ''),
+            'animal_id': info.get('animal_id', ''),
+            'status': 'completed',
+            'is_sub_row': True,
+            'parent_file': file_path,
+            # Export tracking
+            'export_path': info.get('export_path', ''),
+            'export_date': info.get('export_date', ''),
+            'exports': {
+                'npz': info.get('npz', False),
+                'timeseries_csv': info.get('timeseries_csv', False),
+                'breaths_csv': info.get('breaths_csv', False),
+                'events_csv': info.get('events_csv', False),
+                'pdf': info.get('pdf', False),
+                'session_state': info.get('session_state', False),
+                'ml_training': info.get('ml_training', False),
+            }
+        }
+        if scan_warnings:
+            new_task['scan_warnings'] = scan_warnings
+
+        # Find where to insert - after all existing rows for this file
+        insert_row = source_row + 1
+        while insert_row < len(self._master_file_list):
+            next_task = self._master_file_list[insert_row]
+            if str(next_task.get('file_path')) != str(file_path):
+                break
+            insert_row += 1
+
+        self._master_file_list.insert(insert_row, new_task)
+
+        # Block signals while inserting
+        table.blockSignals(True)
+
+        # Insert table row with 16-column structure
+        table.insertRow(insert_row)
+        table.setItem(insert_row, 0, QTableWidgetItem(f"  ↳ {channel}"))  # Show channel, not filename
+        table.setItem(insert_row, 1, QTableWidgetItem(''))  # Leave protocol empty on sub-rows
+        table.setItem(insert_row, 2, QTableWidgetItem(''))  # Leave channel count empty on sub-rows
+        table.setItem(insert_row, 3, QTableWidgetItem(''))  # Leave sweep count empty on sub-rows
+        table.setItem(insert_row, 4, QTableWidgetItem(''))  # Leave keywords empty on sub-rows
+        table.setItem(insert_row, 5, QTableWidgetItem(channel))  # Channel
+        table.setItem(insert_row, 6, QTableWidgetItem(new_task['stim_channel']))  # Stim Ch
+        table.setItem(insert_row, 7, QTableWidgetItem(new_task['events_channel']))  # Events Ch
+        table.setItem(insert_row, 8, QTableWidgetItem(new_task['strain']))
+        table.setItem(insert_row, 9, QTableWidgetItem(new_task['stim_type']))
+        table.setItem(insert_row, 10, QTableWidgetItem(new_task['power']))
+        table.setItem(insert_row, 11, QTableWidgetItem(new_task['sex']))
+        table.setItem(insert_row, 12, QTableWidgetItem(new_task['animal_id']))
+
+        # Status column - show warning if multiple NPZ files found
+        if scan_warnings and scan_warnings.get('older_npz_count', 0) > 0:
+            status_item = QTableWidgetItem('●📁')
+            count = scan_warnings['older_npz_count']
+            tooltip_parts = [f"📁 {count} older NPZ file(s) found:"]
+            for older in scan_warnings.get('older_npz_files', [])[:3]:
+                tooltip_parts.append(f"  • {Path(older['file']).name} ({older['date']})")
+            if count > 3:
+                tooltip_parts.append(f"  • ... and {count - 3} more")
+            status_item.setToolTip('\n'.join(tooltip_parts))
+            table.setItem(insert_row, 13, status_item)
+        else:
+            table.setItem(insert_row, 13, QTableWidgetItem('●'))  # Status - completed
+
+        # Add action buttons
+        self._add_sub_row_action_buttons(insert_row)
+        # Column 15: Exports
+        table.setItem(insert_row, 15, self._create_exports_table_item(new_task))
+
+        table.blockSignals(False)
+
+        # Apply sub-row styling
+        self._apply_row_styling(insert_row, is_sub_row=True)
+
+        print(f"[scan-saved] Created sub-row at {insert_row} for channel {channel}")
+
+    def eventFilter(self, obj, event):
+        """Handle events for installed event filters (e.g., table resize)."""
+        from PyQt6.QtCore import QEvent, QTimer
+
+        # Check if this is a resize event for the table viewport
+        if (hasattr(self, 'discoveredFilesTable') and
+            obj == self.discoveredFilesTable.viewport() and
+            event.type() == QEvent.Type.Resize):
+
+            # Debounce resize events to avoid excessive recalculation
+            if self._table_resize_timer is not None:
+                self._table_resize_timer.stop()
+
+            self._table_resize_timer = QTimer()
+            self._table_resize_timer.setSingleShot(True)
+            self._table_resize_timer.timeout.connect(self._auto_fit_table_columns)
+            self._table_resize_timer.start(100)  # 100ms delay
+
+        return super().eventFilter(obj, event)
+
+    def _auto_fit_table_columns(self):
+        """
+        Auto-fit column widths intelligently:
+        - Minimum width = header text width
+        - Expand to fit content if needed
+        - Constrain total width to visible area (unless full-content mode enabled)
+        - Expandable columns (File Name, Protocol, Keywords, Exports) get extra space
+        """
+        table = self.discoveredFilesTable
+        header = table.horizontalHeader()
+
+        # Check if full content mode is enabled
+        full_content_mode = getattr(self, 'tableFullContentCheckbox', None)
+        full_content_mode = full_content_mode.isChecked() if full_content_mode else False
+
+        # Get header text widths (minimum for each column)
+        font_metrics = table.fontMetrics()
+        header_widths = {}
+        for col in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(col)
+            if header_item:
+                text = header_item.text()
+                # Add some padding for header
+                header_widths[col] = font_metrics.horizontalAdvance(text) + 16
+            else:
+                header_widths[col] = 30  # Default for empty headers
+
+        # Get content widths by temporarily resizing to contents
+        table.resizeColumnsToContents()
+        content_widths = {}
+        for col in range(table.columnCount()):
+            content_widths[col] = table.columnWidth(col)
+
+        # Columns that can expand to fill space (in priority order)
+        expandable_cols = [0, 5, 4, 1, 16]  # File Name, Experiment, Keywords, Protocol, Exports
+
+        # Fixed columns with specific widths (buttons need room)
+        fixed_col_widths = {15: 85}  # Actions button column
+
+        if full_content_mode:
+            # Full content mode: show all content, enable horizontal scrolling
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            for col in range(table.columnCount()):
+                if col in fixed_col_widths:
+                    # Fixed columns always use their specified width
+                    width = fixed_col_widths[col]
+                else:
+                    # Use max of header width and content width
+                    width = max(header_widths.get(col, 30), content_widths.get(col, 30))
+                table.setColumnWidth(col, width)
+        else:
+            # Fit-to-view mode: constrain to visible width
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+            # Get available width (viewport width minus scrollbar and margins)
+            available_width = table.viewport().width()
+            if available_width < 100:
+                # Fallback if viewport not ready
+                available_width = table.width() - 20
+
+            # Calculate base widths (max of header and content, but reasonable)
+            base_widths = {}
+            for col in range(table.columnCount()):
+                header_w = header_widths.get(col, 30)
+                content_w = content_widths.get(col, 30)
+
+                if col in fixed_col_widths:
+                    # Fixed columns: use specified width
+                    base_widths[col] = fixed_col_widths[col]
+                elif col in expandable_cols:
+                    # Expandable: use header as minimum, allow content to expand
+                    base_widths[col] = max(header_w, min(content_w, header_w + 50))
+                else:
+                    # Regular columns: use header width unless content is slightly larger
+                    base_widths[col] = max(header_w, min(content_w, header_w + 20))
+
+            # Calculate total base width
+            total_base = sum(base_widths.values())
+
+            if total_base <= available_width:
+                # We have extra space - distribute to expandable columns
+                extra_space = available_width - total_base
+
+                # Calculate how much each expandable column wants
+                expandable_wants = {}
+                for col in expandable_cols:
+                    content_w = content_widths.get(col, 30)
+                    current_w = base_widths.get(col, 30)
+                    want = max(0, content_w - current_w)
+                    expandable_wants[col] = want
+
+                total_want = sum(expandable_wants.values())
+
+                if total_want > 0 and extra_space > 0:
+                    # Distribute extra space proportionally to what columns want
+                    for col in expandable_cols:
+                        if expandable_wants[col] > 0:
+                            share = min(expandable_wants[col],
+                                       extra_space * expandable_wants[col] / total_want)
+                            base_widths[col] += int(share)
+
+                # Apply widths
+                for col in range(table.columnCount()):
+                    table.setColumnWidth(col, base_widths[col])
+            else:
+                # Need to shrink - reduce expandable columns first
+                overflow = total_base - available_width
+
+                # Try to take from expandable columns proportionally
+                expandable_excess = {}
+                for col in expandable_cols:
+                    header_w = header_widths.get(col, 30)
+                    current_w = base_widths.get(col, 30)
+                    excess = max(0, current_w - header_w)
+                    expandable_excess[col] = excess
+
+                total_excess = sum(expandable_excess.values())
+
+                if total_excess >= overflow:
+                    # Can shrink expandable columns enough
+                    for col in expandable_cols:
+                        if expandable_excess[col] > 0:
+                            reduction = int(overflow * expandable_excess[col] / total_excess)
+                            base_widths[col] -= reduction
+                else:
+                    # Need to shrink all columns proportionally
+                    scale = available_width / total_base
+                    for col in range(table.columnCount()):
+                        header_w = header_widths.get(col, 30)
+                        new_w = max(header_w, int(base_widths[col] * scale))
+                        base_widths[col] = new_w
+
+                # Apply widths
+                for col in range(table.columnCount()):
+                    table.setColumnWidth(col, base_widths[col])
+
+    def _apply_row_styling(self, row: int, is_sub_row: bool = False):
+        """Apply visual styling to a table row based on whether it's a parent or sub-row."""
+        from PyQt6.QtGui import QColor, QBrush, QFont
+        from PyQt6.QtCore import Qt
+
+        table = self.discoveredFilesTable
+        if row >= table.rowCount():
+            return
+
+        if is_sub_row:
+            # Sub-rows: lighter background, normal weight text
+            bg_color = QColor(50, 55, 60)  # Slightly lighter than parent
+            text_color = QColor(200, 200, 200)  # Slightly muted text
+            font_bold = False
+        else:
+            # Parent rows: darker background, BOLD text
+            bg_color = QColor(35, 40, 45)  # Default dark theme background
+            text_color = QColor(255, 255, 255)  # White text
+            font_bold = True
+
+        # Apply to all cells in the row
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            if item:
+                item.setBackground(QBrush(bg_color))
+                item.setForeground(QBrush(text_color))
+                # Set font weight
+                font = item.font()
+                font.setBold(font_bold)
+                item.setFont(font)
+
+    def _apply_all_row_styling(self):
+        """Apply styling to all rows based on whether they are parent or sub-rows."""
+        table = self.discoveredFilesTable
+        for row in range(table.rowCount()):
+            if row < len(self._master_file_list):
+                is_sub = self._master_file_list[row].get('is_sub_row', False)
+                self._apply_row_styling(row, is_sub_row=is_sub)
+
+        # Also clean parent rows that have sub-rows
+        self._clean_parent_rows_with_subrows()
+
+    def _clean_parent_rows_with_subrows(self):
+        """Clear channel-specific columns from parent rows that have sub-rows."""
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        table = self.discoveredFilesTable
+
+        # Find parent rows that have sub-rows
+        parent_to_subrows = {}  # parent_file_path -> [sub_row_indices]
+
+        for row, task in enumerate(self._master_file_list):
+            if task.get('is_sub_row'):
+                parent_path = str(task.get('file_path', ''))
+                if parent_path not in parent_to_subrows:
+                    parent_to_subrows[parent_path] = []
+                parent_to_subrows[parent_path].append(row)
+
+        # Find parent row for each file that has sub-rows
+        for row, task in enumerate(self._master_file_list):
+            if task.get('is_sub_row'):
+                continue
+
+            file_path = str(task.get('file_path', ''))
+            if file_path in parent_to_subrows:
+                sub_rows = parent_to_subrows[file_path]
+                num_analyzed = len(sub_rows)
+
+                # Clear channel-specific columns from parent row
+                # Columns: 5-Channel, 6-Stim Ch, 7-Events Ch, 12-Animal ID
+                # Note: Column 4 (Keywords) is parent-level info, don't clear
+                if row < table.rowCount():
+                    table.setItem(row, 5, QTableWidgetItem(''))   # Channel
+                    table.setItem(row, 6, QTableWidgetItem(''))   # Stim Ch
+                    table.setItem(row, 7, QTableWidgetItem(''))   # Events Ch
+                    table.setItem(row, 12, QTableWidgetItem(''))  # Animal ID
+
+                    # Show aggregate status in Status column (13)
+                    # Count completed sub-rows
+                    completed = sum(1 for sr in sub_rows
+                                    if self._master_file_list[sr].get('status') == 'completed')
+                    status_text = f"{completed} ✓" if completed > 0 else ''
+                    table.setItem(row, 13, QTableWidgetItem(status_text))
+
+                    # Clear Exports column (15) for parent - exports are per-channel
+                    table.setItem(row, 15, QTableWidgetItem(''))
+
+                # Also clear these fields in the task dict
+                task['channel'] = ''
+                task['stim_channel'] = ''
+                task['events_channel'] = ''
+                task['animal_id'] = ''
+                task['status'] = ''  # Parent doesn't have a single status
+                task['exports'] = {}
+
+    def _add_row_action_button(self, row):
+        """Add Analyze and '+' buttons to the actions column."""
+        from PyQt6.QtWidgets import QPushButton, QWidget, QHBoxLayout
+
+        # Create container widget
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+
+        # Add 'Analyze' button (opens file in Analysis tab)
+        analyze_btn = QPushButton("▶")
+        analyze_btn.setMaximumWidth(22)
+        analyze_btn.setMaximumHeight(22)
+        analyze_btn.setToolTip("Open this file in the Analysis tab")
+        analyze_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        analyze_btn.clicked.connect(lambda checked, r=row: self._on_analyze_row(r))
+        layout.addWidget(analyze_btn)
+
+        # Add '+' button (add another row for different channel/animal)
+        add_btn = QPushButton("+")
+        add_btn.setMaximumWidth(22)
+        add_btn.setMaximumHeight(22)
+        add_btn.setToolTip("Add another row for this file (different channel/animal)")
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        add_btn.clicked.connect(lambda checked, r=row: self._on_add_row_for_file(r))
+        layout.addWidget(add_btn)
+
+        self.discoveredFilesTable.setCellWidget(row, 15, container)
+
+    def _on_analyze_row(self, row):
+        """Open the file from the specified row in the Analysis tab."""
+        if row >= len(self._master_file_list):
+            return
+
+        task = self._master_file_list[row]
+        file_path = task.get('file_path')
+
+        if not file_path or not Path(file_path).exists():
+            self._show_warning("File Not Found", f"Cannot find file:\n{file_path}")
+            return
+
+        print(f"[master-list] Analyzing file from row {row}: {file_path}")
+
+        # Track which row is being analyzed
+        self._active_master_list_row = row
+
+        # Store pending channel selections if specified
+        self._pending_analysis_channel = task.get('channel', '')
+        self._pending_stim_channels = task.get('stim_channels', [])
+
+        # Load the file
+        self.load_file(Path(file_path))
+
+        # Switch to Analysis tab
+        if hasattr(self, 'mainTabWidget'):
+            self.mainTabWidget.setCurrentIndex(0)
+
+        # Update status to "in progress"
+        task['status'] = 'in_progress'
+        table = self.discoveredFilesTable
+        if row < table.rowCount():
+            status_item = table.item(row, 14)
+            if status_item:
+                status_item.setText('◐')  # Half-filled circle for in-progress
+            else:
+                from PyQt6.QtWidgets import QTableWidgetItem
+                table.setItem(row, 14, QTableWidgetItem('◐'))
+
+    def _on_add_row_for_file(self, source_row, force_override=False):
+        """Add a new row for the same file (for multi-channel/multi-animal analysis)."""
+        if source_row >= len(self._master_file_list):
+            return
+
+        source_task = self._master_file_list[source_row]
+        table = self.discoveredFilesTable
+        file_path = source_task.get('file_path')
+
+        # Find the parent task (may be source_task or a different row)
+        parent_task = source_task
+        if source_task.get('is_sub_row'):
+            # Find the actual parent row
+            for task in self._master_file_list:
+                if not task.get('is_sub_row') and str(task.get('file_path')) == str(file_path):
+                    parent_task = task
+                    break
+
+        # Count existing SUB-ROWS for this file (parent row doesn't count as an analysis)
+        existing_subrows = []
+        for i, task in enumerate(self._master_file_list):
+            if task.get('is_sub_row') and str(task.get('file_path')) == str(file_path):
+                existing_subrows.append(i)
+
+        # Calculate available analysis channels from PARENT task (has file metadata)
+        total_channels = parent_task.get('channel_count', 0)
+
+        # Get stim channels from file metadata
+        stim_channels_from_metadata = parent_task.get('stim_channels', [])
+        if not isinstance(stim_channels_from_metadata, list):
+            stim_channels_from_metadata = [stim_channels_from_metadata] if stim_channels_from_metadata else []
+
+        # Also check existing sub-rows for stim/events channels they use
+        stim_events_from_subrows = set()
+        for i in existing_subrows:
+            task = self._master_file_list[i]
+            stim_ch = task.get('stim_channel', '')
+            events_ch = task.get('events_channel', '')
+            if stim_ch:
+                stim_events_from_subrows.add(stim_ch)
+            if events_ch:
+                stim_events_from_subrows.add(events_ch)
+
+        # Combine all non-analysis channels
+        all_stim_channels = set(stim_channels_from_metadata) | stim_events_from_subrows
+        num_stim_channels = len(all_stim_channels)
+        available_analysis_channels = total_channels - num_stim_channels
+
+        # Check if we can add more rows (compare sub-row count to available channels)
+        if len(existing_subrows) >= available_analysis_channels and not force_override:
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Channel Limit Reached")
+            msg.setText(
+                f"This file has {total_channels} channels.\n"
+                f"Detected {num_stim_channels} stim/events channel(s): {', '.join(sorted(all_stim_channels)) if all_stim_channels else 'none'}\n"
+                f"Maximum {available_analysis_channels} analysis rows allowed.\n"
+                f"Already have {len(existing_subrows)} analyzed channel(s)."
+            )
+            msg.setInformativeText("Do you want to add a row anyway?")
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.setDefaultButton(QMessageBox.StandardButton.No)
+            if msg.exec() != QMessageBox.StandardButton.Yes:
+                return
+            # User clicked Yes - force override
+            force_override = True
+
+        # Find the next available channel (use parent_task for channel metadata)
+        channel_names = parent_task.get('channel_names', [])
+        if not channel_names:
+            # Generate default channel names
+            channel_names = [f"AD{i}" for i in range(total_channels)]
+
+        # Filter out stim/events channels to get analysis channels
+        analysis_channels = [ch for ch in channel_names if ch not in all_stim_channels]
+
+        # Find which channels are already used (from sub-rows only)
+        used_channels = set()
+        for i in existing_subrows:
+            ch = self._master_file_list[i].get('channel', '')
+            if ch:
+                used_channels.add(ch)
+
+        # Get next available channel
+        next_channel = ''
+        for ch in analysis_channels:
+            if ch not in used_channels:
+                next_channel = ch
+                break
+
+        # If no analysis channels available but user forced override, pick any unused channel
+        if not next_channel and force_override:
+            for ch in channel_names:
+                if ch not in used_channels:
+                    next_channel = ch
+                    break
+
+        # Create a new task based on parent task (for file metadata) and source task (for user metadata)
+        new_task = {
+            'file_path': file_path,
+            'file_name': parent_task.get('file_name', ''),
+            'protocol': parent_task.get('protocol', ''),
+            'channel_count': total_channels,
+            'sweep_count': parent_task.get('sweep_count', 0),
+            'channel_names': channel_names,
+            'stim_channels': stim_channels,
+            'path_keywords': parent_task.get('path_keywords', {}),
+            'keywords_display': parent_task.get('keywords_display', ''),
+            # Auto-populated channel
+            'channel': next_channel,
+            'stim_channel': '',  # User can set this
+            'events_channel': '',  # Filled on save
+            # Copy metadata from source (may have user edits)
+            'strain': source_task.get('strain', ''),
+            'stim_type': source_task.get('stim_type', ''),
+            'power': source_task.get('power', ''),
+            'sex': source_task.get('sex', ''),
+            'animal_id': '',  # Different animal - leave blank
+            'status': 'pending',
+            'is_sub_row': True,
+            'parent_file': file_path,
+            # Export tracking (filled on save)
+            'export_path': '',
+            'export_date': '',
+            'export_version': '',
+            'exports': {
+                'npz': False,
+                'timeseries_csv': False,
+                'breaths_csv': False,
+                'events_csv': False,
+                'pdf': False,
+                'session_state': False,
+                'ml_training': False,
+            }
+        }
+
+        # Insert after the source row
+        insert_row = source_row + 1
+        self._master_file_list.insert(insert_row, new_task)
+
+        # Block signals while inserting
+        table.blockSignals(True)
+
+        # Insert table row with sub-row format (channel in col 0, not filename)
+        table.insertRow(insert_row)
+        table.setItem(insert_row, 0, QTableWidgetItem(f"  ↳ {next_channel}"))  # Show channel, not filename
+        table.setItem(insert_row, 1, QTableWidgetItem(''))  # Leave protocol empty on sub-rows
+        table.setItem(insert_row, 2, QTableWidgetItem(''))  # Leave channel count empty on sub-rows
+        table.setItem(insert_row, 3, QTableWidgetItem(''))  # Leave sweep count empty on sub-rows
+        table.setItem(insert_row, 4, QTableWidgetItem(''))  # Leave keywords empty on sub-rows
+        table.setItem(insert_row, 5, QTableWidgetItem(next_channel))  # Auto-populated channel
+        table.setItem(insert_row, 6, QTableWidgetItem(''))  # Stim Ch - filled on save
+        table.setItem(insert_row, 7, QTableWidgetItem(''))  # Events Ch - filled on save
+        table.setItem(insert_row, 8, QTableWidgetItem(new_task['strain']))
+        table.setItem(insert_row, 9, QTableWidgetItem(new_task['stim_type']))
+        table.setItem(insert_row, 10, QTableWidgetItem(new_task['power']))
+        table.setItem(insert_row, 11, QTableWidgetItem(new_task['sex']))
+        table.setItem(insert_row, 12, QTableWidgetItem(''))  # Animal ID - different
+        table.setItem(insert_row, 13, QTableWidgetItem('○'))  # Status
+
+        # Add action buttons (with remove option for sub-rows)
+        self._add_sub_row_action_buttons(insert_row)
+        # Column 15: Exports (empty initially)
+        table.setItem(insert_row, 15, self._create_exports_table_item(new_task))
+
+        table.blockSignals(False)
+
+        remaining = available_analysis_channels - len(existing_rows) - 1
+        print(f"[master-list] Added sub-row at {insert_row} with channel {next_channel} ({remaining} more available)")
+
+    def _add_sub_row_action_buttons(self, row):
+        """Add action buttons for sub-rows (Analyze, + and - buttons)."""
+        from PyQt6.QtWidgets import QPushButton, QWidget, QHBoxLayout
+
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
+
+        # Add 'Analyze' button
+        analyze_btn = QPushButton("▶")
+        analyze_btn.setMaximumWidth(20)
+        analyze_btn.setMaximumHeight(20)
+        analyze_btn.setToolTip("Open this file in the Analysis tab")
+        analyze_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                font-size: 10px;
+            }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        analyze_btn.clicked.connect(lambda checked, r=row: self._on_analyze_row(r))
+        layout.addWidget(analyze_btn)
+
+        # Add '-' button (remove sub-row)
+        remove_btn = QPushButton("-")
+        remove_btn.setMaximumWidth(20)
+        remove_btn.setMaximumHeight(20)
+        remove_btn.setToolTip("Remove this row")
+        remove_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #c82333; }
+        """)
+        remove_btn.clicked.connect(lambda checked, r=row: self._on_remove_sub_row(r))
+        layout.addWidget(remove_btn)
+
+        self.discoveredFilesTable.setCellWidget(row, 15, container)
+
+    def _on_remove_sub_row(self, row):
+        """Remove a sub-row from the master list."""
+        if row >= len(self._master_file_list):
+            return
+
+        task = self._master_file_list[row]
+
+        # Only allow removing sub-rows, not primary rows
+        if not task.get('is_sub_row', False):
+            self._show_warning("Cannot Remove",
+                "Cannot remove the primary row for a file.\n"
+                "Use 'Omit' to hide files you don't want to analyze.")
+            return
+
+        # Confirm deletion if this row has been analyzed
+        if task.get('status') == 'completed':
+            from PyQt6.QtWidgets import QMessageBox
+
+            # Get export info for confirmation message
+            export_summary = self._format_exports_summary(task)
+            export_path = task.get('export_path', '')
+            channel = task.get('channel', 'unknown channel')
+
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Delete Analyzed Row?")
+            msg.setText(f"This row ({channel}) has been analyzed.")
+
+            details = []
+            if export_summary:
+                details.append(f"Exports: {export_summary}")
+            if export_path:
+                details.append(f"Saved to: {export_path}")
+            if details:
+                msg.setInformativeText("\n".join(details) + "\n\nNote: The exported files will NOT be deleted.")
+
+            msg.setDetailedText(
+                "This will remove the row from the Project Builder list only.\n\n"
+                "The exported data files on disk remain unchanged. "
+                "You can add a new row and re-analyze if needed."
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+
+            if msg.exec() != QMessageBox.StandardButton.Yes:
+                return  # User cancelled
+
+        # Remove from data and table
+        table = self.discoveredFilesTable
+        table.blockSignals(True)
+
+        del self._master_file_list[row]
+        table.removeRow(row)
+
+        table.blockSignals(False)
+
+        print(f"[master-list] Removed sub-row at {row}")
+
+    def _on_master_list_context_menu(self, position):
+        """Show context menu for bulk editing selected rows."""
+        from PyQt6.QtWidgets import QMenu, QInputDialog
+        from PyQt6.QtGui import QAction
+
+        table = self.discoveredFilesTable
+        selected_rows = set(index.row() for index in table.selectedIndexes())
+
+        if not selected_rows:
+            return
+
+        menu = QMenu(self)
+
+        # Bulk edit options
+        edit_menu = menu.addMenu(f"Set for {len(selected_rows)} selected rows")
+
+        # Experiment (column 5) - with history suggestions
+        experiment_menu = edit_menu.addMenu("Set Experiment")
+        exp_history = self._get_experiment_history()
+        if exp_history:
+            for exp_name in exp_history[:10]:  # Show top 10
+                exp_action = QAction(exp_name, self)
+                exp_action.triggered.connect(lambda checked, e=exp_name: self._bulk_set_column(selected_rows, 5, 'experiment', "Set Experiment", e))
+                experiment_menu.addAction(exp_action)
+            experiment_menu.addSeparator()
+        custom_exp_action = QAction("Custom...", self)
+        custom_exp_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 5, 'experiment', "Set Experiment"))
+        experiment_menu.addAction(custom_exp_action)
+
+        # Strain (column 9)
+        strain_action = QAction("Set Strain...", self)
+        strain_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 9, 'strain', "Set Strain"))
+        edit_menu.addAction(strain_action)
+
+        # Stim Type (column 10)
+        stim_action = QAction("Set Stim Type...", self)
+        stim_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 10, 'stim_type', "Set Stim Type"))
+        edit_menu.addAction(stim_action)
+
+        # Power (column 11)
+        power_action = QAction("Set Power...", self)
+        power_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 11, 'power', "Set Power"))
+        edit_menu.addAction(power_action)
+
+        # Sex (column 12)
+        sex_action = QAction("Set Sex...", self)
+        sex_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 12, 'sex', "Set Sex"))
+        edit_menu.addAction(sex_action)
+
+        # Animal ID (column 13)
+        animal_action = QAction("Set Animal ID...", self)
+        animal_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 13, 'animal_id', "Set Animal ID"))
+        edit_menu.addAction(animal_action)
+
+        # Channel (column 6)
+        channel_action = QAction("Set Channel...", self)
+        channel_action.triggered.connect(lambda: self._bulk_set_column(selected_rows, 6, 'channel', "Set Channel"))
+        edit_menu.addAction(channel_action)
+
+        menu.addSeparator()
+
+        # Combine files option (if multiple files selected)
+        if len(selected_rows) > 1:
+            combine_action = QAction(f"Combine {len(selected_rows)} files for analysis...", self)
+            combine_action.triggered.connect(lambda: self._combine_selected_files(selected_rows))
+            menu.addAction(combine_action)
+
+        # Check if any selected rows have scan warnings (conflicts or multiple NPZ files)
+        rows_with_warnings = []
+        rows_with_conflicts = []
+        for row in selected_rows:
+            if row < len(self._master_file_list):
+                task = self._master_file_list[row]
+                warnings = task.get('scan_warnings', {})
+                if warnings:
+                    rows_with_warnings.append(row)
+                    if warnings.get('conflicts'):
+                        rows_with_conflicts.append(row)
+
+        if rows_with_warnings:
+            menu.addSeparator()
+            conflict_menu = menu.addMenu(f"⚠ Resolve Warnings ({len(rows_with_warnings)} rows)")
+
+            if rows_with_conflicts:
+                # Use NPZ values - overwrite table with NPZ data
+                use_npz_action = QAction("Use NPZ values (overwrite table)", self)
+                use_npz_action.triggered.connect(lambda: self._resolve_conflicts_use_npz(rows_with_conflicts))
+                conflict_menu.addAction(use_npz_action)
+
+                # Keep table values - dismiss the warning
+                keep_table_action = QAction("Keep table values (dismiss warning)", self)
+                keep_table_action.triggered.connect(lambda: self._resolve_conflicts_keep_table(rows_with_warnings))
+                conflict_menu.addAction(keep_table_action)
+
+                conflict_menu.addSeparator()
+
+            # View details
+            view_details_action = QAction("View warning details...", self)
+            view_details_action.triggered.connect(lambda: self._show_conflict_details(rows_with_warnings))
+            conflict_menu.addAction(view_details_action)
+
+            # Clear all warnings
+            clear_action = QAction("Clear all warnings", self)
+            clear_action.triggered.connect(lambda: self._clear_scan_warnings(rows_with_warnings))
+            conflict_menu.addAction(clear_action)
+
+        menu.exec(table.viewport().mapToGlobal(position))
+
+    def _bulk_set_column(self, rows, column, field_name, dialog_title, preset_value=None):
+        """Set a column value for multiple rows at once.
+
+        Args:
+            rows: Set of row indices to update
+            column: Column index in the table
+            field_name: Field name in the task dict
+            dialog_title: Title for the input dialog
+            preset_value: If provided, use this value without showing dialog
+        """
+        from PyQt6.QtWidgets import QInputDialog, QTableWidgetItem
+
+        if preset_value is not None:
+            value = preset_value
+            ok = True
+        else:
+            # Get existing values to suggest
+            existing_values = set()
+            for row in rows:
+                if row < len(self._master_file_list):
+                    val = self._master_file_list[row].get(field_name, '')
+                    if val:
+                        existing_values.add(val)
+
+            # Default to first existing value or empty
+            default_value = list(existing_values)[0] if existing_values else ''
+
+            value, ok = QInputDialog.getText(
+                self, dialog_title,
+                f"Enter value for {len(rows)} rows:",
+                text=default_value
+            )
+
+        if ok:
+            table = self.discoveredFilesTable
+            table.blockSignals(True)
+
+            for row in rows:
+                if row < len(self._master_file_list):
+                    self._master_file_list[row][field_name] = value
+                if row < table.rowCount():
+                    item = table.item(row, column)
+                    if item:
+                        item.setText(value)
+                    else:
+                        table.setItem(row, column, QTableWidgetItem(value))
+
+            table.blockSignals(False)
+
+            # Update experiment history if this is the experiment field
+            if field_name == 'experiment' and value:
+                self._update_experiment_history(value)
+
+            print(f"[master-list] Bulk set {field_name} = '{value}' for {len(rows)} rows")
+
+    def _resolve_conflicts_use_npz(self, rows):
+        """Resolve conflicts by overwriting table values with NPZ values."""
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        table = self.discoveredFilesTable
+        table.blockSignals(True)
+
+        resolved_count = 0
+        for row in rows:
+            if row >= len(self._master_file_list):
+                continue
+
+            task = self._master_file_list[row]
+            warnings = task.get('scan_warnings', {})
+            conflicts = warnings.get('conflicts', [])
+
+            if not conflicts:
+                continue
+
+            # Parse conflicts and apply NPZ values
+            # Conflicts are in format: "Field: table='X' vs NPZ='Y'"
+            for conflict in conflicts:
+                try:
+                    # Extract field name and NPZ value
+                    field_part = conflict.split(':')[0].strip()
+                    npz_part = conflict.split("NPZ='")[1].split("'")[0]
+
+                    # Map display name to field and column
+                    field_map = {
+                        'Strain': ('strain', 8),
+                        'Stim Type': ('stim_type', 9),
+                        'Power': ('power', 10),
+                        'Sex': ('sex', 11),
+                        'Animal ID': ('animal_id', 12),
+                    }
+
+                    if field_part in field_map:
+                        field_name, column = field_map[field_part]
+                        task[field_name] = npz_part
+                        if row < table.rowCount():
+                            table.setItem(row, column, QTableWidgetItem(npz_part))
+                        print(f"[conflict-resolve] Row {row}: Set {field_name} = '{npz_part}' from NPZ")
+                except Exception as e:
+                    print(f"[conflict-resolve] Error parsing conflict '{conflict}': {e}")
+
+            # Clear the warnings after resolving
+            task.pop('scan_warnings', None)
+            resolved_count += 1
+
+            # Update status icon
+            self._update_row_status_icon(row, task)
+
+        table.blockSignals(False)
+        self._log_status_message(f"✓ Resolved conflicts for {resolved_count} rows (used NPZ values)", 3000)
+        self._update_resolve_conflicts_button()
+
+    def _resolve_conflicts_keep_table(self, rows):
+        """Resolve conflicts by keeping table values and dismissing warnings."""
+        resolved_count = 0
+        for row in rows:
+            if row >= len(self._master_file_list):
+                continue
+
+            task = self._master_file_list[row]
+            if task.get('scan_warnings'):
+                task.pop('scan_warnings', None)
+                resolved_count += 1
+                self._update_row_status_icon(row, task)
+
+        self._log_status_message(f"✓ Dismissed warnings for {resolved_count} rows (kept table values)", 3000)
+        self._update_resolve_conflicts_button()
+
+    def _clear_scan_warnings(self, rows):
+        """Clear all scan warnings for selected rows."""
+        cleared_count = 0
+        for row in rows:
+            if row >= len(self._master_file_list):
+                continue
+
+            task = self._master_file_list[row]
+            if task.get('scan_warnings'):
+                task.pop('scan_warnings', None)
+                cleared_count += 1
+                self._update_row_status_icon(row, task)
+
+        self._log_status_message(f"✓ Cleared warnings for {cleared_count} rows", 3000)
+        self._update_resolve_conflicts_button()
+
+    def _show_conflict_details(self, rows):
+        """Show a dialog with detailed conflict information."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Scan Warning Details")
+        dialog.setMinimumSize(600, 400)
+
+        layout = QVBoxLayout(dialog)
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+
+        # Build details text
+        details = []
+        for row in rows:
+            if row >= len(self._master_file_list):
+                continue
+
+            task = self._master_file_list[row]
+            warnings = task.get('scan_warnings', {})
+            if not warnings:
+                continue
+
+            file_name = task.get('file_name', 'Unknown')
+            channel = task.get('channel', '')
+            details.append(f"═══ Row {row}: {file_name} ({channel}) ═══")
+
+            conflicts = warnings.get('conflicts', [])
+            if conflicts:
+                details.append("⚠ Data Conflicts:")
+                for c in conflicts:
+                    details.append(f"   • {c}")
+
+            older_files = warnings.get('older_npz_files', [])
+            if older_files:
+                details.append(f"📁 {len(older_files)} Older NPZ File(s):")
+                for older in older_files:
+                    details.append(f"   • {Path(older['file']).name}")
+                    details.append(f"     Date: {older['date']}")
+                    details.append(f"     Path: {older['file']}")
+
+            details.append("")
+
+        text_edit.setText('\n'.join(details) if details else "No warning details found.")
+        layout.addWidget(text_edit)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+
+        btn_use_npz = QPushButton("Use NPZ Values")
+        btn_use_npz.clicked.connect(lambda: (self._resolve_conflicts_use_npz(rows), dialog.accept()))
+        btn_layout.addWidget(btn_use_npz)
+
+        btn_keep_table = QPushButton("Keep Table Values")
+        btn_keep_table.clicked.connect(lambda: (self._resolve_conflicts_keep_table(rows), dialog.accept()))
+        btn_layout.addWidget(btn_keep_table)
+
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(dialog.reject)
+        btn_layout.addWidget(btn_close)
+
+        layout.addLayout(btn_layout)
+        dialog.exec()
+
+    def _update_row_status_icon(self, row, task):
+        """Update the status icon for a row based on its current state."""
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        table = self.discoveredFilesTable
+        if row >= table.rowCount():
+            return
+
+        is_sub_row = task.get('is_sub_row', False)
+        status = task.get('status', 'pending')
+        warnings = task.get('scan_warnings', {})
+        has_conflicts = bool(warnings.get('conflicts'))
+        has_older_files = warnings.get('older_npz_count', 0) > 0
+
+        if is_sub_row:
+            if status == 'completed':
+                if has_conflicts:
+                    status_icon = '●⚠'
+                elif has_older_files:
+                    status_icon = '●📁'
+                else:
+                    status_icon = '●'
+            elif status == 'in_progress':
+                status_icon = '◐'
+            else:
+                status_icon = '○'
+
+            status_item = QTableWidgetItem(status_icon)
+
+            # Add tooltip for warnings
+            if has_conflicts or has_older_files:
+                tooltip_parts = []
+                if has_conflicts:
+                    tooltip_parts.append("⚠ Data conflicts (table vs NPZ):")
+                    for c in warnings['conflicts']:
+                        tooltip_parts.append(f"  • {c}")
+                if has_older_files:
+                    count = warnings['older_npz_count']
+                    tooltip_parts.append(f"📁 {count} older NPZ file(s) found")
+                status_item.setToolTip('\n'.join(tooltip_parts))
+
+            table.setItem(row, 13, status_item)
+
+    def _combine_selected_files(self, rows):
+        """Combine selected files for multi-file analysis."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Get file paths for selected rows
+        file_paths = []
+        for row in sorted(rows):
+            if row < len(self._master_file_list):
+                task = self._master_file_list[row]
+                file_path = task.get('file_path')
+                if file_path and Path(file_path).exists():
+                    file_paths.append(Path(file_path))
+
+        if len(file_paths) < 2:
+            self._show_warning("Cannot Combine", "Need at least 2 valid files to combine.")
+            return
+
+        # Confirm with user
+        file_names = [p.name for p in file_paths]
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setWindowTitle("Combine Files")
+        msg.setText(f"Combine {len(file_paths)} files for analysis?")
+        msg.setInformativeText("Files will be concatenated in order:\n• " + "\n• ".join(file_names[:5]))
+        if len(file_names) > 5:
+            msg.setInformativeText(msg.informativeText() + f"\n... and {len(file_names) - 5} more")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            # Load files using multi-file loader
+            print(f"[master-list] Combining {len(file_paths)} files for analysis")
+            self.load_multiple_files(file_paths)
+            # Switch to Analysis tab
+            if hasattr(self, 'mainTabWidget'):
+                self.mainTabWidget.setCurrentIndex(0)
+
     def on_project_browse_directory(self):
         """Browse for directory containing recordings."""
         from PyQt6.QtWidgets import QFileDialog
@@ -4882,7 +7400,7 @@ class MainWindow(QMainWindow):
             print(f"[project-builder] Selected directory: {directory}")
 
     def on_project_scan_files(self):
-        """Scan directory with progressive loading - files appear immediately, metadata loads in background."""
+        """Scan directory for new files - additive mode, preserves existing data."""
         if not self._project_directory:
             self._show_warning("No Directory", "Please select a directory first using 'Browse Directory'.")
             return
@@ -4924,15 +7442,35 @@ class MainWindow(QMainWindow):
 
             progress.close()
 
-            # PHASE 2: Show files immediately with placeholders
-            self._discovered_files_data = []
-            table = self.discoveredFilesTable
-            table.setRowCount(0)
+            # PHASE 2: Build set of existing file paths to avoid duplicates
+            # Use string paths for comparison (normalized)
+            existing_paths = set()
+            for task in self._master_file_list:
+                fp = task.get('file_path')
+                if fp:
+                    # Normalize path for comparison
+                    existing_paths.add(str(Path(fp).resolve()))
 
-            # Extract path keywords for each file
+            # Find new files only
+            new_abf_files = []
+            for abf_path in abf_files:
+                normalized = str(abf_path.resolve())
+                if normalized not in existing_paths:
+                    new_abf_files.append(abf_path)
+
+            if not new_abf_files:
+                self._log_status_message(f"No new files found ({len(abf_files)} files already in list)", 3000)
+                self.scanFilesButton.setEnabled(True)
+                return
+
+            # Extract path keywords for each new file
             from core.fast_abf_reader import extract_path_keywords
 
-            for i, abf_path in enumerate(abf_files):
+            table = self.discoveredFilesTable
+            start_row = table.rowCount()  # Insert after existing rows
+            new_files_data = []
+
+            for i, abf_path in enumerate(new_abf_files):
                 file_size_mb = abf_path.stat().st_size / (1024 * 1024)
 
                 # Extract keywords from path
@@ -4947,32 +7485,82 @@ class MainWindow(QMainWindow):
                 if path_info['keywords']:
                     keywords_display.extend(path_info['keywords'])
 
+                # Auto-fill power and animal ID from path keywords
+                power_auto = path_info['power_levels'][0] if path_info['power_levels'] else ''
+                animal_id_auto = path_info['animal_ids'][0] if path_info['animal_ids'] else ''
+
                 file_info = {
                     'file_path': abf_path,
                     'file_name': abf_path.name,
                     'protocol': '...',
-                    'file_size_mb': file_size_mb,
+                    'channel_count': 0,
+                    'sweep_count': 0,
+                    'stim_channels': [],  # Detected stimulus channels (e.g., ['AD1', 'AD2'])
+                    'stim_frequency': '',  # Detected stim frequency (e.g., '30Hz')
                     'path_keywords': path_info,
                     'keywords_display': ', '.join(keywords_display) if keywords_display else '',
+                    # Metadata fields (filled on save)
+                    'channel': '',  # Analyzed channel - filled on save
+                    'stim_channel': '',  # Stim channel used - filled on save
+                    'events_channel': '',  # Events channel used - filled on save
+                    'strain': '',
+                    'stim_type': '',  # Auto-filled from stim_frequency
+                    'power': power_auto,
+                    'sex': '',
+                    'animal_id': animal_id_auto,
+                    'status': 'pending',
+                    # Export tracking (filled on save)
+                    'export_path': '',
+                    'export_date': '',
+                    'export_version': '',
+                    'exports': {
+                        'npz': False,
+                        'timeseries_csv': False,
+                        'breaths_csv': False,
+                        'events_csv': False,
+                        'pdf': False,
+                        'session_state': False,
+                        'ml_training': False,
+                    }
                 }
-                self._discovered_files_data.append(file_info)
+                new_files_data.append(file_info)
+                self._master_file_list.append(file_info)
 
-                table.insertRow(i)
-                table.setItem(i, 0, QTableWidgetItem(file_info['file_name']))
-                table.setItem(i, 1, QTableWidgetItem('Loading...'))  # Protocol
-                table.setItem(i, 2, QTableWidgetItem(''))  # Channels (will be filled by metadata loading)
-                table.setItem(i, 3, QTableWidgetItem(file_info['keywords_display']))  # Path keywords
-                table.setItem(i, 4, QTableWidgetItem(''))  # Labels (for manual tagging later)
-                table.setItem(i, 5, QTableWidgetItem(f"{file_size_mb:.2f}"))
+                # Insert new table row
+                row_idx = start_row + i
+                table.insertRow(row_idx)
+                table.setItem(row_idx, 0, QTableWidgetItem(file_info['file_name']))  # File Name
+                table.setItem(row_idx, 1, QTableWidgetItem('Loading...'))  # Protocol
+                table.setItem(row_idx, 2, QTableWidgetItem(''))  # Avail Ch (loaded later)
+                table.setItem(row_idx, 3, QTableWidgetItem(''))  # Sweeps (loaded later)
+                table.setItem(row_idx, 4, QTableWidgetItem(file_info['keywords_display']))  # Keywords
+                table.setItem(row_idx, 5, QTableWidgetItem(''))  # Channel (filled on save)
+                table.setItem(row_idx, 6, QTableWidgetItem(''))  # Stim Ch (filled on save)
+                table.setItem(row_idx, 7, QTableWidgetItem(''))  # Events Ch (filled on save)
+                table.setItem(row_idx, 8, QTableWidgetItem(''))  # Strain
+                table.setItem(row_idx, 9, QTableWidgetItem(''))  # Stim Type (auto-detected or manual)
+                table.setItem(row_idx, 10, QTableWidgetItem(power_auto))  # Power (auto-filled)
+                table.setItem(row_idx, 11, QTableWidgetItem(''))  # Sex
+                table.setItem(row_idx, 12, QTableWidgetItem(animal_id_auto))  # Animal ID (auto-filled)
+                table.setItem(row_idx, 13, QTableWidgetItem('○'))  # Status (pending)
+                # Column 14: Actions buttons
+                self._add_row_action_button(row_idx)
+                # Column 15: Exports (empty initially)
+                table.setItem(row_idx, 15, self._create_exports_table_item(file_info))
 
             table.resizeColumnsToContents()
 
-            summary_text = f"Summary: {len(abf_files)} ABF files | {len(excel_files)} Excel files | Loading protocols..."
+            # Update summary - show total files in list
+            total_files = len(self._master_file_list)
+            summary_text = f"Summary: {total_files} ABF files total | Added {len(new_abf_files)} new files | Loading protocols..."
             self.summaryLabel.setText(summary_text)
-            self._log_status_message(f"Found {len(abf_files)} files, loading metadata in background...", 3000)
+            self._log_status_message(f"Added {len(new_abf_files)} new files, loading metadata...", 3000)
 
-            # PHASE 3: Load metadata in background thread
-            self._start_background_metadata_loading(abf_files)
+            # Store reference to new files data for background metadata update
+            self._discovered_files_data = new_files_data
+
+            # PHASE 3: Load metadata in background thread (only for new files)
+            self._start_background_metadata_loading(new_abf_files, start_row_offset=start_row)
 
         except Exception as e:
             if progress:
@@ -4983,9 +7571,17 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
-    def _start_background_metadata_loading(self, abf_files):
-        """Start background thread to load metadata using parallel processing."""
+    def _start_background_metadata_loading(self, abf_files, start_row_offset=0):
+        """Start background thread to load metadata using parallel processing.
+
+        Args:
+            abf_files: List of ABF file paths to load
+            start_row_offset: Row offset for updating table (for additive scans)
+        """
         from PyQt6.QtCore import QThread, pyqtSignal
+
+        # Store the row offset for use in the update callback
+        self._metadata_row_offset = start_row_offset
 
         class MetadataThread(QThread):
             # Batch updates: send list of results instead of individual items
@@ -5037,24 +7633,60 @@ class MainWindow(QMainWindow):
         self._metadata_thread.batch_progress.connect(self._update_file_metadata_batch)
         self._metadata_thread.finished.connect(self._metadata_finished)
         self._metadata_thread.start()
-        print(f"[project-builder] Started background loading for {len(abf_files)} files with batched updates")
+        print(f"[project-builder] Started background loading for {len(abf_files)} files (offset={start_row_offset})")
 
     def _update_file_metadata_batch(self, batch, total):
         """Update table cells with a batch of loaded metadata (called from main thread via signal)."""
         table = self.discoveredFilesTable
 
+        # Get the row offset (for additive scans)
+        row_offset = getattr(self, '_metadata_row_offset', 0)
+
         # Process all items in the batch
         for index, metadata in batch:
             if metadata:
-                # Update internal data structure
+                # Update internal data structures
                 if index < len(self._discovered_files_data):
                     self._discovered_files_data[index]['protocol'] = metadata['protocol']
                     self._discovered_files_data[index]['channel_count'] = metadata.get('channel_count', 0)
+                    self._discovered_files_data[index]['sweep_count'] = metadata.get('sweep_count', 0)
+                    self._discovered_files_data[index]['stim_channels'] = metadata.get('stim_channels', [])
+                    self._discovered_files_data[index]['stim_frequency'] = metadata.get('stim_frequency', '')
+                    # Auto-fill stim_type from detected frequency
+                    if metadata.get('stim_frequency') and not self._discovered_files_data[index].get('stim_type'):
+                        self._discovered_files_data[index]['stim_type'] = metadata.get('stim_frequency')
 
-                # Update table cells
-                if index < table.rowCount():
-                    table.setItem(index, 1, QTableWidgetItem(metadata['protocol']))
-                    table.setItem(index, 2, QTableWidgetItem(str(metadata.get('channel_count', ''))))
+                # Master list index includes the offset
+                master_idx = row_offset + index
+                if master_idx < len(self._master_file_list):
+                    self._master_file_list[master_idx]['protocol'] = metadata['protocol']
+                    self._master_file_list[master_idx]['channel_count'] = metadata.get('channel_count', 0)
+                    self._master_file_list[master_idx]['sweep_count'] = metadata.get('sweep_count', 0)
+                    self._master_file_list[master_idx]['stim_channels'] = metadata.get('stim_channels', [])
+                    self._master_file_list[master_idx]['stim_frequency'] = metadata.get('stim_frequency', '')
+                    # Auto-fill stim_type from detected frequency
+                    if metadata.get('stim_frequency') and not self._master_file_list[master_idx].get('stim_type'):
+                        self._master_file_list[master_idx]['stim_type'] = metadata.get('stim_frequency')
+
+                # Update table cells - use row_offset for correct table row
+                # Col 1: Protocol, Col 2: Avail Ch, Col 3: Sweeps, Col 7: Stim Ch, Col 10: Stim Type
+                table_row = row_offset + index
+                if table_row < table.rowCount():
+                    table.setItem(table_row, 1, QTableWidgetItem(metadata['protocol']))
+                    table.setItem(table_row, 2, QTableWidgetItem(str(metadata.get('channel_count', ''))))
+                    table.setItem(table_row, 3, QTableWidgetItem(str(metadata.get('sweep_count', ''))))
+                    # Stim channels (column 7) - only update if row hasn't been analyzed yet
+                    current_stim = table.item(table_row, 7)
+                    if not current_stim or not current_stim.text():
+                        stim_ch_list = metadata.get('stim_channels', [])
+                        stim_ch_display = ', '.join(stim_ch_list) if stim_ch_list else ''
+                        table.setItem(table_row, 7, QTableWidgetItem(stim_ch_display))
+                    # Stim type auto-detection (column 10) - only if not already set
+                    stim_freq = metadata.get('stim_frequency', '')
+                    if stim_freq:
+                        current_stim_type = table.item(table_row, 10)
+                        if not current_stim_type or not current_stim_type.text():
+                            table.setItem(table_row, 10, QTableWidgetItem(stim_freq))
 
         # Update progress bar and status (use last item in batch for progress)
         if batch:
@@ -5066,20 +7698,30 @@ class MainWindow(QMainWindow):
 
     def _metadata_finished(self, protocols):
         """Called when background loading completes."""
-        table = self.discoveredFilesTable
-        table.resizeColumnsToContents()
+        # Auto-fit columns with padding
+        self._auto_fit_table_columns()
+
+        # Apply row styling (parent vs sub-row colors)
+        self._apply_all_row_styling()
 
         # Hide progress bar
         self.projectProgressBar.setVisible(False)
         self.projectProgressBar.setValue(0)
 
-        summary_text = f"Summary: {len(self._discovered_files_data)} ABF files | {len(protocols)} protocols"
+        # Count total files in master list
+        total_files = len(self._master_file_list)
+        new_files = len(self._discovered_files_data)
+
+        summary_text = f"Summary: {total_files} ABF files | {len(protocols)} protocols"
         self.summaryLabel.setText(summary_text)
-        self._log_status_message(f"✓ Loaded {len(self._discovered_files_data)} files", 3000)
+        self._log_status_message(f"✓ Loaded metadata for {new_files} files ({total_files} total)", 3000)
         print(f"[project-builder] Complete! {len(protocols)} protocols: {sorted(protocols)}")
 
         # Re-enable scan button
         self.scanFilesButton.setEnabled(True)
+
+        # Reset row offset
+        self._metadata_row_offset = 0
 
     def _populate_discovered_files_table(self, abf_files):
         """Populate the discovered files table with ABF metadata."""
@@ -5114,125 +7756,522 @@ class MainWindow(QMainWindow):
 
         print(f"[project-builder] Populated table with {len(abf_files)} files")
 
-    def on_project_add_files(self):
-        """Add selected files from discovered table to an experiment."""
-        # Get selected rows
-        selected_rows = self.discoveredFilesTable.selectionModel().selectedRows()
-
-        if not selected_rows:
-            self._show_warning("No Selection", "Please select files to add to the project.")
-            return
-
-        # Get selected file data
-        selected_files = []
-        for row in selected_rows:
-            idx = row.row()
-            if idx < len(self._discovered_files_data):
-                selected_files.append(self._discovered_files_data[idx])
-
-        if not selected_files:
-            return
-
-        # For now, prompt user for experiment name
-        from PyQt6.QtWidgets import QInputDialog
-
-        exp_name, ok = QInputDialog.getText(
-            self,
-            "Add to Experiment",
-            "Enter experiment name:",
-            text="New Experiment"
-        )
-
-        if ok and exp_name:
-            self._add_files_to_experiment(exp_name, selected_files)
-            self._log_status_message(f"✓ Added {len(selected_files)} files to '{exp_name}'", 2000)
-
-    def _add_files_to_experiment(self, exp_name, file_list):
-        """Add files to an experiment in the tree widget."""
-        tree = self.experimentsTreeWidget
-
-        # Check if experiment already exists
-        exp_item = None
-        for i in range(tree.topLevelItemCount()):
-            item = tree.topLevelItem(i)
-            if item.text(0).startswith(exp_name):
-                exp_item = item
-                break
-
-        # Create new experiment if doesn't exist
-        if exp_item is None:
-            exp_item = QTreeWidgetItem([f"{exp_name} (0)"])
-            tree.addTopLevelItem(exp_item)
-            exp_item.setExpanded(True)
-
-        # Add files to experiment
-        for file_info in file_list:
-            file_item = QTreeWidgetItem([file_info['file_name']])
-            # Store full path in item data
-            file_item.setData(0, Qt.ItemDataRole.UserRole, str(file_info['file_path']))
-            exp_item.addChild(file_item)
-
-        # Update count in experiment name
-        file_count = exp_item.childCount()
-        exp_item.setText(0, f"{exp_name} ({file_count})")
-
-        print(f"[project-builder] Added {len(file_list)} files to experiment '{exp_name}'")
+    # NOTE: Old experiment-based methods removed (on_project_add_files, _add_files_to_experiment)
+    # We now use the master file list approach where all files are in a flat table with metadata columns
 
     def on_project_clear_files(self):
-        """Clear the discovered files table."""
+        """Clear the discovered files table and master file list."""
         self.discoveredFilesTable.setRowCount(0)
         self._discovered_files_data = []
+        self._master_file_list = []
         self.summaryLabel.setText("Summary: No files scanned")
         # Hide progress bar
         self.projectProgressBar.setVisible(False)
         self.projectProgressBar.setValue(0)
         self._log_status_message("Cleared discovered files", 1500)
 
-    def on_project_add_experiment(self):
-        """Add a new empty experiment to the project."""
-        from PyQt6.QtWidgets import QInputDialog
+    def _add_scan_saved_data_button(self):
+        """Add the 'Scan Saved Data', 'Resolve Conflicts' buttons and column mode checkbox to the Project Builder toolbar."""
+        from PyQt6.QtWidgets import QPushButton, QCheckBox
 
-        exp_name, ok = QInputDialog.getText(
-            self,
-            "New Experiment",
-            "Enter experiment name:",
-            text="New Experiment"
+        # Create the Scan Saved Data button
+        self.scanSavedDataButton = QPushButton("📁 Scan Saved Data")
+        self.scanSavedDataButton.setToolTip(
+            "Scan for existing exported data files and auto-populate the table.\n"
+            "Looks for Pleth_App_analysis folders and matches saved files to ABF names."
         )
+        self.scanSavedDataButton.setStyleSheet("""
+            QPushButton {
+                background-color: #4a7c4c;
+                color: white;
+                border: 1px solid #3d6e3f;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5a8c5c;
+            }
+            QPushButton:pressed {
+                background-color: #3a6c3c;
+            }
+        """)
+        self.scanSavedDataButton.clicked.connect(self.on_project_scan_saved_data)
 
-        if ok and exp_name:
-            tree = self.experimentsTreeWidget
-            exp_item = QTreeWidgetItem([f"{exp_name} (0)"])
-            tree.addTopLevelItem(exp_item)
-            exp_item.setExpanded(True)
-            self._log_status_message(f"✓ Created experiment '{exp_name}'", 1500)
+        # Create the Resolve Conflicts button
+        self.resolveConflictsButton = QPushButton("⚠ Resolve Conflicts")
+        self.resolveConflictsButton.setToolTip(
+            "View and resolve all data conflicts and warnings.\n"
+            "Shows rows where table values differ from saved NPZ files."
+        )
+        self.resolveConflictsButton.setStyleSheet("""
+            QPushButton {
+                background-color: #7c6a4a;
+                color: white;
+                border: 1px solid #6e5d3f;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #8c7a5a;
+            }
+            QPushButton:pressed {
+                background-color: #6c5a3a;
+            }
+            QPushButton:disabled {
+                background-color: #555;
+                color: #888;
+            }
+        """)
+        self.resolveConflictsButton.clicked.connect(self.on_resolve_all_conflicts)
+        self.resolveConflictsButton.setEnabled(False)  # Disabled until conflicts exist
 
-    def on_project_remove_experiment(self):
-        """Remove selected experiment or files from the project."""
-        tree = self.experimentsTreeWidget
-        selected_items = tree.selectedItems()
+        # Create the "Show Full Content" checkbox for column width mode
+        self.tableFullContentCheckbox = QCheckBox("Show Full Content")
+        self.tableFullContentCheckbox.setToolTip(
+            "When checked: columns expand to show all content (enables horizontal scrolling)\n"
+            "When unchecked: columns fit to visible area, clipping long text"
+        )
+        self.tableFullContentCheckbox.setChecked(False)
+        self.tableFullContentCheckbox.stateChanged.connect(self._on_table_column_mode_changed)
 
-        if not selected_items:
-            self._show_warning("No Selection", "Please select an experiment or file to remove.")
+        # Create the AI Settings button
+        self.aiSettingsButton = QPushButton("🤖 AI Assistant")
+        self.aiSettingsButton.setToolTip(
+            "Configure AI integration (Claude, GPT, Gemini)\n"
+            "Use AI to help organize files, extract metadata from notes,\n"
+            "and get analysis suggestions."
+        )
+        self.aiSettingsButton.setStyleSheet("""
+            QPushButton {
+                background-color: #5a4a7c;
+                color: white;
+                border: 1px solid #4a3d6e;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #6a5a8c;
+            }
+            QPushButton:pressed {
+                background-color: #4a3a6c;
+            }
+        """)
+        self.aiSettingsButton.clicked.connect(self._open_ai_settings)
+
+        # Find the layout containing scanFilesButton and add next to it
+        # The scan button is in the projectFilesFrame area
+        if hasattr(self, 'scanFilesButton'):
+            parent = self.scanFilesButton.parent()
+            if parent and parent.layout():
+                layout = parent.layout()
+                # Find the position of scanFilesButton and insert after it
+                for i in range(layout.count()):
+                    widget = layout.itemAt(i).widget()
+                    if widget == self.scanFilesButton:
+                        layout.insertWidget(i + 1, self.scanSavedDataButton)
+                        layout.insertWidget(i + 2, self.resolveConflictsButton)
+                        layout.insertWidget(i + 3, self.tableFullContentCheckbox)
+                        layout.insertWidget(i + 4, self.aiSettingsButton)
+                        break
+                else:
+                    # Fallback: just add it to the layout
+                    layout.addWidget(self.scanSavedDataButton)
+                    layout.addWidget(self.resolveConflictsButton)
+                    layout.addWidget(self.tableFullContentCheckbox)
+                    layout.addWidget(self.aiSettingsButton)
+
+    def _on_table_column_mode_changed(self, state):
+        """Handle toggle of the 'Show Full Content' checkbox."""
+        self._auto_fit_table_columns()
+
+    def _open_ai_settings(self):
+        """Open the AI Settings dialog for configuring AI integration."""
+        try:
+            from dialogs.ai_settings_dialog import AISettingsDialog
+
+            # Gather file metadata from the table to pass to the dialog
+            files_metadata = []
+            table = self.discoveredFilesTable
+            for row in range(table.rowCount()):
+                metadata = {}
+                # Get file name (column 0)
+                item = table.item(row, 0)
+                metadata['file_name'] = item.text() if item else ''
+
+                # Get protocol (column 1)
+                item = table.item(row, 1)
+                metadata['protocol'] = item.text() if item else ''
+
+                # Get keywords (column 4)
+                item = table.item(row, 4)
+                metadata['keywords_display'] = item.text() if item else ''
+
+                # Get experiment (column 5)
+                item = table.item(row, 5)
+                metadata['experiment'] = item.text() if item else ''
+
+                # Get file path from master list if available
+                if row < len(self._master_file_list):
+                    file_data = self._master_file_list[row]
+                    if isinstance(file_data, dict):
+                        metadata['file_path'] = str(file_data.get('file_path', ''))
+                    else:
+                        metadata['file_path'] = str(file_data)
+
+                files_metadata.append(metadata)
+
+            dialog = AISettingsDialog(self, files_metadata=files_metadata)
+            dialog.exec()
+
+        except ImportError as e:
+            self._show_warning("AI Module Not Found",
+                             f"Could not load AI settings dialog:\n{e}\n\n"
+                             "Make sure the dialogs/ai_settings_dialog.py file exists.")
+        except Exception as e:
+            self._show_error("Error", f"Failed to open AI settings:\n{e}")
+
+    def on_project_scan_saved_data(self):
+        """Scan for existing saved data files and auto-populate the table."""
+        if not self._master_file_list:
+            self._show_warning("No Files", "Please scan for ABF files first.")
             return
 
-        for item in selected_items:
-            parent = item.parent()
-            if parent is None:
-                # Top-level item (experiment)
-                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+        from PyQt6.QtWidgets import QProgressDialog
+        import re
+
+        # Show progress dialog
+        progress = QProgressDialog("Scanning for saved data...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("Scanning Saved Data")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+
+        # Look for Pleth_App_analysis folders
+        base_dir = Path(self._project_directory) if self._project_directory else Path.cwd()
+        analysis_folders = list(base_dir.glob("**/Pleth_App_analysis"))
+
+        if not analysis_folders:
+            progress.close()
+            self._show_info("No Saved Data", "No 'Pleth_App_analysis' folders found.\n\nAnalyzed data is saved to this folder.")
+            return
+
+        # Build a mapping of ABF names to their saved data
+        saved_data_map = {}  # abf_stem -> {channel -> export_info}
+
+        progress.setLabelText(f"Scanning {len(analysis_folders)} analysis folders...")
+        progress.setValue(10)
+        QApplication.processEvents()
+
+        # Collect ALL NPZ files first, then sort by modification time (newest first)
+        # This ensures newer files take priority over older ones in subfolders
+        all_npz_files = []
+        for folder in analysis_folders:
+            for npz_file in folder.glob("*_bundle.npz"):
+                try:
+                    mtime = npz_file.stat().st_mtime
+                except:
+                    mtime = 0
+                all_npz_files.append((npz_file, folder, mtime))
+
+        # Sort by modification time, newest first
+        all_npz_files.sort(key=lambda x: x[2], reverse=True)
+        print(f"[scan-saved] Found {len(all_npz_files)} NPZ bundle files, processing newest first")
+
+        for npz_file, folder, mtime in all_npz_files:
+            # Parse the filename to extract ABF name and channel
+            stem = npz_file.stem.replace('_bundle', '')
+
+            # Try to read metadata from NPZ file for reliable source file info
+            npz_metadata = None
+            source_file_from_npz = None
+            channel_from_npz = None
+
+            try:
+                import numpy as np
+                import json
+                with np.load(npz_file, allow_pickle=True) as data:
+                    # Bundle NPZ stores meta as JSON string in 'meta_json'
+                    if 'meta_json' in data:
+                        meta_str = str(data['meta_json'])
+                        npz_metadata = json.loads(meta_str)
+                        # Get source file and channel from metadata
+                        if isinstance(npz_metadata, dict):
+                            source_file_from_npz = npz_metadata.get('abf_path', '')
+                            channel_from_npz = npz_metadata.get('analyze_channel', '')
+                    # ML training NPZ stores source_file directly
+                    elif 'source_file' in data:
+                        source_file_from_npz = str(data['source_file'])
+                        npz_metadata = {'source_file': source_file_from_npz}
+            except Exception as e:
+                print(f"[scan-saved] Could not read metadata from {npz_file.name}: {e}")
+
+            # Try to match to an ABF file using multiple methods
+            for task in self._master_file_list:
+                abf_path = Path(task.get('file_path', ''))
+                abf_name = abf_path.stem
+                if not abf_name:
+                    continue
+
+                # Method 1: Exact match from NPZ metadata (most reliable)
+                matched = False
+                if source_file_from_npz:
+                    source_stem = Path(source_file_from_npz).stem
+                    if source_stem == abf_name:
+                        matched = True
+                        print(f"[scan-saved] Matched {npz_file.name} to {abf_name} via NPZ metadata")
+
+                # Method 2: ABF name appears anywhere in the filename
+                if not matched and abf_name in stem:
+                    matched = True
+                    print(f"[scan-saved] Matched {npz_file.name} to {abf_name} via substring")
+
+                if matched:
+                    # Found a match - extract more info
+                    key = str(task.get('file_path'))
+
+                    # Determine channel - prefer NPZ metadata, fall back to filename regex
+                    channel = channel_from_npz or ''
+                    if not channel:
+                        channel_match = re.search(r'_(AD\d+)_', stem) or re.search(r'_(AD\d+)$', stem)
+                        channel = channel_match.group(1) if channel_match else ''
+
+                    if key not in saved_data_map:
+                        saved_data_map[key] = {}
+
+                    # Skip if we already have data for this file+channel (since we're processing newest first)
+                    if channel in saved_data_map[key]:
+                        # Track this as an older/duplicate NPZ file
+                        if 'older_npz_files' not in saved_data_map[key][channel]:
+                            saved_data_map[key][channel]['older_npz_files'] = []
+                        saved_data_map[key][channel]['older_npz_files'].append({
+                            'file': str(npz_file),
+                            'date': datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M'),
+                        })
+                        print(f"[scan-saved] Skipping older {npz_file.name} - already have newer data for {abf_name} {channel}")
+                        break
+
+                    export_info = {
+                        'export_path': str(folder),
+                        'export_date': '',
+                        'npz': True,
+                        'timeseries_csv': (folder / f"{stem}_means_by_time.csv").exists(),
+                        'breaths_csv': (folder / f"{stem}_breaths.csv").exists(),
+                        'events_csv': (folder / f"{stem}_events.csv").exists(),
+                        'pdf': (folder / f"{stem}_summary.pdf").exists(),
+                        'session_state': (folder / f"{stem}_session.npz").exists(),
+                        'ml_training': False,  # Would need to check ML folder
+                        'npz_metadata': npz_metadata,  # Store for later use
+                    }
+
+                    # Use the mtime we already collected during sorting
+                    from datetime import datetime
+                    export_info['export_date'] = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+
+                    # Extract additional metadata from ui_meta if available
+                    if npz_metadata:
+                        ui_meta = npz_metadata.get('ui_meta', {})
+                        if isinstance(ui_meta, dict):
+                            export_info['strain'] = ui_meta.get('strain', '')
+                            export_info['stim_type'] = ui_meta.get('stim', '')  # Dialog saves as 'stim'
+                            export_info['power'] = ui_meta.get('power', '')
+                            export_info['sex'] = ui_meta.get('sex', '')
+                            export_info['animal_id'] = ui_meta.get('animal', '')  # Dialog saves as 'animal', not 'animal_id'
+                            # Also get stim and events channels from NPZ metadata (not ui_meta)
+                            export_info['stim_channel'] = npz_metadata.get('stim_chan', '')
+                            export_info['events_channel'] = npz_metadata.get('event_channel', '')
+
+                    saved_data_map[key][channel] = export_info
+                    print(f"[scan-saved] Using {npz_file.name} (newest) for {abf_name} {channel}")
+                    break
+
+        progress.setValue(50)
+        QApplication.processEvents()
+
+        # Debug: Print what was matched
+        print(f"[scan-saved] saved_data_map summary:")
+        for file_key, channels in saved_data_map.items():
+            file_name = Path(file_key).name
+            channel_list = list(channels.keys())
+            print(f"  {file_name}: {channel_list}")
+
+        if not saved_data_map:
+            progress.close()
+            self._show_info("No Matches", "No saved data files matched the current ABF files.")
+            return
+
+        # Update the master list and table with found saved data
+        # We need to handle multiple channels per file by creating sub-rows
+        updated_count = 0
+        new_rows_created = 0
+        table = self.discoveredFilesTable
+        table.blockSignals(True)
+
+        # Track which file+channel combinations already exist in the master list
+        existing_file_channels = set()
+        for task in self._master_file_list:
+            fp = str(task.get('file_path', ''))
+            ch = task.get('channel', '')
+            if fp and ch:
+                existing_file_channels.add((fp, ch))
+
+        # First pass: update existing sub-rows that have matching channels
+        # Parent rows will have sub-rows created in second pass
+        processed_files = set()
+        for row, task in enumerate(self._master_file_list):
+            file_key = str(task.get('file_path'))
+            if file_key not in saved_data_map:
+                continue
+
+            existing_channel = task.get('channel', '')
+            is_sub_row = task.get('is_sub_row', False)
+            export_data = saved_data_map[file_key]
+
+            # Only update if this is a sub-row with a matching channel
+            if is_sub_row and existing_channel and existing_channel in export_data:
+                info = export_data[existing_channel]
+                self._update_task_with_export_info(task, info, row, table)
+                updated_count += 1
+                processed_files.add(file_key)
+                print(f"[scan-saved] Updated sub-row {row}: {task.get('file_name')} channel {existing_channel}")
+
+            # Parent rows: Don't update them directly - all channels will get sub-rows in second pass
+            elif not is_sub_row:
+                processed_files.add(file_key)  # Mark as processed so we know to create sub-rows
+
+            # Update progress
+            if row % 10 == 0:
+                progress.setValue(50 + int(25 * row / len(self._master_file_list)))
+                QApplication.processEvents()
+
+        # Second pass: create new sub-rows for additional channels not yet in the list
+        # Collect info about what to add (file_key, channel, info) - we'll find row indices at insertion time
+        rows_to_add = []  # [(file_key, channel, info), ...]
+
+        for file_key, export_data in saved_data_map.items():
+            # Check which channels need new rows for this file
+            for channel, info in export_data.items():
+                if (file_key, channel) not in existing_file_channels:
+                    rows_to_add.append((file_key, channel, info))
+                    existing_file_channels.add((file_key, channel))  # Mark as will be added
+
+        # Add new sub-rows for additional channels
+        # Find the correct row index at insertion time (not pre-computed) to handle index shifts
+        print(f"[scan-saved] Second pass: {len(rows_to_add)} sub-rows to add")
+        for file_key, channel, info in rows_to_add:
+            # Find the PARENT task (not sub-row) for this file to get full metadata
+            parent_task = None
+            parent_row = None
+            for row, task in enumerate(self._master_file_list):
+                if str(task.get('file_path')) == file_key and not task.get('is_sub_row', False):
+                    parent_task = task
+                    parent_row = row
+                    break
+
+            # If no parent found, use any matching task (fallback)
+            if not parent_task:
+                for row, task in enumerate(self._master_file_list):
+                    if str(task.get('file_path')) == file_key:
+                        parent_task = task
+                        parent_row = row
+                        break
+
+            if parent_task:
+                print(f"[scan-saved] Adding sub-row for {Path(file_key).name} channel {channel} at row {parent_row}")
+                self._create_sub_row_from_saved_data(parent_task, parent_row, channel, info)
+                new_rows_created += 1
+                updated_count += 1
             else:
-                # Child item (file)
-                parent.removeChild(item)
-                # Update count
-                exp_name = parent.text(0).split(" (")[0]
-                file_count = parent.childCount()
-                parent.setText(0, f"{exp_name} ({file_count})")
+                print(f"[scan-saved] WARNING: Could not find source task for {file_key}")
 
-        self._log_status_message("✓ Removed selected items", 1500)
+        progress.setValue(90)
+        QApplication.processEvents()
 
-    def on_project_export_experiment(self):
-        """Export selected experiment (batch processing)."""
-        self._show_info("Not Implemented", "Batch export functionality will be implemented next.")
+        table.blockSignals(False)
+
+        # Auto-fit columns and apply row styling
+        self._auto_fit_table_columns()
+        self._apply_all_row_styling()
+
+        progress.close()
+
+        # Count warnings
+        warnings_count = 0
+        conflicts_count = 0
+        older_files_count = 0
+        for task in self._master_file_list:
+            warnings = task.get('scan_warnings', {})
+            if warnings:
+                warnings_count += 1
+                if warnings.get('conflicts'):
+                    conflicts_count += 1
+                if warnings.get('older_npz_count', 0) > 0:
+                    older_files_count += 1
+
+        msg = f"✓ Found saved data for {updated_count} analyses"
+        if new_rows_created > 0:
+            msg += f" ({new_rows_created} new rows created)"
+        if warnings_count > 0:
+            warning_details = []
+            if conflicts_count > 0:
+                warning_details.append(f"{conflicts_count} conflicts")
+            if older_files_count > 0:
+                warning_details.append(f"{older_files_count} with multiple NPZ files")
+            msg += f" ⚠ {', '.join(warning_details)}"
+        self._log_status_message(msg, 5000 if warnings_count > 0 else 3000)
+        print(f"[project-builder] Found saved data for {updated_count} analyses across {len(analysis_folders)} folders")
+        if warnings_count > 0:
+            print(f"[project-builder] Warnings: {conflicts_count} conflicts, {older_files_count} with older NPZ files")
+
+        # Enable/disable the Resolve Conflicts button based on warnings
+        if hasattr(self, 'resolveConflictsButton'):
+            self.resolveConflictsButton.setEnabled(warnings_count > 0)
+            if warnings_count > 0:
+                self.resolveConflictsButton.setText(f"⚠ Resolve Conflicts ({warnings_count})")
+            else:
+                self.resolveConflictsButton.setText("⚠ Resolve Conflicts")
+
+    def on_resolve_all_conflicts(self):
+        """Show dialog to resolve all conflicts at once."""
+        # Find all rows with warnings
+        rows_with_warnings = []
+        rows_with_conflicts = []
+        for i, task in enumerate(self._master_file_list):
+            warnings = task.get('scan_warnings', {})
+            if warnings:
+                rows_with_warnings.append(i)
+                if warnings.get('conflicts'):
+                    rows_with_conflicts.append(i)
+
+        if not rows_with_warnings:
+            self._show_info("No Warnings", "No scan warnings or conflicts to resolve.")
+            return
+
+        # Show the conflict details dialog with all warning rows
+        self._show_conflict_details(rows_with_warnings)
+
+        # Update button state after resolution
+        self._update_resolve_conflicts_button()
+
+    def _update_resolve_conflicts_button(self):
+        """Update the Resolve Conflicts button text and enabled state."""
+        if not hasattr(self, 'resolveConflictsButton'):
+            return
+
+        warnings_count = sum(1 for task in self._master_file_list if task.get('scan_warnings'))
+
+        self.resolveConflictsButton.setEnabled(warnings_count > 0)
+        if warnings_count > 0:
+            self.resolveConflictsButton.setText(f"⚠ Resolve Conflicts ({warnings_count})")
+        else:
+            self.resolveConflictsButton.setText("⚠ Resolve Conflicts")
+
+    # NOTE: Old experiment methods removed (on_project_add_experiment, on_project_remove_experiment,
+    # on_project_export_experiment). These buttons are hidden and we now use the master file list.
 
     def on_edit_project_name(self):
         """Edit the current project name."""
@@ -5323,8 +8362,8 @@ class MainWindow(QMainWindow):
 
             # Clear everything
             self.discoveredFilesTable.setRowCount(0)
-            self.experimentsTreeWidget.clear()
             self._discovered_files_data = []
+            self._master_file_list = []
 
             # Set new project info
             self._project_directory = directory
@@ -5359,15 +8398,17 @@ class MainWindow(QMainWindow):
             self.projectNameEdit.setText(project_name)
 
         try:
-            # Get experiments data (currently just empty, but ready for future)
-            experiments = []  # TODO: Collect from experimentsTreeWidget when implemented
+            # Use master file list as the source of truth
+            # (it contains all metadata edits the user made)
+            files_to_save = self._master_file_list if self._master_file_list else self._discovered_files_data
+            print(f"[project-save] Saving {len(files_to_save)} files from master list")
 
-            # Save project
+            # Save project (no experiments - using flat file list now)
             project_path = self.project_manager.save_project(
                 project_name,
                 Path(self._project_directory),
-                self._discovered_files_data,
-                experiments
+                files_to_save,
+                []  # No experiments in new workflow
             )
 
             self._show_info("Project Saved", f"Project saved to:\n{project_path}")
@@ -5530,17 +8571,75 @@ class MainWindow(QMainWindow):
         self.projectProgressBar.setFormat(f"Loading files: 0/{total_files} (0%)")
         QApplication.processEvents()
 
-        # Populate table
+        # Populate table with 15-column structure
         for i, file_data in enumerate(self._discovered_files_data):
-            table.insertRow(i)
-            table.setItem(i, 0, QTableWidgetItem(file_data.get('file_name', '')))
-            table.setItem(i, 1, QTableWidgetItem(file_data.get('protocol', '')))
-            table.setItem(i, 2, QTableWidgetItem(str(file_data.get('channel_count', ''))))  # Channels
-            table.setItem(i, 3, QTableWidgetItem(file_data.get('keywords_display', '')))  # Path keywords
-            table.setItem(i, 4, QTableWidgetItem(''))  # Labels (manual tags)
+            # Ensure file has all needed fields
+            if 'channel' not in file_data:
+                file_data['channel'] = ''
+            if 'stim_channel' not in file_data:
+                file_data['stim_channel'] = ''
+            if 'events_channel' not in file_data:
+                file_data['events_channel'] = ''
+            if 'stim_channels' not in file_data:
+                file_data['stim_channels'] = []
+            if 'stim_frequency' not in file_data:
+                file_data['stim_frequency'] = ''
+            if 'strain' not in file_data:
+                file_data['strain'] = ''
+            if 'stim_type' not in file_data:
+                file_data['stim_type'] = ''
+            if 'power' not in file_data:
+                # Try to auto-fill from keywords
+                path_kw = file_data.get('path_keywords', {})
+                file_data['power'] = path_kw.get('power_levels', [''])[0] if path_kw.get('power_levels') else ''
+            if 'sex' not in file_data:
+                file_data['sex'] = ''
+            if 'animal_id' not in file_data:
+                # Try to auto-fill from keywords
+                path_kw = file_data.get('path_keywords', {})
+                file_data['animal_id'] = path_kw.get('animal_ids', [''])[0] if path_kw.get('animal_ids') else ''
+            if 'status' not in file_data:
+                file_data['status'] = 'pending'
+            # Export tracking fields
+            if 'export_path' not in file_data:
+                file_data['export_path'] = ''
+            if 'export_date' not in file_data:
+                file_data['export_date'] = ''
+            if 'export_version' not in file_data:
+                file_data['export_version'] = ''
+            if 'exports' not in file_data:
+                file_data['exports'] = {
+                    'npz': False,
+                    'timeseries_csv': False,
+                    'breaths_csv': False,
+                    'events_csv': False,
+                    'pdf': False,
+                    'session_state': False,
+                    'ml_training': False,
+                }
 
-            file_size_mb = file_data.get('file_size_mb', 0)
-            table.setItem(i, 5, QTableWidgetItem(f"{file_size_mb:.2f}"))
+            table.insertRow(i)
+            table.setItem(i, 0, QTableWidgetItem(file_data.get('file_name', '')))  # File Name
+            table.setItem(i, 1, QTableWidgetItem(file_data.get('protocol', '')))  # Protocol
+            table.setItem(i, 2, QTableWidgetItem(str(file_data.get('channel_count', ''))))  # Avail Ch
+            table.setItem(i, 3, QTableWidgetItem(str(file_data.get('sweep_count', ''))))  # Sweeps
+            table.setItem(i, 4, QTableWidgetItem(file_data.get('keywords_display', '')))  # Keywords
+            table.setItem(i, 5, QTableWidgetItem(file_data.get('channel', '')))  # Channel
+            table.setItem(i, 6, QTableWidgetItem(file_data.get('stim_channel', '')))  # Stim Ch
+            table.setItem(i, 7, QTableWidgetItem(file_data.get('events_channel', '')))  # Events Ch
+            table.setItem(i, 8, QTableWidgetItem(file_data.get('strain', '')))  # Strain
+            table.setItem(i, 9, QTableWidgetItem(file_data.get('stim_type', '')))  # Stim Type
+            table.setItem(i, 10, QTableWidgetItem(file_data.get('power', '')))  # Power
+            table.setItem(i, 11, QTableWidgetItem(file_data.get('sex', '')))  # Sex
+            table.setItem(i, 12, QTableWidgetItem(file_data.get('animal_id', '')))  # Animal ID
+            # Status icon based on status field
+            status = file_data.get('status', 'pending')
+            status_icon = '●' if status == 'completed' else ('◐' if status == 'in_progress' else '○')
+            table.setItem(i, 13, QTableWidgetItem(status_icon))  # Status
+            # Add action buttons (column 14)
+            self._add_row_action_button(i)
+            # Column 15: Exports
+            table.setItem(i, 15, self._create_exports_table_item(file_data))
 
             if file_data.get('protocol'):
                 protocols.add(file_data['protocol'])
@@ -5564,10 +8663,13 @@ class MainWindow(QMainWindow):
         summary_text = f"Summary: {len(self._discovered_files_data)} ABF files | {len(protocols)} protocols"
         self.summaryLabel.setText(summary_text)
 
-        # TODO: Load experiments when implemented
-        # self.experimentsTreeWidget.clear()
-        # for exp in project_data.get('experiments', []):
-        #     ...
+        # Sync master file list with discovered files
+        self._master_file_list = self._discovered_files_data.copy()
+
+        # Note: Old experiment structure is ignored - we now use the flat master file list
+        # If old project had experiments, their task data could be migrated here if needed
+
+    # NOTE: _load_experiments_from_project method removed - no longer using experiment tree
 
     def _ask_locate_project(self, project_name, expected_path):
         """
@@ -5631,26 +8733,6 @@ if __name__ == "__main__":
     )
     splash.show()
     app.processEvents()
-
-    # Pre-compile Numba functions if available (10-50× speedup for breath detection)
-    try:
-        from core.peaks import _USE_NUMBA_VERSION, warmup_numba
-        if _USE_NUMBA_VERSION:
-            splash.showMessage(
-                "Pre-compiling optimized algorithms...",
-                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
-                Qt.GlobalColor.white
-            )
-            app.processEvents()
-            warmup_numba()
-            splash.showMessage(
-                "Loading PhysioMetrics...",
-                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
-                Qt.GlobalColor.white
-            )
-            app.processEvents()
-    except Exception as e:
-        print(f"[Startup] Numba warmup failed (will use Python version): {e}")
 
     # Create main window (this is where the loading time happens)
     w = MainWindow()

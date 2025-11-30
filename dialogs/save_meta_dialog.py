@@ -6,6 +6,7 @@ breath data before saving, including experimental details like mouse strain, vir
 location, stimulation parameters, and animal information.
 """
 
+import sys
 import re
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QLineEdit, QComboBox, QLabel,
@@ -245,6 +246,135 @@ class SaveMetaDialog(QDialog):
         self.le_animal.textChanged.connect(self._update_preview)
 
         self._update_preview()
+
+        # Apply dark theme styling
+        self._apply_dark_theme()
+
+        # Enable dark title bar on Windows
+        self._enable_dark_title_bar()
+
+    def _apply_dark_theme(self):
+        """Apply dark theme styling to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QWidget {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+                background-color: transparent;
+            }
+            QLineEdit {
+                background-color: #2a2a2a;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QLineEdit:focus {
+                border-color: #2a7fff;
+            }
+            QLineEdit::placeholder {
+                color: #888888;
+            }
+            QComboBox {
+                background-color: #2a2a2a;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-width: 80px;
+            }
+            QComboBox:focus {
+                border-color: #2a7fff;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #888888;
+                margin-right: 5px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2a2a2a;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                selection-background-color: #2a7fff;
+                selection-color: white;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                spacing: 8px;
+                background-color: transparent;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #2a2a2a;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2a7fff;
+                border-color: #2a7fff;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #2a7fff;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #444;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #2a7fff;
+            }
+            QPushButton:pressed {
+                background-color: #2a7fff;
+            }
+            QPushButton:default {
+                border-color: #2a7fff;
+            }
+            QDialogButtonBox {
+                background-color: transparent;
+            }
+        """)
+
+        # Update the preview label color for dark theme
+        self.lbl_preview.setStyleSheet("color: #88aaff; background-color: transparent;")
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     # --- Helpers: light canonicalization + sanitization ---
     def _norm_token(self, s: str) -> str:

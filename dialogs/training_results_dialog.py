@@ -8,6 +8,8 @@ Shows ML model training results including:
 - Per-class metrics
 """
 
+import sys
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QTabWidget, QWidget, QTextEdit, QPushButton,
@@ -29,6 +31,21 @@ class TrainingResultsDialog(QDialog):
 
         self._init_ui()
         self._apply_dark_theme()
+        self._enable_dark_title_bar()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _init_ui(self):
         """Initialize the UI."""

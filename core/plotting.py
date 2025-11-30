@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from math import ceil
 import matplotlib.patheffects as pe
+from core.plot_themes import PlotThemeManager
 
 # colors
 PLETH_COLOR = "k"           # main trace
@@ -97,23 +98,45 @@ class PlotHost(QWidget):
         self.toolbar.setMovable(False)
         self.toolbar.setFloatable(False)
         self.toolbar.setStyleSheet("""
-        QToolBar#PlotNavToolbar { background: transparent; border: none; padding: 0px; }
+        QToolBar#PlotNavToolbar {
+            background: transparent;
+            border: 0px solid transparent;
+            padding: 0px;
+            spacing: 0px;
+        }
+        QToolBar#PlotNavToolbar:hover {
+            border: 0px solid transparent;
+        }
         QToolBar#PlotNavToolbar::separator { background: transparent; width: 0px; height: 0px; }
         QToolBar#PlotNavToolbar::handle { image: none; width: 0px; height: 0px; }
         QToolBar#PlotNavToolbar QToolButton {
             background: #434b5d; color: #eef2f8;
             border: 1px solid #5a6580; border-radius: 8px;
             padding: 5px 8px; margin: 2px;
+            outline: none;
         }
-        QToolBar#PlotNavToolbar QToolButton:hover { background: #515c72; border-color: #6a7694; }
-        QToolBar#PlotNavToolbar QToolButton:pressed { background: #5f6d88; border-color: #7886a6; }
+        QToolBar#PlotNavToolbar QToolButton:hover {
+            background: #515c72;
+            border-color: #6a7694;
+            outline: none;
+        }
+        QToolBar#PlotNavToolbar QToolButton:pressed {
+            background: #5f6d88;
+            border-color: #7886a6;
+            outline: none;
+        }
         QToolBar#PlotNavToolbar QToolButton:checked {
             background: #4A90E2;
             color: white;
             border-color: #357ABD;
+            outline: none;
         }
         QToolBar#PlotNavToolbar QToolButton:disabled {
             background: #353b4a; border-color: #444d60; color: #8691a8;
+        }
+        QToolBar#PlotNavToolbar QToolButton:focus {
+            outline: none;
+            border-bottom: none;
         }""")
 
         # Connect toolbar actions to turn off edit modes
@@ -159,9 +182,13 @@ class PlotHost(QWidget):
         # Add mode for external click callback
         self._external_click_cb = None
 
+        # Plot theme manager (dark/light mode)
+        self.theme_manager = PlotThemeManager(default_theme='dark')  # Start with dark theme
+        self._current_theme = 'dark'  # Default to dark theme
 
 
-        
+
+
 
 
         
@@ -171,9 +198,9 @@ class PlotHost(QWidget):
         lay.setSpacing(0)
         lay.addWidget(self.canvas)  # Only canvas in layout
 
-        # Position toolbar as overlay at top of canvas
+        # Position toolbar as overlay at top-right of canvas
         self.toolbar.setParent(self.canvas)  # Make it a child of canvas
-        self.toolbar.move(10, 10)  # 10px from top-left corner
+        self._position_toolbar_right()  # Position at top-right
         self.toolbar.raise_()  # Ensure toolbar is on top
 
         # Preserve view flags & storage
@@ -190,12 +217,158 @@ class PlotHost(QWidget):
 
         # Event connections already registered above (before toolbar creation)
 
-    def resizeEvent(self, event):
-        """Keep toolbar positioned correctly when window resizes."""
-        super().resizeEvent(event)
-        if hasattr(self, 'toolbar'):
-            # Keep toolbar at top-left
-            self.toolbar.move(10, 10)
+    def _position_toolbar_right(self):
+        """Position the toolbar at the top-right corner of the canvas."""
+        if hasattr(self, 'toolbar') and hasattr(self, 'canvas'):
+            # Ensure toolbar is properly sized
+            self.toolbar.adjustSize()
+
+            canvas_width = self.canvas.width()
+            # Use actual width, with sizeHint as fallback
+            toolbar_width = self.toolbar.width()
+            if toolbar_width <= 0:
+                toolbar_width = self.toolbar.sizeHint().width()
+
+            # Add extra margin to ensure all buttons are visible
+            margin = 20
+            x_pos = canvas_width - toolbar_width - margin
+            self.toolbar.move(max(10, x_pos), 10)  # Ensure minimum 10px from left
+
+    def set_plot_theme(self, theme_name):
+        """
+        Apply a plot theme (dark or light mode) to the current plot.
+
+        Args:
+            theme_name: 'dark' or 'light'
+        """
+        self._current_theme = theme_name
+
+        # IMPORTANT: Update theme_manager FIRST so get_color() returns correct colors
+        self.theme_manager.current_theme = theme_name
+
+        # Always set figure background color, even if no axes exist yet
+        theme = self.theme_manager.themes[theme_name]
+        self.fig.patch.set_facecolor(theme['figure_facecolor'])
+
+        # Get new trace color (now returns correct theme colors)
+        trace_color = self.theme_manager.get_color('trace_color')
+        text_color = self.theme_manager.get_color('text_color')
+
+        # Apply theme to existing axes if they exist
+        if self.ax_main is not None:
+            self.theme_manager.apply_theme(self.ax_main, self.fig, theme_name)
+
+            # Update existing trace line colors (but not scatter plots for peaks/events)
+            for line in self.ax_main.get_lines():
+                # Only update the main trace lines (not threshold lines or other overlays)
+                # Main traces typically have linewidth around 0.9-1.2
+                if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
+                    # Check if this is a main trace color that should be updated
+                    if self._is_trace_color(line.get_color()):
+                        line.set_color(trace_color)
+
+            # Update title color if it exists
+            if self.ax_main.get_title():
+                self.ax_main.title.set_color(text_color)
+
+            # Update Y2 axis colors if it exists
+            if self.ax_y2 is not None:
+                tick_color = self.theme_manager.get_color('tick_color')
+                label_color = self.theme_manager.get_color('label_color')
+                edge_color = self.theme_manager.get_color('axes_edgecolor')
+                self.ax_y2.spines['right'].set_edgecolor(edge_color)
+                self.ax_y2.tick_params(colors=tick_color, which='both')
+                self.ax_y2.yaxis.label.set_color(label_color)
+
+            # Update sigh markers (stars) colors based on theme
+            if self._sigh_artist is not None:
+                is_dark = (theme_name == 'dark')
+                sigh_color = "#FFD700"  # Gold
+                sigh_edge = "#FFD700" if is_dark else "black"
+                self._sigh_artist.set_facecolors(sigh_color)
+                self._sigh_artist.set_edgecolors(sigh_edge)
+
+            # Update event subplot if it exists (dual-subplot layout)
+            if hasattr(self, 'ax_event') and self.ax_event is not None:
+                self.theme_manager.apply_theme(self.ax_event, self.fig, theme_name)
+
+                # Update trace colors in event subplot
+                for line in self.ax_event.get_lines():
+                    if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
+                        if self._is_trace_color(line.get_color()):
+                            line.set_color(trace_color)
+
+        elif self.fig.axes:  # Apply to all axes in multi-plot mode
+            for ax in self.fig.axes:
+                self.theme_manager.apply_theme(ax, self.fig, theme_name)
+
+                # Update existing trace line colors in multi-plot
+                for line in ax.get_lines():
+                    if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
+                        if self._is_trace_color(line.get_color()):
+                            line.set_color(trace_color)
+
+                # Update title color if it exists
+                if ax.get_title():
+                    ax.title.set_color(text_color)
+
+        self.canvas.draw()
+
+    def _apply_current_theme(self):
+        """Apply the current theme to ax_main after creating it."""
+        if self.ax_main is not None:
+            self.theme_manager.apply_theme(self.ax_main, self.fig, self._current_theme)
+
+    def _is_trace_color(self, color):
+        """
+        Check if a color represents a main trace color that should be updated on theme change.
+
+        This handles various color formats that matplotlib might return:
+        - Named colors: 'k', 'black', 'w', 'white'
+        - Hex strings: '#000000', '#ffffff', '#d4d4d4', '#cccccc'
+        - RGB/RGBA tuples: (0, 0, 0), (1, 1, 1), etc.
+
+        Returns True if the color is black, white, or gray-ish (typical trace colors).
+        """
+        import matplotlib.colors as mcolors
+
+        # Known trace colors (named)
+        named_trace_colors = {'k', 'black', 'w', 'white'}
+
+        # Check named colors
+        if isinstance(color, str):
+            if color.lower() in named_trace_colors:
+                return True
+            # Check hex colors
+            if color.startswith('#'):
+                hex_trace_colors = {'#000000', '#ffffff', '#d4d4d4', '#cccccc'}
+                return color.lower() in hex_trace_colors
+
+        # Handle RGB/RGBA tuples or arrays
+        try:
+            # Convert any color format to RGBA
+            rgba = mcolors.to_rgba(color)
+            r, g, b = rgba[0], rgba[1], rgba[2]
+
+            # Check if it's black (all values close to 0)
+            if r < 0.1 and g < 0.1 and b < 0.1:
+                return True
+
+            # Check if it's white (all values close to 1)
+            if r > 0.9 and g > 0.9 and b > 0.9:
+                return True
+
+            # Check if it's gray-ish (R, G, B are similar and in gray range)
+            # #d4d4d4 = (0.831, 0.831, 0.831)
+            # #cccccc = (0.8, 0.8, 0.8)
+            if abs(r - g) < 0.05 and abs(g - b) < 0.05:
+                if 0.7 < r < 0.95:  # Gray range
+                    return True
+
+        except Exception:
+            pass
+
+        return False
 
     def _clean_spines(self, ax, has_y2=False):
         """
@@ -435,6 +608,9 @@ class PlotHost(QWidget):
         self.fig.clear()
         self.ax_main = self.fig.add_subplot(111)
 
+        # Apply current theme (dark/light mode)
+        self._apply_current_theme()
+
         # Any old scatter is invalid after clearing
         self.clear_peaks()
         self.scatter_peaks = None
@@ -451,9 +627,10 @@ class PlotHost(QWidget):
         self.line_y2 = None
         self.line_y2_secondary = None
 
-        # Plot main trace in black
+        # Plot main trace (color depends on theme)
         tds, yds = self._downsample_even(t, y, max_points=max_points if max_points else len(t))
-        self.ax_main.plot(tds, yds, linewidth=0.9, color=PLETH_COLOR)
+        trace_color = self.theme_manager.get_color('trace_color')
+        self.ax_main.plot(tds, yds, linewidth=0.9, color=trace_color)
 
         # Dashed baseline at y=0 (behind traces)
         self.ax_main.axhline(0.0, linestyle="--", linewidth=0.8, color="#666666", alpha=0.9, zorder=0)
@@ -464,7 +641,8 @@ class PlotHost(QWidget):
                 self.ax_main.axvspan(t0, t1, color="#2E5090", alpha=0.25)
 
         if title:
-            self.ax_main.set_title(title)
+            title_color = self.theme_manager.get_color('text_color')
+            self.ax_main.set_title(title, color=title_color)
         self.ax_main.set_xlabel("Time (s)")
         self.ax_main.set_ylabel(ylabel)
 
@@ -472,24 +650,45 @@ class PlotHost(QWidget):
         self.ax_main.grid(False)
 
         # Intelligent y-axis scaling: percentile or full range based on user preference
-        if state and hasattr(state, 'use_percentile_autoscale') and state.use_percentile_autoscale:
+        # First, filter out NaN/Inf values to avoid crashes
+        y_valid = y[np.isfinite(y)]
+
+        if len(y_valid) == 0:
+            # No valid data - use default range
+            print("[Plot] Warning: No valid (finite) data for Y-axis scaling, using default range")
+            y_min, y_max, padding = -1.0, 1.0, 0.1
+            mode_str = "default (no valid data)"
+        elif state and hasattr(state, 'use_percentile_autoscale') and state.use_percentile_autoscale:
             # Percentile mode: Use 99th percentile + configurable padding to avoid artifacts
-            y_min = np.percentile(y, 1)  # 1st percentile for lower bound
-            y_max = np.percentile(y, 99)  # 99th percentile for upper bound
+            y_min = np.percentile(y_valid, 1)  # 1st percentile for lower bound
+            y_max = np.percentile(y_valid, 99)  # 99th percentile for upper bound
             y_range = y_max - y_min
+            # Handle case where all values are the same
+            if y_range == 0 or not np.isfinite(y_range):
+                y_range = abs(y_min) if y_min != 0 else 1.0
             padding_factor = getattr(state, 'autoscale_padding', 0.25)
             padding = padding_factor * y_range
             mode_str = f"99th percentile, {padding_factor*100:.0f}% padding"
         else:
             # Full range mode: Use absolute min/max
-            y_min = np.min(y)
-            y_max = np.max(y)
+            y_min = np.min(y_valid)
+            y_max = np.max(y_valid)
             y_range = y_max - y_min
+            # Handle case where all values are the same
+            if y_range == 0 or not np.isfinite(y_range):
+                y_range = abs(y_min) if y_min != 0 else 1.0
             padding = 0.05 * y_range  # Small padding to avoid clipping edges
             mode_str = "full range (min/max)"
 
-        self.ax_main.set_ylim(y_min - padding, y_max + padding)
-        print(f"[Plot] Auto-scaled Y-axis: {y_min - padding:.3f} to {y_max + padding:.3f} ({mode_str})")
+        # Final validation before setting limits
+        y_lower = y_min - padding
+        y_upper = y_max + padding
+        if np.isfinite(y_lower) and np.isfinite(y_upper) and y_lower < y_upper:
+            self.ax_main.set_ylim(y_lower, y_upper)
+            print(f"[Plot] Auto-scaled Y-axis: {y_lower:.3f} to {y_upper:.3f} ({mode_str})")
+        else:
+            # Fallback to matplotlib's autoscale
+            print(f"[Plot] Warning: Invalid Y limits ({y_lower}, {y_upper}), using autoscale")
 
         # Restore preserved X view if desired (but always auto-scale Y)
         if prev_xlim is not None:
@@ -501,8 +700,10 @@ class PlotHost(QWidget):
         # Clean up spines for minimal look
         self._clean_spines(self.ax_main, has_y2=False)
 
-        # Keep layout tight always
-        self.fig.tight_layout()
+        # Use tight layout with minimal padding to maximize plot area
+        self.fig.tight_layout(pad=0.5, h_pad=0.1, w_pad=0.1)
+        # Further adjust to use full width
+        self.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
         self.canvas.draw_idle()
 
         # Update matplotlib toolbar's home view to current (maximized) limits
@@ -562,17 +763,24 @@ class PlotHost(QWidget):
         if n == 1:
             axes = [axes]
 
+        # Apply theme to all subplots first
+        for ax in axes:
+            self.theme_manager.apply_theme(ax, self.fig, self._current_theme)
+
+        # Get trace color after theme is applied
+        trace_color = self.theme_manager.get_color('trace_color')
+
         for ax, (t, y, label) in zip(axes, traces):
             tds, yds = self._downsample_even(t, y, max_points=max_points_per_trace)
-            ax.plot(tds, yds, linewidth=1, color=PLETH_COLOR)
+            ax.plot(tds, yds, linewidth=1, color=trace_color)
             ax.set_ylabel(label)
-            ax.grid(True, alpha=0.2)
             # Clean spines for minimal look
             self._clean_spines(ax, has_y2=False)
 
         axes[-1].set_xlabel("Time (s)")
         if title:
-            axes[0].set_title(title)
+            title_color = self.theme_manager.get_color('text_color')
+            axes[0].set_title(title, color=title_color)
 
         if prev_xlim is not None:
             for ax in axes:
@@ -595,6 +803,9 @@ class PlotHost(QWidget):
         if len(self.fig.axes) == 1:
             self.fig.tight_layout()
         self.canvas.draw_idle()
+        # Keep toolbar at top-right
+        if hasattr(self, 'toolbar'):
+            self._position_toolbar_right()
         return super().resizeEvent(event)
 
 
@@ -666,7 +877,9 @@ class PlotHost(QWidget):
 
     def _on_threshold_pick(self, event):
         """Handle pick event on threshold line to start dragging."""
+        print(f"[MainPlot] Threshold line picked!")
         if event.artist == self.threshold_line:
+            print(f"[MainPlot] Starting threshold drag...")
             self._dragging_threshold = True
             # Connect motion and release events for dragging
             if self._threshold_drag_cid_motion is None:
@@ -746,7 +959,9 @@ class PlotHost(QWidget):
 
     def _on_threshold_release(self, event):
         """Handle mouse release to stop dragging threshold line."""
+        print(f"[MainPlot] Mouse released, dragging={self._dragging_threshold}")
         if self._dragging_threshold:
+            print(f"[MainPlot] Inside dragging block")
             self._dragging_threshold = False
             # Restore cursor
             from PyQt6.QtCore import Qt
@@ -765,15 +980,45 @@ class PlotHost(QWidget):
             # Clear background cache
             self._blit_background = None
 
-            # Update SpinBox with final threshold
+            # Update stored prominence value and sync with Analysis Options dialog
             main_window = self._find_main_window()
+            print(f"[MainPlot] Found main_window: {main_window is not None}")
             if main_window:
                 current_threshold = getattr(main_window, 'peak_height_threshold', None)
+                print(f"[MainPlot] current_threshold: {current_threshold}")
                 if current_threshold is not None:
-                    # Update SpinBox (blocked signals to prevent feedback)
-                    main_window.PeakPromValueSpinBox.blockSignals(True)
-                    main_window.PeakPromValueSpinBox.setValue(current_threshold)
-                    main_window.PeakPromValueSpinBox.blockSignals(False)
+                    # Update stored prominence value
+                    main_window.peak_prominence = current_threshold
+
+                    # Update Analysis Options dialog histogram if it's open
+                    print(f"[MainPlot] Threshold released at {current_threshold:.4f}")
+                    if hasattr(main_window, '_analysis_options_dialog'):
+                        print(f"[MainPlot] - Has _analysis_options_dialog: {main_window._analysis_options_dialog is not None}")
+                        if main_window._analysis_options_dialog is not None:
+                            try:
+                                is_visible = main_window._analysis_options_dialog.isVisible()
+                                print(f"[MainPlot] - Dialog visible: {is_visible}")
+                                if is_visible:
+                                    # Update the ProminenceThresholdDialog in the Peak Detection tab
+                                    has_prom = hasattr(main_window._analysis_options_dialog, 'prominence_dialog')
+                                    print(f"[MainPlot] - Has prominence_dialog: {has_prom}")
+                                    if has_prom:
+                                        prom_dialog = main_window._analysis_options_dialog.prominence_dialog
+                                        print(f"[MainPlot] - prominence_dialog is not None: {prom_dialog is not None}")
+                                        if prom_dialog is not None:
+                                            has_method = hasattr(prom_dialog, 'update_threshold_from_external')
+                                            print(f"[MainPlot] - Has update method: {has_method}")
+                                            if has_method:
+                                                print(f"[MainPlot] Syncing threshold {current_threshold:.4f} to histogram dialog")
+                                                prom_dialog.update_threshold_from_external(current_threshold)
+                            except RuntimeError as e:
+                                # Dialog was deleted
+                                print(f"[MainPlot] Dialog deleted, skipping sync: {e}")
+                                pass
+                            except Exception as e:
+                                print(f"[MainPlot] Error syncing to histogram: {e}")
+                    else:
+                        print("[MainPlot] - No _analysis_options_dialog attribute")
 
             # Clear histogram now that dragging is done
             self._clear_peak_height_histogram()
@@ -783,10 +1028,11 @@ class PlotHost(QWidget):
                 main_window.ApplyPeakFindPushButton.setEnabled(True)
 
     def _find_main_window(self):
-        """Walk up parent chain to find the main window (has PeakPromValueSpinBox attribute)."""
+        """Walk up parent chain to find the main window (has ApplyPeakFindPushButton attribute)."""
         widget = self
         while widget is not None:
-            if hasattr(widget, 'PeakPromValueSpinBox'):
+            # Look for a unique main window attribute (ApplyPeakFindPushButton or state)
+            if hasattr(widget, 'ApplyPeakFindPushButton') or hasattr(widget, 'state'):
                 return widget
             widget = widget.parent()
         return None
@@ -1214,6 +1460,15 @@ class PlotHost(QWidget):
             ax_y2.spines['left'].set_visible(False)
             ax_y2.spines['bottom'].set_visible(False)
             ax_y2.spines['right'].set_visible(True)
+
+            # Apply theme colors to Y2 axis
+            tick_color = self.theme_manager.get_color('tick_color')
+            label_color = self.theme_manager.get_color('label_color')
+            edge_color = self.theme_manager.get_color('axes_edgecolor')
+            ax_y2.spines['right'].set_edgecolor(edge_color)
+            ax_y2.tick_params(colors=tick_color, which='both')
+            ax_y2.yaxis.label.set_color(label_color)
+
             # Only show ticks/labels on the right for Y2
             ax_y2.tick_params(top=False, left=False, bottom=False, right=True,
                              labeltop=False, labelleft=False, labelbottom=False, labelright=True)
@@ -1443,7 +1698,7 @@ class PlotHost(QWidget):
             facecolors=face,
             edgecolors=edge,
             linewidths=1.5,
-            zorder=8,
+            zorder=50,  # High z-order to ensure stars are on top of other plot elements
         )
         self.canvas.draw_idle()
 
@@ -1573,7 +1828,7 @@ class PlotHost(QWidget):
                 adjusted_regions,
                 use_shade=outliers_shade,
                 color='#FFA500',  # Orange
-                y_position_fraction=0.50  # Middle (if line mode)
+                y_position_fraction=0.02  # Near bottom, just above apnea line
             )
 
         # Add failure regions (red background) - full height, visible rectangles

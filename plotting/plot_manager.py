@@ -102,9 +102,6 @@ class PlotManager:
         # Draw Y2 metric if selected
         self._draw_y2_metric(s, t, t_plot)
 
-        # Draw automatic region overlays (eupnea, apnea, outliers)
-        self._draw_region_overlays(s, t, y, t_plot, t0)
-
         # Draw omitted region overlays
         self._draw_omitted_regions(s, t_plot)
 
@@ -112,7 +109,12 @@ class PlotManager:
         self.refresh_threshold_lines()
 
         # Set y-limits based on non-omitted data only (exclude omitted regions from autoscaling)
+        # IMPORTANT: This must happen BEFORE drawing region overlays so the y-position is consistent
         self._set_ylim_excluding_omitted(s, y, t_plot)
+
+        # Draw automatic region overlays (eupnea, apnea, outliers)
+        # AFTER y-limits are finalized so the line position is consistent with lightweight refresh
+        self._draw_region_overlays(s, t, y, t_plot, t0)
 
         # Note: Full sweep dimming now handled in _draw_omitted_regions() for consistency
 
@@ -248,6 +250,14 @@ class PlotManager:
         self.plot_host.ax_main = ax_pleth
         self.plot_host.ax_event = ax_event
 
+        # Apply theme to both subplots
+        self.plot_host.theme_manager.apply_theme(ax_pleth, self.plot_host.fig, self.plot_host._current_theme)
+        self.plot_host.theme_manager.apply_theme(ax_event, self.plot_host.fig, self.plot_host._current_theme)
+
+        # Get trace color from the current theme explicitly
+        trace_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['trace_color']
+        text_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['text_color']
+
         # Clear old scatter references
         self.plot_host.scatter_peaks = None
         self.plot_host.scatter_onsets = None
@@ -259,8 +269,8 @@ class PlotManager:
         self.plot_host.line_y2 = None
         self.plot_host.line_y2_secondary = None
 
-        # Plot pleth trace on top subplot
-        ax_pleth.plot(t_plot, y_pleth, linewidth=0.9, color='k')
+        # Plot pleth trace on top subplot (use theme color)
+        ax_pleth.plot(t_plot, y_pleth, linewidth=0.9, color=trace_color)
         ax_pleth.axhline(0.0, linestyle="--", linewidth=0.8, color="#666666", alpha=0.9, zorder=0)
 
         # Add stim spans to top plot
@@ -270,7 +280,7 @@ class PlotManager:
 
         # Set title and labels for top plot
         if title:
-            ax_pleth.set_title(title)
+            ax_pleth.set_title(title, color=text_color)
         ax_pleth.set_ylabel(st.analyze_chan or "Signal")
         ax_pleth.grid(False)
 
@@ -334,8 +344,10 @@ class PlotManager:
         self.plot_host._attach_limit_listeners([ax_pleth, ax_event], mode="single")
         self.plot_host._store_from_axes(mode="single")
 
-        # Keep layout tight
-        self.plot_host.fig.tight_layout()
+        # Use tight layout with minimal padding to maximize plot area
+        self.plot_host.fig.tight_layout(pad=0.5, h_pad=0.1, w_pad=0.1)
+        # Further adjust to use full width
+        self.plot_host.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
         self.plot_host.canvas.draw_idle()
 
     def _plot_event_trace(self, ax, t_full, t_plot, spans_plot, t0):
@@ -352,16 +364,16 @@ class PlotManager:
         # Apply time normalization if needed (same as pleth trace)
         event_plot = event_data_full
 
-        # Plot continuous trace
-        ax.plot(t_plot, event_plot, 'b-', linewidth=1, label=st.event_channel)
+        # Plot continuous trace (use theme color explicitly from current theme)
+        trace_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['trace_color']
+        ax.plot(t_plot, event_plot, color=trace_color, linewidth=1)
         ax.axhline(0.0, linestyle="--", linewidth=0.8, color="#666666", alpha=0.9, zorder=0)
 
         # Add threshold line if event detection dialog exists and has a threshold set
         if hasattr(self.window, '_event_detection_dialog') and self.window._event_detection_dialog is not None:
             try:
                 threshold = self.window._event_detection_dialog.threshold_spin.value()
-                ax.axhline(threshold, linestyle=':', linewidth=1.5, color='red', alpha=0.7,
-                          label=f'Threshold ({threshold:.2f})', zorder=5)
+                ax.axhline(threshold, linestyle=':', linewidth=1.5, color='red', alpha=0.7, zorder=5)
             except:
                 pass
 
@@ -373,7 +385,6 @@ class PlotManager:
         # Set labels
         ax.set_ylabel(f'{st.event_channel}', fontsize=11)
         ax.set_xlabel('Time (s)', fontsize=11)
-        ax.legend(loc='upper right', fontsize=9)
         ax.grid(False)
 
     def _plot_bout_annotations(self, ax_pleth, ax_event, bouts, t0):
@@ -546,12 +557,22 @@ class PlotManager:
                 y_off = offset_frac
             y_sigh = y[sigh_idx] + y_off
 
-            # Orange star with black outline
+            # Theme-aware sigh markers
+            # Dark mode: gold star with no outline (cleaner look)
+            # Light mode: gold star with black outline (better visibility)
+            is_dark_mode = self.plot_host._current_theme == 'dark'
+            if is_dark_mode:
+                sigh_color = "#FFD700"  # Gold
+                sigh_edge = "#FFD700"   # Same as fill (no visible outline)
+            else:
+                sigh_color = "#FFD700"  # Gold
+                sigh_edge = "black"     # Black outline for light backgrounds
+
             self.plot_host.update_sighs(
                 t_sigh, y_sigh,
                 size=82,  # Reduced from 110 (25% smaller)
-                color="#ff9f1a",   # warm orange fill
-                edge="black",      # black outline
+                color=sigh_color,
+                edge=sigh_edge,
                 filled=True
             )
         else:

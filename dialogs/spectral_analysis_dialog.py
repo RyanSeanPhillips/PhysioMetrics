@@ -5,6 +5,7 @@ This dialog provides comprehensive spectral analysis tools for identifying
 and filtering oscillatory noise contamination in respiratory signals.
 """
 
+import sys
 import numpy as np
 from scipy import signal
 import traceback
@@ -57,7 +58,7 @@ class SpectralAnalysisDialog(QDialog):
             control_layout.addWidget(self.prev_sweep_btn)
 
             self.sweep_label = QLabel(f"Sweep: {getattr(parent_window.state, 'sweep_idx', 0) + 1}")
-            self.sweep_label.setStyleSheet("color: black; font-size: 12pt; font-weight: bold; background-color: white; padding: 2px 8px; border-radius: 3px;")
+            self.sweep_label.setStyleSheet("color: #2a7fff; font-size: 11pt; font-weight: bold; background-color: #2a2a2a; padding: 4px 10px; border-radius: 3px; border: 1px solid #3e3e42;")
             control_layout.addWidget(self.sweep_label)
 
             self.next_sweep_btn = QPushButton("Next Sweep ►")
@@ -127,9 +128,9 @@ class SpectralAnalysisDialog(QDialog):
 
         # Plot area with matplotlib
         # Create figure with dark background
-        self.figure = Figure(figsize=(14, 10), facecolor='#2b2b2b')
+        self.figure = Figure(figsize=(14, 10), facecolor='#1e1e1e')
         self.canvas = FigureCanvasQTAgg(self.figure)
-        self.canvas.setStyleSheet("background-color: #2b2b2b;")
+        self.canvas.setStyleSheet("background-color: #1e1e1e;")
         main_layout.addWidget(self.canvas)
 
         # Buttons at bottom
@@ -144,6 +145,83 @@ class SpectralAnalysisDialog(QDialog):
 
         # Initial plot
         self.update_plots()
+
+        # Apply dark theme and title bar
+        self._apply_dark_theme()
+        self._enable_dark_title_bar()
+
+    def _apply_dark_theme(self):
+        """Apply dark theme styling to match main application."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QWidget {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QLabel {
+                color: #d4d4d4;
+                background-color: transparent;
+            }
+            QCheckBox {
+                color: #d4d4d4;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #2a2a2a;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2a7fff;
+                border-color: #2a7fff;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #2a7fff;
+            }
+            QDoubleSpinBox, QSpinBox {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 3px;
+                padding: 3px;
+            }
+            QDoubleSpinBox:focus, QSpinBox:focus {
+                border: 1px solid #2a7fff;
+            }
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #d4d4d4;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #2a7fff;
+            }
+            QPushButton:pressed {
+                background-color: #2a7fff;
+            }
+        """)
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def update_plots(self):
         """Generate power spectrum and wavelet plots."""
@@ -234,24 +312,24 @@ class SpectralAnalysisDialog(QDialog):
                     ax1.plot(freqs_post[mask_post], psd_post[mask_post], 'lime', linewidth=2, label='Post-Stim', alpha=0.8)
 
             # Add labels with padding to prevent cutoff
-            ax1.set_xlabel('Frequency (Hz)', color='white', fontsize=16, fontweight='bold', labelpad=10)
-            ax1.set_ylabel('Power Spectral Density', color='white', fontsize=16, fontweight='bold', labelpad=10)
-            ax1.set_title('Power Spectrum (Welch Method)', color='white', fontsize=18, fontweight='bold', pad=15)
+            ax1.set_xlabel('Frequency (Hz)', color='#cccccc', fontsize=10, labelpad=8)
+            ax1.set_ylabel('Power Spectral Density', color='#cccccc', fontsize=10, labelpad=8)
+            ax1.set_title('Power Spectrum (Welch Method)', color='#e0e0e0', fontsize=11, pad=10)
             ax1.set_xlim([0, 30])
             ax1.grid(True, alpha=0.3, color='gray', linestyle='--')
-            ax1.set_facecolor('#1a1a1a')
-            ax1.tick_params(colors='white', labelsize=13, width=2, length=6, pad=8)
+            ax1.set_facecolor('#1e1e1e')
+            ax1.tick_params(colors='#cccccc', labelsize=9, width=1, length=4, pad=5)
 
-            # Set white spines with thicker lines
+            # Set gray spines
             for spine in ax1.spines.values():
-                spine.set_edgecolor('white')
-                spine.set_linewidth(2)
+                spine.set_edgecolor('#555555')
+                spine.set_linewidth(1)
 
             # Highlight notch filter region if set
             if self.notch_lower is not None and self.notch_upper is not None:
                 ax1.axvspan(self.notch_lower, self.notch_upper, alpha=0.3, color='red', label='Notch Filter')
 
-            ax1.legend(facecolor='#2b2b2b', edgecolor='white', labelcolor='white', fontsize=11)
+            ax1.legend(facecolor='#2a2a2a', edgecolor='#555555', labelcolor='#cccccc', fontsize=9)
 
         # Wavelet Analysis (Continuous Wavelet Transform)
         try:
@@ -311,30 +389,30 @@ class SpectralAnalysisDialog(QDialog):
                 if self.stim_spans and len(self.stim_spans) > 0:
                     stim_start_rel = self.stim_spans[0][0] - self.t_offset
                     stim_end_rel = self.stim_spans[-1][1] - self.t_offset  # Use last span's end time
-                    ax2.axvline(x=stim_start_rel, color='lime', linewidth=2.5, linestyle='--', alpha=0.9)
-                    ax2.axvline(x=stim_end_rel, color='lime', linewidth=2.5, linestyle='--', alpha=0.9)
-                    ax2.legend(['Stim On/Offset'], facecolor='#2b2b2b', edgecolor='white', labelcolor='white', fontsize=10, loc='upper right')
+                    ax2.axvline(x=stim_start_rel, color='lime', linewidth=2, linestyle='--', alpha=0.9)
+                    ax2.axvline(x=stim_end_rel, color='lime', linewidth=2, linestyle='--', alpha=0.9)
+                    ax2.legend(['Stim On/Offset'], facecolor='#2a2a2a', edgecolor='#555555', labelcolor='#cccccc', fontsize=9, loc='upper right')
 
                 # Add labels with padding to prevent cutoff
-                ax2.set_xlabel('Time (s, rel. to stim onset)', color='white', fontsize=16, fontweight='bold', labelpad=10)
-                ax2.set_ylabel('Frequency (Hz)', color='white', fontsize=16, fontweight='bold', labelpad=10)
-                ax2.set_title('Wavelet Analysis (Scalogram)', color='white', fontsize=18, fontweight='bold', pad=15)
+                ax2.set_xlabel('Time (s, rel. to stim onset)', color='#cccccc', fontsize=10, labelpad=8)
+                ax2.set_ylabel('Frequency (Hz)', color='#cccccc', fontsize=10, labelpad=8)
+                ax2.set_title('Wavelet Analysis (Scalogram)', color='#e0e0e0', fontsize=11, pad=10)
                 ax2.set_ylim([0, 30])
-                ax2.set_facecolor('#1a1a1a')
-                ax2.tick_params(colors='white', labelsize=13, width=2, length=6, pad=8)
+                ax2.set_facecolor('#1e1e1e')
+                ax2.tick_params(colors='#cccccc', labelsize=9, width=1, length=4, pad=5)
 
-                # Set white spines with thicker lines
+                # Set gray spines
                 for spine in ax2.spines.values():
-                    spine.set_edgecolor('white')
-                    spine.set_linewidth(2)
+                    spine.set_edgecolor('#555555')
+                    spine.set_linewidth(1)
 
                 # Add colorbar
                 cbar = self.figure.colorbar(im, ax=ax2, pad=0.02)
-                cbar.set_label('Magnitude', color='white', fontsize=13, fontweight='bold', labelpad=10)
-                cbar.ax.tick_params(colors='white', labelsize=11)
-                # Make colorbar outline white
-                cbar.outline.set_edgecolor('white')
-                cbar.outline.set_linewidth(2)
+                cbar.set_label('Magnitude', color='#cccccc', fontsize=9, labelpad=8)
+                cbar.ax.tick_params(colors='#cccccc', labelsize=8)
+                # Make colorbar outline gray
+                cbar.outline.set_edgecolor('#555555')
+                cbar.outline.set_linewidth(1)
 
                 print("[wavelet] Scalogram plotted successfully")
 
@@ -344,16 +422,16 @@ class SpectralAnalysisDialog(QDialog):
             traceback.print_exc()
 
             ax2.text(0.5, 0.5, error_msg,
-                    ha='center', va='center', transform=ax2.transAxes, color='white', fontsize=12,
-                    bbox=dict(boxstyle='round', facecolor='red', alpha=0.5))
-            ax2.set_facecolor('#1a1a1a')
-            ax2.set_xlabel('Time (s)', color='white', fontsize=14, fontweight='bold')
-            ax2.set_ylabel('Frequency (Hz)', color='white', fontsize=14, fontweight='bold')
-            ax2.set_title('Wavelet Analysis (Error)', color='white', fontsize=16, fontweight='bold')
-            ax2.tick_params(colors='white', labelsize=12, width=2, length=6)
+                    ha='center', va='center', transform=ax2.transAxes, color='#cccccc', fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='#8b0000', alpha=0.7))
+            ax2.set_facecolor('#1e1e1e')
+            ax2.set_xlabel('Time (s)', color='#cccccc', fontsize=10)
+            ax2.set_ylabel('Frequency (Hz)', color='#cccccc', fontsize=10)
+            ax2.set_title('Wavelet Analysis (Error)', color='#e0e0e0', fontsize=11)
+            ax2.tick_params(colors='#cccccc', labelsize=9, width=1, length=4)
             for spine in ax2.spines.values():
-                spine.set_edgecolor('white')
-                spine.set_linewidth(2)
+                spine.set_edgecolor('#555555')
+                spine.set_linewidth(1)
 
         # Use tight_layout with padding to prevent text cutoff
         self.figure.tight_layout(pad=2.0)

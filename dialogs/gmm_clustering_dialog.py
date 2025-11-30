@@ -5,6 +5,7 @@ This dialog provides an interface for Gaussian Mixture Model (GMM) clustering
 of breath patterns to identify eupnea and sniffing behaviors.
 """
 
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
@@ -591,6 +592,23 @@ class GMMClusteringDialog(QDialog):
         if hasattr(main_window.state, 'gmm_sniff_probabilities') and main_window.state.gmm_sniff_probabilities:
             print("[gmm-dialog] Found existing GMM results, auto-loading visualization...")
             self._load_existing_gmm_results()
+
+        # Enable dark title bar on Windows
+        self._enable_dark_title_bar()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _load_existing_gmm_results(self):
         """Load and display existing GMM results that were computed automatically."""

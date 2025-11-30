@@ -8,10 +8,104 @@ Multi-tabbed dialog consolidating:
 - ML Settings
 """
 
-from PyQt6.QtWidgets import QDialog, QVBoxLayout
+import sys
+
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QComboBox
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QStandardItemModel, QStandardItem
 from PyQt6.uic import loadUi
 from pathlib import Path
+
+
+class CheckableComboBox(QComboBox):
+    """A combobox with checkable items for multi-selection."""
+
+    # Custom signal emitted when selection changes
+    from PyQt6.QtCore import pyqtSignal
+    selectionChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._model = QStandardItemModel(self)
+        self.setModel(self._model)
+
+        # Connect item click to toggle handler
+        self.view().pressed.connect(self._handle_item_pressed)
+
+    def _handle_item_pressed(self, index):
+        """Toggle check state when item is clicked."""
+        item = self._model.itemFromIndex(index)
+        if item and item.isCheckable():
+            if item.checkState() == Qt.CheckState.Checked:
+                item.setCheckState(Qt.CheckState.Unchecked)
+            else:
+                item.setCheckState(Qt.CheckState.Checked)
+            self._update_display_text()
+            self.selectionChanged.emit()  # Emit signal when selection changes
+
+    def addCheckableItem(self, text, data=None, checked=True):
+        """Add a checkable item to the combobox."""
+        item = QStandardItem(text)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        item.setData(data, Qt.ItemDataRole.UserRole)
+        self._model.appendRow(item)
+        self._update_display_text()
+
+    def clearItems(self):
+        """Clear all items."""
+        self._model.clear()
+
+    def getCheckedData(self):
+        """Return list of data values for checked items."""
+        checked = []
+        for i in range(self._model.rowCount()):
+            item = self._model.item(i)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                checked.append(item.data(Qt.ItemDataRole.UserRole))
+        return checked
+
+    def getCheckedTexts(self):
+        """Return list of text values for checked items."""
+        checked = []
+        for i in range(self._model.rowCount()):
+            item = self._model.item(i)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                checked.append(item.text())
+        return checked
+
+    def setAllChecked(self, checked=True):
+        """Set all items to checked or unchecked."""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self._model.rowCount()):
+            item = self._model.item(i)
+            if item:
+                item.setCheckState(state)
+        self._update_display_text()
+
+    def _update_display_text(self):
+        """Update the display text to show selection summary."""
+        total = self._model.rowCount()
+        checked = len(self.getCheckedData())
+
+        if checked == 0:
+            self.setCurrentIndex(-1)
+            self.setEditText("None")
+        elif checked == total:
+            self.setCurrentIndex(-1)
+            self.setEditText("All")
+        else:
+            self.setCurrentIndex(-1)
+            self.setEditText(f"{checked} selected")
+
+    def showPopup(self):
+        """Override to update display when popup opens."""
+        super().showPopup()
+
+    def hidePopup(self):
+        """Override to update display when popup closes."""
+        super().hidePopup()
+        self._update_display_text()
 
 
 class AnalysisOptionsDialog(QDialog):
@@ -34,10 +128,25 @@ class AnalysisOptionsDialog(QDialog):
         # Load settings (position, size, and training data path)
         if parent and hasattr(parent, 'settings'):
             self.settings = parent.settings
-            # Restore window position
+            # Restore window position (with validation to ensure on-screen)
             if self.settings.contains("analysis_dialog_pos"):
                 pos = self.settings.value("analysis_dialog_pos")
-                self.move(pos)
+                # Validate position is on a visible screen
+                from PyQt6.QtWidgets import QApplication
+                from PyQt6.QtCore import QPoint
+                screen_geometry = QApplication.primaryScreen().availableGeometry()
+                # Check if position is within any available screen
+                is_visible = False
+                for screen in QApplication.screens():
+                    if screen.availableGeometry().contains(pos):
+                        is_visible = True
+                        break
+                if is_visible:
+                    self.move(pos)
+                else:
+                    # Center on primary screen if saved position is off-screen
+                    center = screen_geometry.center()
+                    self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
             # Restore window size
             if self.settings.contains("analysis_dialog_size"):
                 size = self.settings.value("analysis_dialog_size")
@@ -61,6 +170,23 @@ class AnalysisOptionsDialog(QDialog):
         self._init_outlier_detection_tab()
         self._init_ml_settings_tab()
         print(f"[AnalysisOptions] All tabs initialized")
+
+        # Enable dark title bar on Windows
+        self._enable_dark_title_bar()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def set_active_tab(self, tab_name):
         """
@@ -86,6 +212,14 @@ class AnalysisOptionsDialog(QDialog):
             self.tabWidget.setCurrentIndex(index)
         else:
             print(f"[AnalysisOptionsDialog] Warning: Unknown tab name '{tab_name}'")
+
+    def _sync_outlier_sd_to_main_window(self, text):
+        """Sync outlier SD value from dialog back to main window."""
+        if self.parent_window and hasattr(self.parent_window, 'OutlierSD'):
+            self.parent_window.OutlierSD.setText(text)
+            # Trigger redraw if plot exists
+            if hasattr(self.parent_window, '_on_region_threshold_changed'):
+                self.parent_window._on_region_threshold_changed()
 
     def _on_tab_changed(self, index):
         """Refresh tab content when user switches tabs."""
@@ -214,14 +348,23 @@ class AnalysisOptionsDialog(QDialog):
             except:
                 current_prom = None
 
-            # Create dialog - it will detect peaks but use cached data if available
+            # Create dialog with cached peak data to avoid re-detection
+            # Get cached peaks from main window if available
+            cached_peaks = getattr(self.parent_window, 'all_peaks', None)
+            cached_heights = self.parent_window.all_peak_heights
+
             self.prominence_dialog = ProminenceThresholdDialog(
                 parent=container,  # Set container as parent for proper embedding
                 y_data=y_data,
                 sr_hz=st.sr_hz,
                 current_prom=current_prom,
-                current_min_dist=self.parent_window.peak_min_dist
+                current_min_dist=self.parent_window.peak_min_dist,
+                cached_peaks=cached_peaks,
+                cached_peak_heights=cached_heights
             )
+
+            # Store reference to main window for bidirectional threshold syncing
+            self.prominence_dialog.main_window = self.parent_window
 
             # Hide the dialog's window frame (we just want the content)
             self.prominence_dialog.setWindowFlags(self.prominence_dialog.windowFlags() & ~0x00000001)
@@ -295,29 +438,6 @@ class AnalysisOptionsDialog(QDialog):
             action_group = QGroupBox("Actions")
             action_layout = QVBoxLayout()
             action_layout.setSpacing(10)
-
-            # Apply Threshold button (updates plot threshold line)
-            self.apply_threshold_btn = QPushButton("Apply Threshold to Plot")
-            self.apply_threshold_btn.setMinimumHeight(35)
-            self.apply_threshold_btn.setMaximumWidth(350)  # Match left panel width
-            self.apply_threshold_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2d2d2d;
-                    color: #d4d4d4;
-                    border: 1px solid #3e3e42;
-                    font-weight: bold;
-                    border-radius: 4px;
-                    padding: 8px 12px;
-                }
-                QPushButton:hover {
-                    background-color: #3e3e42;
-                }
-                QPushButton:pressed {
-                    background-color: #505050;
-                }
-            """)
-            self.apply_threshold_btn.clicked.connect(self._apply_threshold_to_plot)
-            action_layout.addWidget(self.apply_threshold_btn)
 
             # Detect Peaks button (runs full peak detection)
             self.detect_peaks_btn = QPushButton("Detect Peaks")
@@ -488,11 +608,20 @@ class AnalysisOptionsDialog(QDialog):
         if self.parent_window and hasattr(self.parent_window, 'outlier_metrics'):
             selected_metrics = self.parent_window.outlier_metrics
 
+        # Get current outlier SD threshold from parent window
+        outlier_sd = 3.0  # Default
+        if self.parent_window and hasattr(self.parent_window, 'OutlierSD'):
+            try:
+                outlier_sd = float(self.parent_window.OutlierSD.text())
+            except (ValueError, AttributeError):
+                outlier_sd = 3.0
+
         # Create the outlier metrics dialog with data
         self.outlier_dialog = OutlierMetricsDialog(
             parent=None,
             available_metrics=list(numeric_metrics.keys()),
-            selected_metrics=selected_metrics
+            selected_metrics=selected_metrics,
+            outlier_sd=outlier_sd
         )
 
         # Hide the dialog's window frame (we just want the content)
@@ -511,6 +640,12 @@ class AnalysisOptionsDialog(QDialog):
                     item = button_layout.itemAt(i)
                     if item and item.widget():
                         item.widget().hide()
+
+        # Connect SD input to sync back to main window
+        if self.parent_window and hasattr(self.outlier_dialog, 'sd_input'):
+            self.outlier_dialog.sd_input.textChanged.connect(
+                lambda text: self._sync_outlier_sd_to_main_window(text)
+            )
 
         # Add it to the container
         layout.addWidget(self.outlier_dialog)
@@ -548,7 +683,11 @@ class AnalysisOptionsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        # === Load Models Section (at top) ===
+        # === Top Row: Loaded ML Models (left) and Training Data Location (right) ===
+        top_row_layout = QHBoxLayout()
+        top_row_layout.setSpacing(10)
+
+        # === Loaded ML Models Section (compact, left side) ===
         load_models_group = QGroupBox("Loaded ML Models")
         load_models_group.setStyleSheet("""
             QGroupBox {
@@ -564,27 +703,24 @@ class AnalysisOptionsDialog(QDialog):
                 padding: 0 5px;
             }
         """)
-        load_models_layout = QHBoxLayout()
+        load_models_layout = QVBoxLayout()
 
         # Model status display
         self.loaded_models_status = QLabel("No models loaded")
         self.loaded_models_status.setStyleSheet("color: #888; font-style: italic;")
         self.loaded_models_status.setWordWrap(True)
-        load_models_layout.addWidget(self.loaded_models_status, 1)
+        load_models_layout.addWidget(self.loaded_models_status)
 
-        # Load Models button
-        btn_load_models = QPushButton("Load Models...")
-        btn_load_models.setMinimumHeight(40)
-        btn_load_models.setMinimumWidth(150)
-        btn_load_models.setStyleSheet("""
+        # Button style for this section
+        load_btn_style = """
             QPushButton {
                 background-color: #094771;
                 color: #ffffff;
                 border: 2px solid #0a5a8a;
-                padding: 8px 16px;
+                padding: 4px 8px;
                 border-radius: 4px;
                 font-weight: bold;
-                font-size: 10pt;
+                font-size: 9pt;
             }
             QPushButton:hover {
                 background-color: #0a5a8a;
@@ -593,18 +729,37 @@ class AnalysisOptionsDialog(QDialog):
             QPushButton:pressed {
                 background-color: #0c6ea3;
             }
-        """)
+            QPushButton:disabled {
+                background-color: #3e3e42;
+                color: #888;
+                border: 2px solid #4e4e52;
+            }
+        """
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+
+        # Load Default Models button
+        self.btn_load_default_models = QPushButton("Load Default")
+        self.btn_load_default_models.setMinimumHeight(28)
+        self.btn_load_default_models.setStyleSheet(load_btn_style)
+        self.btn_load_default_models.clicked.connect(self._load_default_models)
+        self.btn_load_default_models.setToolTip("Load pre-trained default models included with the application")
+        btn_row.addWidget(self.btn_load_default_models)
+
+        # Load Custom Models button
+        btn_load_models = QPushButton("Load Custom...")
+        btn_load_models.setMinimumHeight(28)
+        btn_load_models.setStyleSheet(load_btn_style)
         btn_load_models.clicked.connect(self._load_ml_models)
-        load_models_layout.addWidget(btn_load_models)
+        btn_load_models.setToolTip("Load custom-trained models from a directory")
+        btn_row.addWidget(btn_load_models)
 
+        load_models_layout.addLayout(btn_row)
         load_models_group.setLayout(load_models_layout)
-        layout.addWidget(load_models_group)
+        top_row_layout.addWidget(load_models_group, 1)  # 1/4 width
 
-        # === Top Row: Training Data Location (left) and Model Training (right) ===
-        top_row_layout = QHBoxLayout()
-        top_row_layout.setSpacing(10)
-
-        # === Training Data Path Section (2/3 width) ===
+        # === Training Data Path Section (right side, larger) ===
         path_group = QGroupBox("Training Data Location")
         path_group.setStyleSheet("""
             QGroupBox {
@@ -627,6 +782,14 @@ class AnalysisOptionsDialog(QDialog):
         self.training_data_path_edit = QLineEdit()
         self.training_data_path_edit.setPlaceholderText("Select training data directory...")
         self.training_data_path_edit.setReadOnly(True)
+        self.training_data_path_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                padding: 4px;
+            }
+        """)
 
         btn_browse = QPushButton("Browse...")
         btn_browse.clicked.connect(self._browse_training_data)
@@ -669,6 +832,103 @@ class AnalysisOptionsDialog(QDialog):
         self.file_list_display.setPlaceholderText("Browse to a directory to see available files...")
         path_group_layout.addWidget(self.file_list_display)
 
+        # === Filter Section ===
+        filter_label = QLabel("Filter training files:")
+        filter_label.setStyleSheet("margin-top: 8px; font-weight: bold;")
+        path_group_layout.addWidget(filter_label)
+
+        # Combobox style for dark theme
+        combo_style = """
+            QComboBox {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                padding: 2px 5px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                selection-background-color: #0078d4;
+            }
+        """
+
+        # First row of filters
+        filter_row1 = QHBoxLayout()
+
+        # Quality filter (single select - threshold)
+        filter_row1.addWidget(QLabel("Min Quality:"))
+        self.quality_filter = QComboBox()
+        self.quality_filter.setStyleSheet(combo_style)
+        self.quality_filter.addItem("All", 0)
+        for q in range(1, 11):
+            self.quality_filter.addItem(f"≥ {q}", q)
+        self.quality_filter.setCurrentIndex(0)
+        self.quality_filter.currentIndexChanged.connect(self._apply_filters)
+        self.quality_filter.setMinimumWidth(70)
+        filter_row1.addWidget(self.quality_filter)
+
+        filter_row1.addSpacing(10)
+
+        # State filter (multi-select)
+        filter_row1.addWidget(QLabel("State:"))
+        self.state_filter = CheckableComboBox()
+        self.state_filter.setStyleSheet(combo_style)
+        self.state_filter.setEditable(True)
+        self.state_filter.lineEdit().setReadOnly(True)
+        self.state_filter.setMinimumWidth(90)
+        self.state_filter.selectionChanged.connect(self._apply_filters)
+        filter_row1.addWidget(self.state_filter)
+
+        filter_row1.addSpacing(10)
+
+        # User filter (multi-select) - user_name from metadata
+        filter_row1.addWidget(QLabel("User:"))
+        self.user_filter = CheckableComboBox()
+        self.user_filter.setStyleSheet(combo_style)
+        self.user_filter.setEditable(True)
+        self.user_filter.lineEdit().setReadOnly(True)
+        self.user_filter.setMinimumWidth(90)
+        self.user_filter.selectionChanged.connect(self._apply_filters)
+        filter_row1.addWidget(self.user_filter)
+
+        filter_row1.addSpacing(10)
+
+        # Computer filter (multi-select)
+        filter_row1.addWidget(QLabel("Computer:"))
+        self.computer_filter = CheckableComboBox()
+        self.computer_filter.setStyleSheet(combo_style)
+        self.computer_filter.setEditable(True)
+        self.computer_filter.lineEdit().setReadOnly(True)
+        self.computer_filter.setMinimumWidth(90)
+        self.computer_filter.selectionChanged.connect(self._apply_filters)
+        filter_row1.addWidget(self.computer_filter)
+
+        filter_row1.addSpacing(10)
+
+        # System username filter (multi-select)
+        filter_row1.addWidget(QLabel("Sys User:"))
+        self.sysuser_filter = CheckableComboBox()
+        self.sysuser_filter.setStyleSheet(combo_style)
+        self.sysuser_filter.setEditable(True)
+        self.sysuser_filter.lineEdit().setReadOnly(True)
+        self.sysuser_filter.setMinimumWidth(90)
+        self.sysuser_filter.selectionChanged.connect(self._apply_filters)
+        filter_row1.addWidget(self.sysuser_filter)
+
+        filter_row1.addStretch()
+        path_group_layout.addLayout(filter_row1)
+
+        # Statistics row (below filters)
+        self.filter_count_label = QLabel("")
+        self.filter_count_label.setStyleSheet("color: #4ec9b0; margin-top: 4px;")
+        path_group_layout.addWidget(self.filter_count_label)
+
+        # Initialize metadata storage
+        self._training_file_metadata = []
+
         # Deduplication checkbox
         self.deduplicate_checkbox = QCheckBox("Remove duplicate files (by source filename)")
         self.deduplicate_checkbox.setChecked(True)
@@ -677,7 +937,7 @@ class AnalysisOptionsDialog(QDialog):
         path_group_layout.addWidget(self.deduplicate_checkbox)
 
         path_group.setLayout(path_group_layout)
-        top_row_layout.addWidget(path_group, 2)  # 2/3 width
+        top_row_layout.addWidget(path_group, 3)  # 3/4 width (Training Data is larger)
 
         # Auto-load saved path and scan for files
         if self.last_training_data_dir and Path(self.last_training_data_dir).exists():
@@ -704,18 +964,19 @@ class AnalysisOptionsDialog(QDialog):
         control_layout = QVBoxLayout()
 
         # Retrain All button
-        btn_retrain_all = QPushButton("Train All Models\n(9 total: 3 models × 3 algorithms)")
+        btn_retrain_all = QPushButton("Train All Models")
         btn_retrain_all.clicked.connect(self._retrain_all_models)
-        btn_retrain_all.setMinimumHeight(60)
+        btn_retrain_all.setMinimumHeight(36)
+        btn_retrain_all.setToolTip("Train 9 models: 3 classifiers × 3 algorithms (RF, XGBoost, MLP)")
         btn_retrain_all.setStyleSheet("""
             QPushButton {
                 background-color: #4ec9b0;
                 color: #1e1e1e;
                 border: 2px solid #5fd9c0;
-                padding: 10px 16px;
-                border-radius: 5px;
+                padding: 6px 12px;
+                border-radius: 4px;
                 font-weight: bold;
-                font-size: 11pt;
+                font-size: 10pt;
             }
             QPushButton:hover {
                 background-color: #5fd9c0;
@@ -749,16 +1010,17 @@ class AnalysisOptionsDialog(QDialog):
         self.training_status_label.setStyleSheet("color: #4ec9b0; font-style: italic;")
         control_layout.addWidget(self.training_status_label)
 
-        # Save All Models button (initially hidden)
-        self.save_all_models_btn = QPushButton("Save All Models...")
-        self.save_all_models_btn.setMinimumHeight(40)
-        self.save_all_models_btn.setVisible(False)
+        # Save All Models button (initially disabled until models are trained)
+        self.save_all_models_btn = QPushButton("Save Models...")
+        self.save_all_models_btn.setMinimumHeight(36)
+        self.save_all_models_btn.setEnabled(False)
+        self.save_all_models_btn.setToolTip("Save trained models to a directory")
         self.save_all_models_btn.setStyleSheet("""
             QPushButton {
                 background-color: #094771;
                 color: #ffffff;
                 border: 2px solid #0a5a8a;
-                padding: 8px 12px;
+                padding: 6px 12px;
                 border-radius: 4px;
                 font-weight: bold;
                 font-size: 10pt;
@@ -769,6 +1031,11 @@ class AnalysisOptionsDialog(QDialog):
             }
             QPushButton:pressed {
                 background-color: #0c6ea3;
+            }
+            QPushButton:disabled {
+                background-color: #3e3e42;
+                color: #888;
+                border: 2px solid #4e4e52;
             }
         """)
         self.save_all_models_btn.clicked.connect(self._save_all_models)
@@ -899,6 +1166,54 @@ class AnalysisOptionsDialog(QDialog):
                 # Update status display
                 self._update_loaded_models_status()
                 print(f"[Auto-load] Successfully loaded {len(loaded_models)} models from {models_path}")
+
+                # Reconstruct training results to populate comparison statistics
+                # (same logic as _load_ml_models)
+                import pandas as pd
+                import numpy as np
+                training_results = []
+                for model_key, model_data in loaded_models.items():
+                    metadata = model_data['metadata']
+                    parts = model_key.split('_')
+                    if len(parts) >= 2:
+                        model_name_part = parts[0]
+                        algorithm = '_'.join(parts[1:])
+                        from core.ml_training import TrainingResult
+                        result = TrainingResult(
+                            model=None,
+                            model_type=metadata.get('model_type', algorithm),
+                            model_name=metadata.get('model_name', f'Model {model_name_part[-1]}'),
+                            feature_names=metadata.get('feature_names', []),
+                            feature_importance=pd.DataFrame(),
+                            test_accuracy=metadata.get('test_accuracy', 0),
+                            train_accuracy=metadata.get('train_accuracy', 0),
+                            cv_mean=metadata.get('cv_mean', 0),
+                            cv_std=metadata.get('cv_std', 0),
+                            n_train=metadata.get('n_train', 0),
+                            n_test=metadata.get('n_test', 0),
+                            n_features=metadata.get('n_features', 0),
+                            class_labels=metadata.get('class_labels', []),
+                            precision=metadata.get('precision', {}),
+                            recall=metadata.get('recall', {}),
+                            f1_score=metadata.get('f1_score', {}),
+                            confusion_matrix=metadata.get('confusion_matrix', np.array([])),
+                            feature_importance_plot=metadata.get('feature_importance_plot'),
+                            confusion_matrix_plot=metadata.get('confusion_matrix_plot'),
+                            learning_curve_plot=metadata.get('learning_curve_plot'),
+                            baseline_accuracy=metadata.get('baseline_accuracy'),
+                            accuracy_improvement=metadata.get('accuracy_improvement'),
+                            error_reduction_pct=metadata.get('error_reduction_pct'),
+                            baseline_recall=metadata.get('baseline_recall'),
+                            class_distribution=metadata.get('class_distribution'),
+                            training_time_seconds=metadata.get('training_time_seconds'),
+                            is_converged=metadata.get('is_converged'),
+                            needs_more_data=metadata.get('needs_more_data')
+                        )
+                        training_results.append((model_name_part, algorithm, result))
+
+                if training_results:
+                    self._display_training_results(training_results)
+
                 # Show status message to user
                 if hasattr(self, 'parent_window') and self.parent_window:
                     self.parent_window.statusBar().showMessage(f"✓ Auto-loaded {len(loaded_models)} ML models", 3000)
@@ -913,29 +1228,6 @@ class AnalysisOptionsDialog(QDialog):
 
         except Exception as e:
             print(f"[Auto-load] Error loading models: {e}")
-
-    def _apply_threshold_to_plot(self):
-        """Apply threshold from dialog to update the threshold line on main plot."""
-        if not hasattr(self, 'prominence_dialog') or not self.parent_window:
-            return
-
-        try:
-            values = self.prominence_dialog.get_values()
-            prominence = values['prominence']
-            min_dist = values['min_dist']
-
-            # Update parent window's spinbox (this triggers plot update via valueChanged signal)
-            if hasattr(self.parent_window, 'PeakPromValueSpinBox'):
-                self.parent_window.PeakPromValueSpinBox.setValue(prominence)
-
-            # Update min_dist
-            if hasattr(self.parent_window, 'peak_min_dist'):
-                self.parent_window.peak_min_dist = min_dist
-
-            print(f"[analysis-options] Applied threshold to plot: {prominence:.4f}, min_dist: {min_dist}")
-
-        except Exception as e:
-            print(f"[analysis-options] Error applying threshold: {e}")
 
     def _detect_peaks(self):
         """Apply threshold and trigger peak detection, then refresh GMM tab."""
@@ -1081,7 +1373,7 @@ class AnalysisOptionsDialog(QDialog):
             self._scan_training_files(data_dir)
 
     def _scan_training_files(self, data_dir):
-        """Scan directory for .npz training files and display info."""
+        """Scan directory for .npz training files and display info with metadata."""
         import numpy as np
         from pathlib import Path
 
@@ -1090,6 +1382,8 @@ class AnalysisOptionsDialog(QDialog):
 
         if not npz_files:
             self.file_list_display.setPlainText("No .npz training files found in this directory.")
+            self._training_file_metadata = []
+            self._update_filter_options()
             return
 
         # Load metadata from each file
@@ -1100,25 +1394,231 @@ class AnalysisOptionsDialog(QDialog):
                 source = str(data.get('source_file', 'unknown'))
                 n_peaks = int(data.get('n_all_peaks', 0))
                 n_breaths = int(data.get('n_breaths_only', 0))
+
+                # Extract user metadata
+                quality = int(data.get('quality_score', 0))
+                animal_state = str(data.get('animal_state', ''))
+                user_name = str(data.get('user_name', ''))
+                computer_name = str(data.get('computer_name', ''))
+                system_username = str(data.get('system_username', ''))
+                gas_condition = str(data.get('gas_condition', ''))
+                drug = str(data.get('drug', ''))
+
+                # Extract classification counts from data arrays
+                n_eupnea = 0
+                n_sniffing = 0
+                n_sighs = 0
+                n_manual = 0
+
+                # Count eupnea (is_eupnea == 1, ignoring NaN)
+                if 'all_peaks_is_eupnea' in data:
+                    arr = data['all_peaks_is_eupnea']
+                    n_eupnea = int(np.nansum(arr == 1))
+
+                # Count sniffing (is_sniffing == 1, ignoring NaN)
+                if 'all_peaks_is_sniffing' in data:
+                    arr = data['all_peaks_is_sniffing']
+                    n_sniffing = int(np.nansum(arr == 1))
+
+                # Count sighs (is_sigh == 1, ignoring NaN)
+                if 'all_peaks_is_sigh' in data:
+                    arr = data['all_peaks_is_sigh']
+                    n_sighs = int(np.nansum(arr == 1))
+
+                # Count manual corrections (label_source == 'user')
+                if 'all_peaks_label_source' in data:
+                    arr = data['all_peaks_label_source']
+                    n_manual = int(np.sum(arr == 'user'))
+
                 file_info.append({
                     'filename': npz_file.name,
+                    'path': str(npz_file),
                     'source': source,
                     'n_peaks': n_peaks,
-                    'n_breaths': n_breaths
+                    'n_breaths': n_breaths,
+                    'n_eupnea': n_eupnea,
+                    'n_sniffing': n_sniffing,
+                    'n_sighs': n_sighs,
+                    'n_manual': n_manual,
+                    'quality_score': quality,
+                    'animal_state': animal_state,
+                    'user_name': user_name,
+                    'computer_name': computer_name,
+                    'system_username': system_username,
+                    'gas_condition': gas_condition,
+                    'drug': drug,
+                    'selected': True  # For filtering
                 })
             except Exception as e:
                 print(f"Error reading {npz_file.name}: {e}")
                 continue
 
-        # Display file list
-        display_lines = [f"Found {len(file_info)} training files:\n"]
-        for info in file_info:
+        # Store for filtering
+        self._training_file_metadata = file_info
+
+        # Update filter dropdowns with available options
+        self._update_filter_options()
+
+        # Display file list with metadata
+        self._update_file_list_display()
+
+    def _update_filter_options(self):
+        """Update filter dropdown options based on available metadata."""
+        if not hasattr(self, '_training_file_metadata'):
+            return
+
+        # Collect unique values
+        states = set()
+        users = set()
+        computers = set()
+        sysusers = set()
+
+        for info in self._training_file_metadata:
+            if info.get('animal_state'):
+                states.add(info['animal_state'])
+            if info.get('user_name'):
+                users.add(info['user_name'])
+            if info.get('computer_name'):
+                computers.add(info['computer_name'])
+            if info.get('system_username'):
+                sysusers.add(info['system_username'])
+
+        # Update state filter (checkable multi-select)
+        self.state_filter.clearItems()
+        for state in sorted(states):
+            display = state.capitalize() if state else "(not specified)"
+            self.state_filter.addCheckableItem(display, state, checked=True)
+        self.state_filter._update_display_text()
+
+        # Update user filter (checkable multi-select)
+        self.user_filter.clearItems()
+        for user in sorted(users):
+            self.user_filter.addCheckableItem(user, user, checked=True)
+        self.user_filter._update_display_text()
+
+        # Update computer filter (checkable multi-select)
+        self.computer_filter.clearItems()
+        for computer in sorted(computers):
+            self.computer_filter.addCheckableItem(computer, computer, checked=True)
+        self.computer_filter._update_display_text()
+
+        # Update system username filter (checkable multi-select)
+        self.sysuser_filter.clearItems()
+        for sysuser in sorted(sysusers):
+            self.sysuser_filter.addCheckableItem(sysuser, sysuser, checked=True)
+        self.sysuser_filter._update_display_text()
+
+    def _apply_filters(self):
+        """Apply filters to training file list and update display."""
+        if not hasattr(self, '_training_file_metadata'):
+            return
+
+        # Get filter values
+        min_quality = self.quality_filter.currentData() or 0
+
+        # Get checked values from multi-select filters
+        checked_states = self.state_filter.getCheckedData()
+        checked_users = self.user_filter.getCheckedData()
+        checked_computers = self.computer_filter.getCheckedData()
+        checked_sysusers = self.sysuser_filter.getCheckedData()
+
+        # Update selection based on filters
+        for info in self._training_file_metadata:
+            selected = True
+
+            # Quality filter (threshold)
+            if min_quality > 0 and info.get('quality_score', 0) < min_quality:
+                selected = False
+
+            # State filter (multi-select)
+            file_state = info.get('animal_state', '')
+            if checked_states and file_state and file_state not in checked_states:
+                selected = False
+
+            # User filter (multi-select)
+            file_user = info.get('user_name', '')
+            if checked_users and file_user and file_user not in checked_users:
+                selected = False
+
+            # Computer filter (multi-select)
+            file_computer = info.get('computer_name', '')
+            if checked_computers and file_computer and file_computer not in checked_computers:
+                selected = False
+
+            # System username filter (multi-select)
+            file_sysuser = info.get('system_username', '')
+            if checked_sysusers and file_sysuser and file_sysuser not in checked_sysusers:
+                selected = False
+
+            info['selected'] = selected
+
+        # Update display
+        self._update_file_list_display()
+
+    def _update_file_list_display(self):
+        """Update the file list display with current filter status."""
+        if not hasattr(self, '_training_file_metadata') or not self._training_file_metadata:
+            self.file_list_display.setPlainText("No .npz training files found.")
+            self.filter_count_label.setText("")
+            return
+
+        # Count selected files and totals
+        total = len(self._training_file_metadata)
+        selected_files = [f for f in self._training_file_metadata if f.get('selected', True)]
+        selected = len(selected_files)
+        total_peaks = sum(f['n_peaks'] for f in selected_files)
+        total_breaths = sum(f['n_breaths'] for f in selected_files)
+        total_eupnea = sum(f.get('n_eupnea', 0) for f in selected_files)
+        total_sniffing = sum(f.get('n_sniffing', 0) for f in selected_files)
+        total_sighs = sum(f.get('n_sighs', 0) for f in selected_files)
+        total_manual = sum(f.get('n_manual', 0) for f in selected_files)
+
+        # Build display text
+        display_lines = []
+        for info in self._training_file_metadata:
+            if info.get('selected', True):
+                marker = "✓"
+                style = ""
+            else:
+                marker = "✗"
+                style = " (filtered)"
+
+            # Build metadata string
+            meta_parts = []
+            if info.get('quality_score', 0) > 0:
+                meta_parts.append(f"Q:{info['quality_score']}")
+            if info.get('animal_state'):
+                meta_parts.append(info['animal_state'][:5])
+            if info.get('user_name'):
+                meta_parts.append(info['user_name'][:10])
+
+            meta_str = f" [{', '.join(meta_parts)}]" if meta_parts else ""
+
             display_lines.append(
-                f"  {info['filename'][:60]:<60}  "
-                f"({info['n_peaks']} peaks, {info['n_breaths']} breaths)"
+                f"{marker} {info['filename'][:45]:<45} "
+                f"({info['n_peaks']:4d} pk, {info['n_breaths']:4d} br){meta_str}{style}"
             )
 
         self.file_list_display.setPlainText("\n".join(display_lines))
+
+        # Build comprehensive count label
+        file_str = f"{selected}/{total} files" if selected != total else f"{total} files"
+        count_parts = [
+            f"{total_peaks} peaks",
+            f"{total_breaths} breaths",
+            f"{total_eupnea} eupnea",
+            f"{total_sniffing} sniff",
+            f"{total_sighs} sighs",
+        ]
+        if total_manual > 0:
+            count_parts.append(f"{total_manual} manual edits")
+        self.filter_count_label.setText(f"{file_str} | " + ", ".join(count_parts))
+
+    def _get_filtered_file_paths(self):
+        """Get list of file paths that pass current filters."""
+        if not hasattr(self, '_training_file_metadata'):
+            return []
+        return [info['path'] for info in self._training_file_metadata if info.get('selected', True)]
 
     def _retrain_all_models(self):
         """Train all models (Model 1, 2, and 3) with all 3 algorithm types."""
@@ -1167,25 +1667,34 @@ class AnalysisOptionsDialog(QDialog):
             self.training_status_label.setStyleSheet("color: #4ec9b0; font-style: italic;")
             QApplication.processEvents()
 
+            # Get filtered file paths (if filters are applied)
+            filtered_paths = self._get_filtered_file_paths()
+            if filtered_paths:
+                self.training_status_label.setText(f"Loading {len(filtered_paths)} filtered training files...")
+                QApplication.processEvents()
+
             # Load Model 1 data
             X1, y1, dataset_type1, baseline1, baseline_recall1 = ml_training.load_training_data_from_directory(
                 Path(data_dir),
                 deduplicate=deduplicate,
-                model_number=1
+                model_number=1,
+                file_paths=filtered_paths if filtered_paths else None
             )
 
             # Load Model 2 data
             X2, y2, dataset_type2, baseline2, baseline_recall2 = ml_training.load_training_data_from_directory(
                 Path(data_dir),
                 deduplicate=deduplicate,
-                model_number=2
+                model_number=2,
+                file_paths=filtered_paths if filtered_paths else None
             )
 
             # Load Model 3 data
             X3, y3, dataset_type3, baseline3, baseline_recall3 = ml_training.load_training_data_from_directory(
                 Path(data_dir),
                 deduplicate=deduplicate,
-                model_number=3
+                model_number=3,
+                file_paths=filtered_paths if filtered_paths else None
             )
 
             # ========= Train all models in parallel =========
@@ -1283,8 +1792,8 @@ class AnalysisOptionsDialog(QDialog):
             # Display results
             self._display_training_results(all_results)
 
-            # Show save button
-            self.save_all_models_btn.setVisible(True)
+            # Enable save button
+            self.save_all_models_btn.setEnabled(True)
 
             # Hide progress bar after 2 seconds
             QTimer.singleShot(2000, lambda: self.training_progress.setVisible(False))
@@ -1895,32 +2404,88 @@ class AnalysisOptionsDialog(QDialog):
             except Exception as e:
                 self._show_error_dialog("Save Error", f"Failed to save model:\n\n{str(e)}")
 
-    def _load_ml_models(self):
-        """Load ML models from a directory."""
+    def _load_default_models(self):
+        """Load default pre-trained models included with the application."""
+        from PyQt6.QtWidgets import QMessageBox
+        from pathlib import Path
+        import sys
+
+        # Determine the default models directory
+        # Check several possible locations:
+        # 1. Bundled with executable (_internal/models or models/ next to exe)
+        # 2. Development: models/ in the project root
+        # 3. User's home directory fallback
+
+        possible_paths = []
+
+        # If running as bundled executable
+        if getattr(sys, 'frozen', False):
+            exe_dir = Path(sys.executable).parent
+            possible_paths.append(exe_dir / "_internal" / "models")
+            possible_paths.append(exe_dir / "models")
+        else:
+            # Development mode - check relative to this file
+            app_root = Path(__file__).parent.parent
+            possible_paths.append(app_root / "models")
+            possible_paths.append(app_root / "_internal" / "models")
+
+        # Find the first path that exists and has model files
+        default_models_dir = None
+        for path in possible_paths:
+            if path.exists() and list(path.glob("model*.pkl")):
+                default_models_dir = path
+                break
+
+        if default_models_dir is None:
+            QMessageBox.information(
+                self,
+                "Default Models Not Found",
+                "Default pre-trained models are not yet available.\n\n"
+                "This feature will be enabled in a future release.\n\n"
+                "For now, you can:\n"
+                "• Train your own models using the 'Train All Models' button\n"
+                "• Load previously saved models using 'Load Custom...'"
+            )
+            return
+
+        # Load the models from the default directory
+        self._load_ml_models(directory=str(default_models_dir), is_default=True)
+
+    def _load_ml_models(self, directory=None, is_default=False):
+        """Load ML models from a directory.
+
+        Args:
+            directory: Optional path to models directory. If None, prompts user.
+            is_default: If True, indicates these are default bundled models.
+        """
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         from pathlib import Path
         import core.ml_prediction as ml_prediction
         import pandas as pd
         import numpy as np
 
-        # Ask user to select directory containing models
-        # Use last used directory if available, otherwise suggest default
-        if self.last_models_dir and Path(self.last_models_dir).exists():
-            suggested_dir = self.last_models_dir
+        if directory:
+            # Use provided directory
+            models_path = Path(directory)
         else:
-            suggested_dir = str(Path.home() / "PhysioMetrics_Models")
+            # Ask user to select directory containing models
+            # Use last used directory if available, otherwise suggest default
+            if self.last_models_dir and Path(self.last_models_dir).exists():
+                suggested_dir = self.last_models_dir
+            else:
+                suggested_dir = str(Path.home() / "PhysioMetrics_Models")
 
-        models_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Select Directory Containing ML Models",
-            suggested_dir,
-            QFileDialog.Option.ShowDirsOnly
-        )
+            models_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select Directory Containing ML Models",
+                suggested_dir,
+                QFileDialog.Option.ShowDirsOnly
+            )
 
-        if not models_dir:
-            return
+            if not models_dir:
+                return
 
-        models_path = Path(models_dir)
+            models_path = Path(models_dir)
 
         # Save this directory for next time
         self.last_models_dir = str(models_path)
@@ -2033,10 +2598,11 @@ class AnalysisOptionsDialog(QDialog):
                     self.parent_window._auto_rerun_peak_detection_if_needed()
 
             # Show success message
+            model_type = "default" if is_default else "custom"
             QMessageBox.information(
                 self,
                 "Models Loaded",
-                f"Successfully loaded {len(loaded_models)} model(s):\n\n" +
+                f"Successfully loaded {len(loaded_models)} {model_type} model(s):\n\n" +
                 ml_prediction.get_model_summary(loaded_models) +
                 "\n\nModel statistics, comparison tables, and training plots are now displayed below."
             )
@@ -2302,6 +2868,35 @@ class AnalysisOptionsDialog(QDialog):
         canvas = FigureCanvas(fig)
         canvas.setStyleSheet("background-color: #1e1e1e;")
         toolbar = NavigationToolbar(canvas, dialog)
+        toolbar.setStyleSheet("""
+            QToolBar {
+                background: #2d2d2d;
+                border: 1px solid #3e3e42;
+                padding: 2px;
+                spacing: 2px;
+            }
+            QToolButton {
+                background: #434b5d; color: #eef2f8;
+                border: 1px solid #5a6580; border-radius: 4px;
+                padding: 4px 6px; margin: 1px;
+            }
+            QToolButton:hover {
+                background: #515c72;
+                border-color: #6a7694;
+            }
+            QToolButton:pressed {
+                background: #5f6d88;
+                border-color: #7886a6;
+            }
+            QToolButton:checked {
+                background: #4A90E2;
+                color: white;
+                border-color: #357ABD;
+            }
+            QToolButton:disabled {
+                background: #353b4a; border-color: #444d60; color: #8691a8;
+            }
+        """)
 
         # Add widgets to layout
         layout.addWidget(toolbar)

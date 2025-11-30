@@ -17,21 +17,6 @@ except Exception:
     butter = filtfilt = None
 
 
-# ========== NUMBA OPTIMIZATION (10-50× SPEEDUP) ==========
-# Try to use Numba-optimized version for massive performance improvement
-_USE_NUMBA_VERSION = False
-try:
-    from core.peaks_numba import compute_breath_events as compute_breath_events_numba
-    from core.peaks_numba import HAS_NUMBA, USE_NUMBA, warmup_numba
-
-    if HAS_NUMBA and USE_NUMBA:
-        _USE_NUMBA_VERSION = True
-        print("[Peaks] Using Numba-optimized version (10-50× faster)")
-        print("[Peaks] Note: First call includes ~0.5-2s compilation (cached after)")
-except (ImportError, Exception) as e:
-    _USE_NUMBA_VERSION = False
-    print(f"[Peaks] Using Python version (Numba not available: {e})")
-
 def detect_peaks(y: np.ndarray, sr_hz: float,
                  thresh: float = None,
                  prominence: float = None,
@@ -901,12 +886,7 @@ def detect_peaks_and_breaths(
         direction=direction,
     )
 
-    # Use Numba-optimized version if available (1.2× speedup)
-    if _USE_NUMBA_VERSION:
-        breaths = compute_breath_events_numba(y, pks, sr_hz=sr_hz, exclude_sec=exclude_sec)
-    else:
-        breaths = compute_breath_events(y, pks, sr_hz=sr_hz, exclude_sec=exclude_sec)
-
+    breaths = compute_breath_events(y, pks, sr_hz=sr_hz, exclude_sec=exclude_sec)
     return pks, breaths
 
 

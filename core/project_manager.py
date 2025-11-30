@@ -3,13 +3,53 @@ Project Manager - Save/load PhysioMetrics project files.
 
 Project files are saved in the data directory itself for portability.
 Recent projects are tracked in AppData for quick access.
+
+Experiment Schema (v2):
+    experiment = {
+        'id': str,                    # Unique identifier (UUID)
+        'name': str,                  # Display name
+        'condition': str,             # Experimental condition
+        'notes': str,                 # Free-form notes
+
+        # Analysis metadata (pre-fills SaveMetaDialog)
+        'metadata': {
+            'strain': str,            # Mouse strain (e.g., "VgatCre")
+            'virus': str,             # Virus (e.g., "ConFoff-ChR2")
+            'location': str,          # Recording location (e.g., "preBotC")
+            'stim_type': str,         # Stimulation parameters (e.g., "30Hz10s15ms")
+            'power': str,             # Laser power (e.g., "10mW")
+            'sex': str,               # Animal sex (M/F/Unknown)
+            'experiment_type': str,   # Export strategy (30hz_stim/hargreaves/licking)
+        },
+
+        # Analysis tasks (one per file+channel+animal combination)
+        'tasks': [
+            {
+                'id': str,            # Unique task ID
+                'file_path': str,     # Relative path to ABF file
+                'channel': str,       # Channel to analyze (e.g., "AD0")
+                'animal_id': str,     # Animal identifier
+                'status': str,        # pending/in_progress/completed/skipped
+                'output_folder': str, # Where exports were saved (if completed)
+                'last_analyzed': str, # ISO timestamp
+            }
+        ],
+
+        # Associated note files
+        'note_files': [str],          # Paths to Excel/TXT/Word files with notes
+    }
 """
 
 import json
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 import os
+
+
+# Project file format version
+PROJECT_FORMAT_VERSION = 2
 
 
 class ProjectManager:
@@ -54,6 +94,99 @@ class ProjectManager:
         except Exception as e:
             print(f"[project-manager] Error saving config: {e}")
 
+    @staticmethod
+    def create_experiment(name: str = "", condition: str = "", notes: str = "",
+                          metadata: Dict = None) -> Dict:
+        """
+        Create a new experiment with default structure.
+
+        Args:
+            name: Experiment display name
+            condition: Experimental condition description
+            notes: Free-form notes
+            metadata: Analysis metadata dict (strain, virus, location, etc.)
+
+        Returns:
+            Experiment dict with all required fields
+        """
+        default_metadata = {
+            'strain': '',
+            'virus': '',
+            'location': '',
+            'stim_type': '',
+            'power': '',
+            'sex': '',
+            'experiment_type': '30hz_stim',  # Default export strategy
+        }
+        if metadata:
+            default_metadata.update(metadata)
+
+        return {
+            'id': str(uuid.uuid4()),
+            'name': name,
+            'condition': condition,
+            'notes': notes,
+            'metadata': default_metadata,
+            'tasks': [],
+            'note_files': [],
+        }
+
+    @staticmethod
+    def create_analysis_task(file_path: str, channel: str = "", animal_id: str = "") -> Dict:
+        """
+        Create a new analysis task for a file.
+
+        Args:
+            file_path: Path to ABF file (will be stored as relative path)
+            channel: Channel to analyze (e.g., "AD0")
+            animal_id: Animal identifier
+
+        Returns:
+            Task dict with pending status
+        """
+        return {
+            'id': str(uuid.uuid4()),
+            'file_path': file_path,
+            'channel': channel,
+            'animal_id': animal_id,
+            'status': 'pending',
+            'output_folder': '',
+            'last_analyzed': '',
+        }
+
+    @staticmethod
+    def migrate_experiment_v1_to_v2(old_experiment: Dict) -> Dict:
+        """
+        Migrate an old experiment format (v1) to the new format (v2).
+
+        V1 experiments only had: name (str), condition (str), notes (str), files (list of paths)
+        V2 adds: id, metadata, tasks, note_files
+        """
+        # Create new experiment with default metadata
+        new_exp = ProjectManager.create_experiment(
+            name=old_experiment.get('name', ''),
+            condition=old_experiment.get('condition', ''),
+            notes=old_experiment.get('notes', ''),
+        )
+
+        # Convert old file list to tasks
+        old_files = old_experiment.get('files', [])
+        for file_path in old_files:
+            if isinstance(file_path, str):
+                task = ProjectManager.create_analysis_task(file_path)
+                new_exp['tasks'].append(task)
+            elif isinstance(file_path, dict) and 'file_path' in file_path:
+                # Already partial dict format
+                task = ProjectManager.create_analysis_task(
+                    file_path=str(file_path.get('file_path', '')),
+                    channel=file_path.get('channel', ''),
+                    animal_id=file_path.get('animal_id', ''),
+                )
+                task['status'] = file_path.get('status', 'pending')
+                new_exp['tasks'].append(task)
+
+        return new_exp
+
     def save_project(self, project_name: str, data_directory: Path,
                      files_data: List[Dict], experiments: List[Dict] = None) -> Path:
         """
@@ -90,15 +223,35 @@ class ProjectManager:
                     file_data_copy['file_path'] = str(abs_path)
             files_relative.append(file_data_copy)
 
+        # Convert experiment task file paths to relative
+        experiments_relative = []
+        for exp in experiments:
+            exp_copy = exp.copy()
+            if 'tasks' in exp_copy:
+                tasks_relative = []
+                for task in exp_copy['tasks']:
+                    task_copy = task.copy()
+                    if 'file_path' in task_copy and task_copy['file_path']:
+                        abs_path = Path(task_copy['file_path'])
+                        try:
+                            rel_path = abs_path.relative_to(data_directory)
+                            task_copy['file_path'] = str(rel_path)
+                        except ValueError:
+                            task_copy['file_path'] = str(abs_path)
+                    tasks_relative.append(task_copy)
+                exp_copy['tasks'] = tasks_relative
+            experiments_relative.append(exp_copy)
+
         # Create project data structure
         project_data = {
+            "version": PROJECT_FORMAT_VERSION,
             "project_name": project_name,
             "data_directory": ".",  # Relative to project file location
             "created": datetime.now().isoformat(),
             "last_modified": datetime.now().isoformat(),
             "file_count": len(files_data),
             "files": files_relative,
-            "experiments": experiments
+            "experiments": experiments_relative
         }
 
         # Save to JSON
@@ -147,6 +300,11 @@ class ProjectManager:
         project_dir = project_path.parent
         data_directory = project_dir  # Since we save "." in the project file
 
+        # Check version and migrate if necessary
+        file_version = project_data.get('version', 1)
+        if file_version < PROJECT_FORMAT_VERSION:
+            print(f"[project-manager] Migrating project from v{file_version} to v{PROJECT_FORMAT_VERSION}")
+
         # Convert relative paths back to absolute
         files_absolute = []
         for file_data in project_data.get('files', []):
@@ -161,16 +319,37 @@ class ProjectManager:
                     file_data_copy['file_path'] = Path(file_data_copy['file_path'])
             files_absolute.append(file_data_copy)
 
+        # Process experiments - migrate v1 to v2 if needed and convert paths
+        experiments = project_data.get('experiments', [])
+        experiments_processed = []
+        for exp in experiments:
+            # Migrate old format if needed
+            if file_version < 2 or 'id' not in exp:
+                exp = self.migrate_experiment_v1_to_v2(exp)
+
+            # Convert task file paths to absolute
+            if 'tasks' in exp:
+                for task in exp['tasks']:
+                    if 'file_path' in task and task['file_path']:
+                        rel_path = Path(task['file_path'])
+                        if not rel_path.is_absolute():
+                            abs_path = (data_directory / rel_path).resolve()
+                            task['file_path'] = str(abs_path)
+
+            experiments_processed.append(exp)
+
         # Update last_modified
+        project_data['version'] = PROJECT_FORMAT_VERSION
         project_data['last_modified'] = datetime.now().isoformat()
         project_data['data_directory'] = data_directory
         project_data['files'] = files_absolute
+        project_data['experiments'] = experiments_processed
 
         # Update recent projects
         self._add_to_recent_projects(project_data['project_name'], project_path)
 
         print(f"[project-manager] Loaded project: {project_data['project_name']}")
-        print(f"[project-manager] Files: {len(files_absolute)}")
+        print(f"[project-manager] Files: {len(files_absolute)}, Experiments: {len(experiments_processed)}")
 
         return project_data
 

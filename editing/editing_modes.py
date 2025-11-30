@@ -74,19 +74,15 @@ class EditingModes:
         """Connect all editing mode button signals."""
         # Set buttons as checkable
         self.window.addPeaksButton.setCheckable(True)
-        self.window.deletePeaksButton.setCheckable(True)
         if hasattr(self.window, 'MergeBreathsButton'):
             self.window.MergeBreathsButton.setCheckable(True)
-        self.window.addSighButton.setCheckable(True)
         self.window.movePointButton.setCheckable(True)
         self.window.markSniffButton.setCheckable(True)
 
         # Connect signals
         self.window.addPeaksButton.toggled.connect(self.on_add_peaks_toggled)
-        self.window.deletePeaksButton.toggled.connect(self.on_delete_peaks_toggled)
         if hasattr(self.window, 'MergeBreathsButton'):
             self.window.MergeBreathsButton.toggled.connect(self.on_merge_peaks_toggled)
-        self.window.addSighButton.toggled.connect(self.on_add_sigh_toggled)
         self.window.movePointButton.toggled.connect(self.on_move_point_toggled)
         self.window.markSniffButton.toggled.connect(self.on_mark_sniff_toggled)
 
@@ -285,7 +281,7 @@ class EditingModes:
     # ========== Turn Off All Edit Modes ==========
 
     def turn_off_all_edit_modes(self):
-        """Turn off all edit modes (add/delete peaks, add sigh, move point, mark sniff)."""
+        """Turn off all edit modes (add peaks, move point, mark sniff)."""
         # Turn off Add Peaks mode
         if getattr(self, "_add_peaks_mode", False):
             self._add_peaks_mode = False
@@ -294,21 +290,12 @@ class EditingModes:
             self.window.addPeaksButton.blockSignals(False)
             self.window.addPeaksButton.setText("Add Peaks")
 
-        # Turn off Delete Peaks mode
+        # Note: Delete Peaks and Add Sigh modes are now integrated into Add Peaks button
+        # Reset their internal state flags if they exist
         if getattr(self, "_delete_peaks_mode", False):
             self._delete_peaks_mode = False
-            self.window.deletePeaksButton.blockSignals(True)
-            self.window.deletePeaksButton.setChecked(False)
-            self.window.deletePeaksButton.blockSignals(False)
-            self.window.deletePeaksButton.setText("Delete Peaks")
-
-        # Turn off Add Sigh mode
         if getattr(self, "_add_sigh_mode", False):
             self._add_sigh_mode = False
-            self.window.addSighButton.blockSignals(True)
-            self.window.addSighButton.setChecked(False)
-            self.window.addSighButton.blockSignals(False)
-            self.window.addSighButton.setText("ADD/DEL Sigh")
 
         # Turn off Move Point mode
         if getattr(self, "_move_point_mode", False):
@@ -365,18 +352,10 @@ class EditingModes:
             # turn OFF delete mode
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
-                self.window.deletePeaksButton.blockSignals(True)
-                self.window.deletePeaksButton.setChecked(False)
-                self.window.deletePeaksButton.blockSignals(False)
-                self.window.deletePeaksButton.setText("Delete Peaks")
 
             # turn OFF sigh mode + reset its label
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
-                self.window.addSighButton.blockSignals(True)
-                self.window.addSighButton.setChecked(False)
-                self.window.addSighButton.blockSignals(False)
-                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
@@ -403,14 +382,20 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            self.window.addPeaksButton.setText("Toggle Breath (ON) [Right-click=Sigh]")
+            self.window.addPeaksButton.setText("Toggle Breath (ON)")
             self.window.plot_host.set_click_callback(self._on_plot_click_add_peak)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            # Show instructions in status bar
+            msg = "TOGGLE BREATH: Click to toggle breath/noise | Right-click or Shift+click to toggle sigh"
+            self.window._log_status_message(msg, 0)
+            self.window._persistent_status_message = msg
         else:
             self.window.addPeaksButton.setText("Toggle Breath")
             if not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self.window.statusBar().clearMessage()
+                self.window._persistent_status_message = None
 
     def _compute_single_breath_events(self, y, peak_idx, prev_peak_idx, next_peak_idx, sr_hz):
         """
@@ -638,10 +623,6 @@ class EditingModes:
             # turn OFF sigh mode + reset its label
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
-                self.window.addSighButton.blockSignals(True)
-                self.window.addSighButton.setChecked(False)
-                self.window.addSighButton.blockSignals(False)
-                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
@@ -668,14 +649,18 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            self.window.deletePeaksButton.setText("Delete Peaks (ON) [Shift=Add, Ctrl=Sigh]")
             self.window.plot_host.set_click_callback(self._on_plot_click_delete_peak)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            # Show instructions in status bar
+            msg = "DELETE PEAK: Click to delete nearest peak | Shift+click to add peak | Ctrl+click to toggle sigh"
+            self.window._log_status_message(msg, 0)
+            self.window._persistent_status_message = msg
         else:
-            self.window.deletePeaksButton.setText("Delete Peaks")
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self.window.statusBar().clearMessage()
+                self.window._persistent_status_message = None
 
     def _on_plot_click_delete_peak(self, xdata, ydata, event, _force_mode=None):
         """Handle plot click to delete a peak."""
@@ -838,10 +823,6 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
-                self.window.deletePeaksButton.blockSignals(True)
-                self.window.deletePeaksButton.setChecked(False)
-                self.window.deletePeaksButton.blockSignals(False)
-                self.window.deletePeaksButton.setText("Delete Peaks")
 
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
@@ -868,15 +849,19 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            self.window.addSighButton.setText("Add Sigh (ON)")
             self.window.plot_host.set_click_callback(self._on_plot_click_add_sigh)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            # Show instructions in status bar
+            msg = "TOGGLE SIGH: Click on a breath peak to mark/unmark as sigh"
+            self.window._log_status_message(msg, 0)
+            self.window._persistent_status_message = msg
         else:
-            self.window.addSighButton.setText("Add Sigh")
             # only clear if no other edit mode is active
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self.window.statusBar().clearMessage()
+                self.window._persistent_status_message = None
 
     def _on_plot_click_add_sigh(self, xdata, ydata, event, _force_mode=None):
         """Handle plot click to add or remove a sigh marker."""
@@ -938,11 +923,18 @@ class EditingModes:
                     else:
                         all_peaks['sigh_class'][peak_mask] = 1  # Add sigh label
 
-                    # Also update sigh_manual_ro to preserve this manual annotation
-                    if 'sigh_manual_ro' in all_peaks:
+                    # Only update sigh_manual_ro if we're in Manual mode
+                    # This prevents ML predictions from being saved as "manual" edits
+                    if st.active_sigh_classifier == 'manual':
+                        if 'sigh_manual_ro' not in all_peaks:
+                            # Initialize empty sigh_manual_ro (only manual edits will be saved)
+                            all_peaks['sigh_manual_ro'] = np.zeros(len(all_peaks['indices']), dtype=np.int8)
+                            if 'labels' in all_peaks:
+                                all_peaks['sigh_manual_ro'][all_peaks['labels'] == 0] = -1
                         all_peaks['sigh_manual_ro'][peak_mask] = all_peaks['sigh_class'][peak_mask]
-
-                    print(f"[sigh] Updated sigh_class and sigh_manual_ro for peak {i_nearest_peak}")
+                        print(f"[sigh] Updated sigh_class and sigh_manual_ro for peak {i_nearest_peak}")
+                    else:
+                        print(f"[sigh] Updated sigh_class for peak {i_nearest_peak} (ML mode, sigh_manual_ro unchanged)")
 
         # Redraw to see star(s)
         self.window.redraw_main_plot()
@@ -967,17 +959,9 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
-                self.window.deletePeaksButton.blockSignals(True)
-                self.window.deletePeaksButton.setChecked(False)
-                self.window.deletePeaksButton.blockSignals(False)
-                self.window.deletePeaksButton.setText("Delete Peaks")
 
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
-                self.window.addSighButton.blockSignals(True)
-                self.window.addSighButton.setChecked(False)
-                self.window.addSighButton.blockSignals(False)
-                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -996,9 +980,13 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            self.window.movePointButton.setText("Move Point (ON) [Shift=Snap]")
+            self.window.movePointButton.setText("Move Point (ON)")
             self.window.plot_host.set_click_callback(self._on_plot_click_move_point)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            # Show instructions in status bar
+            msg = "MOVE POINT: Click to select point | Arrow keys to move | Shift+Arrow for fine control | Enter to confirm"
+            self.window._log_status_message(msg, 0)
+            self.window._persistent_status_message = msg
 
             # Connect matplotlib events
             self._key_press_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
@@ -1040,6 +1028,8 @@ class EditingModes:
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self.window.statusBar().clearMessage()
+                self.window._persistent_status_message = None
 
     def _on_plot_click_move_point(self, xdata, ydata, event):
         """Select a point (peak/onset/offset/exp) to move."""
@@ -1447,17 +1437,9 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
-                self.window.deletePeaksButton.blockSignals(True)
-                self.window.deletePeaksButton.setChecked(False)
-                self.window.deletePeaksButton.blockSignals(False)
-                self.window.deletePeaksButton.setText("Delete Peaks")
 
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
-                self.window.addSighButton.blockSignals(True)
-                self.window.addSighButton.setChecked(False)
-                self.window.addSighButton.blockSignals(False)
-                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
@@ -1475,9 +1457,13 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            self.window.markSniffButton.setText("Mark Sniff (ON) [Shift=Delete]")
+            self.window.markSniffButton.setText("Mark Sniff (ON)")
             self.window.plot_host.set_click_callback(self._on_plot_click_mark_sniff)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            # Show instructions in status bar
+            msg = "MARK SNIFF REGION: Click-drag to create region | Drag edges to adjust | Shift+click to delete region"
+            self.window._log_status_message(msg, 0)
+            self.window._persistent_status_message = msg
 
             # Connect matplotlib events for drag functionality
             self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_sniff_drag)
@@ -1506,6 +1492,8 @@ class EditingModes:
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False) and not getattr(self, "_move_point_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self.window.statusBar().clearMessage()
+                self.window._persistent_status_message = None
 
     def _on_plot_click_mark_sniff(self, xdata, ydata, event):
         """Start marking a sniffing region (click-and-drag) or grab an edge to adjust.
@@ -1838,17 +1826,9 @@ class EditingModes:
 
         if getattr(self, "_delete_peaks_mode", False):
             self._delete_peaks_mode = False
-            self.window.deletePeaksButton.blockSignals(True)
-            self.window.deletePeaksButton.setChecked(False)
-            self.window.deletePeaksButton.blockSignals(False)
-            self.window.deletePeaksButton.setText("Delete Peaks")
 
         if getattr(self, "_add_sigh_mode", False):
             self._add_sigh_mode = False
-            self.window.addSighButton.blockSignals(True)
-            self.window.addSighButton.setChecked(False)
-            self.window.addSighButton.blockSignals(False)
-            self.window.addSighButton.setText("ADD/DEL Sigh")
 
         if getattr(self, "_move_point_mode", False):
             self._move_point_mode = False
@@ -2391,17 +2371,9 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
-                self.window.deletePeaksButton.blockSignals(True)
-                self.window.deletePeaksButton.setChecked(False)
-                self.window.deletePeaksButton.blockSignals(False)
-                self.window.deletePeaksButton.setText("Delete Peaks")
 
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
-                self.window.addSighButton.blockSignals(True)
-                self.window.addSighButton.setChecked(False)
-                self.window.addSighButton.blockSignals(False)
-                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False

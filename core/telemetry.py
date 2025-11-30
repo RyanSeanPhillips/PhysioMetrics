@@ -1,9 +1,7 @@
 """
 Anonymous usage tracking and telemetry for PhysioMetrics.
 
-Uses dual system:
-- Google Analytics 4: Usage statistics (unlimited events)
-- Sentry: Crash reports with stack traces (limited to 5k/month)
+Uses Google Analytics 4 for usage statistics (unlimited events).
 
 No personal information, file names, or experimental data is collected.
 """
@@ -18,8 +16,7 @@ from pathlib import Path
 from core.config import (
     get_config_dir,
     get_user_id,
-    is_telemetry_enabled,
-    is_crash_reports_enabled
+    is_telemetry_enabled
 )
 from version_info import VERSION_STRING
 
@@ -34,16 +31,16 @@ from version_info import VERSION_STRING
 GA4_MEASUREMENT_ID = "G-38M0HTXEQ2"
 GA4_API_SECRET = "2gmx-luNQFqTNDdZyASmkA"
 
-# Sentry DSN (for crash reports)
-# Get from: https://sentry.io/settings/projects/your-project/keys/
-SENTRY_DSN = "https://3a2829e5a500579ba0f205028b68645c@o4510270639898624.ingest.us.sentry.io/4510270680596480"
-
 
 # ============================================================================
 # Global telemetry state
 # ============================================================================
 
 _telemetry_initialized = False
+_geo_data = None  # Cached geolocation data (fetched once per session)
+_geo_fetch_attempted = False  # Whether we've tried to fetch geo data
+_user_ip = None  # Cached public IP address (for GA4 geo lookup)
+
 _session_data = {
     'files_analyzed': 0,
     'file_types': {'abf': 0, 'smrx': 0, 'edf': 0},
@@ -83,13 +80,14 @@ def init_telemetry():
         return
 
     try:
-        # Initialize Sentry (for crash reports)
-        if is_crash_reports_enabled():
-            _init_sentry()
-
         # Reset session data
         _session_data['session_start'] = datetime.now().isoformat()
         _telemetry_initialized = True
+
+        # Fetch geolocation in background (for GA4 geographic reports)
+        # This runs async so it doesn't delay app startup
+        geo_thread = threading.Thread(target=_fetch_geolocation, daemon=True)
+        geo_thread.start()
 
         # Sync any cached events from previous sessions (when network was down)
         sync_cached_events()
@@ -104,7 +102,7 @@ def init_telemetry():
         # Note: user_engagement events are sent by the heartbeat timer (every 45s)
         # No need to send one here during initialization
 
-        print("Telemetry: Initialized (GA4 + Sentry)")
+        print("Telemetry: Initialized (GA4 with geolocation)")
 
     except Exception as e:
         print(f"Warning: Could not initialize telemetry: {e}")
@@ -141,55 +139,97 @@ def _update_engagement_time():
     return elapsed_ms
 
 
-def _init_sentry():
-    """Initialize Sentry SDK for crash reports (optional)."""
+# ============================================================================
+# IP Geolocation (for GA4 geographic reports)
+# ============================================================================
+
+def _fetch_geolocation():
+    """
+    Fetch user's approximate geographic location and public IP address.
+
+    Uses ip-api.com (free, no API key required, 45 req/min limit).
+    Only fetches once per session and caches the result.
+
+    Returns:
+        dict: Geographic data with keys: country, country_code, region, city, lat, lon
+              Returns None if fetch fails or already attempted.
+
+    Privacy note: Only country/region-level data is sent to GA4, not precise coordinates.
+    The IP is used only to enable GA4's built-in geographic reports.
+    """
+    global _geo_data, _geo_fetch_attempted, _user_ip
+
+    # Return cached data if already fetched
+    if _geo_data is not None:
+        return _geo_data
+
+    # Don't retry if we already tried and failed
+    if _geo_fetch_attempted:
+        return None
+
+    _geo_fetch_attempted = True
+
     try:
-        import sentry_sdk
+        import requests
 
-        if SENTRY_DSN:
-            sentry_sdk.init(
-                dsn=SENTRY_DSN,
-                traces_sample_rate=0.0,  # No performance tracing (saves quota)
-                send_default_pii=False,  # Never send personal info
-                before_send=_sanitize_sentry_event,
-            )
+        # ip-api.com - free, no API key, returns JSON with geo data
+        # Include 'query' field to get the public IP address
+        response = requests.get(
+            'http://ip-api.com/json/?fields=status,query,country,countryCode,regionName,city,lat,lon',
+            timeout=3  # Short timeout - don't delay app startup
+        )
 
-            # Set anonymous user ID
-            sentry_sdk.set_user({"id": get_user_id()})
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('status') == 'success':
+                # Cache the public IP for GA4 requests
+                _user_ip = data.get('query')
 
-            # Set app context
-            sentry_sdk.set_context("app", {
-                "version": VERSION_STRING,
-                "platform": sys.platform,
-                "python_version": platform.python_version(),
-            })
-
-            print("Telemetry: Sentry initialized for crash reports")
+                _geo_data = {
+                    'country': data.get('country', ''),
+                    'country_code': data.get('countryCode', ''),
+                    'region': data.get('regionName', ''),
+                    'city': data.get('city', ''),
+                    'lat': data.get('lat'),
+                    'lon': data.get('lon')
+                }
+                print(f"Telemetry: Geolocation detected - {_geo_data['city']}, {_geo_data['country']} (IP: {_user_ip})")
+                return _geo_data
 
     except ImportError:
-        print("Telemetry: Sentry not installed (crash reports disabled)")
+        print("Telemetry: 'requests' module not available for geolocation")
     except Exception as e:
-        print(f"Warning: Sentry initialization failed: {e}")
+        print(f"Telemetry: Could not fetch geolocation: {e}")
+
+    return None
 
 
-def _sanitize_sentry_event(event, hint):
+def _get_geo_params():
     """
-    Sanitize event before sending to Sentry.
+    Get geographic parameters to include in GA4 events.
 
-    Remove any file paths, personal info, or experimental data.
+    Returns:
+        dict: Parameters for GA4 events (empty dict if geo unavailable)
     """
-    # Remove file paths from stack traces
-    if 'exception' in event:
-        for exc in event['exception'].get('values', []):
-            if 'stacktrace' in exc:
-                for frame in exc['stacktrace'].get('frames', []):
-                    # Keep only filename, not full path
-                    if 'abs_path' in frame:
-                        frame['abs_path'] = Path(frame['abs_path']).name
-                    if 'filename' in frame:
-                        frame['filename'] = Path(frame['filename']).name
+    geo = _fetch_geolocation()
 
-    return event
+    if geo is None:
+        return {}
+
+    # Return country/region level data for GA4
+    # These are custom parameters that will show up in GA4 reports
+    params = {}
+
+    if geo.get('country'):
+        params['geo_country'] = geo['country']
+    if geo.get('country_code'):
+        params['geo_country_code'] = geo['country_code']
+    if geo.get('region'):
+        params['geo_region'] = geo['region']
+    if geo.get('city'):
+        params['geo_city'] = geo['city']
+
+    return params
 
 
 # ============================================================================
@@ -247,13 +287,24 @@ def _send_to_ga4_blocking(event_name, params):
             }]
         }
 
+        # Build headers - include user IP for GA4 geographic reports
+        headers = {
+            'Content-Type': 'application/json'
+        }
+
+        # Add X-Forwarded-For header with user's public IP
+        # This tells GA4 where the request originated for geo lookup
+        if _user_ip:
+            headers['X-Forwarded-For'] = _user_ip
+
         # Send to GA4 (blocking, but in background thread)
-        response = requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json=payload, headers=headers, timeout=5)
         response.raise_for_status()
 
         # Log success (helps with debugging)
         if response.status_code in (200, 204):
-            print(f"Telemetry: Sent '{event_name}' to GA4 (status {response.status_code})")
+            ip_info = f" (IP: {_user_ip})" if _user_ip else ""
+            print(f"Telemetry: Sent '{event_name}' to GA4 (status {response.status_code}){ip_info}")
 
     except ImportError:
         # requests not available - log locally
@@ -382,6 +433,10 @@ def log_event(event_name, params=None):
         params['app_version'] = VERSION_STRING  # Changed from 'version' for clarity
         params['platform'] = sys.platform
         params['python_version'] = platform.python_version()
+
+        # Add geographic data (for GA4 map visualization)
+        geo_params = _get_geo_params()
+        params.update(geo_params)
 
         # Send to Google Analytics
         _send_to_google_analytics(event_name, params)
@@ -793,18 +848,6 @@ def log_crash(error_message, **extra_params):
 
     log_event('crash', params)
 
-    # Also try to send to Sentry if enabled
-    if is_crash_reports_enabled():
-        try:
-            import sentry_sdk
-            sentry_sdk.capture_message(
-                f"App crash: {error_message}",
-                level="error",
-                contexts={"crash_context": params}
-            )
-        except:
-            pass  # Sentry might not be working
-
 
 def log_warning(warning_message, **extra_params):
     """
@@ -907,48 +950,30 @@ def log_keyboard_shortcut(shortcut_name, **params):
     log_event('keyboard_shortcut', telemetry_params)
 
 
-# ============================================================================
-# Crash Reports (sent to Sentry)
-# ============================================================================
-
 def log_error(error, context=None):
     """
-    Log an error or exception to Sentry.
+    Log an error or exception to GA4.
 
     Args:
         error (Exception): Exception object
         context (dict, optional): Additional context (no PII)
     """
-    if not is_crash_reports_enabled():
+    if not is_telemetry_enabled():
         return
 
     try:
-        import sentry_sdk
-
-        # Add context if provided
-        if context:
-            sentry_sdk.set_context("error_context", context)
-
-        # Send to Sentry
-        sentry_sdk.capture_exception(error)
-
-    except ImportError:
-        # Sentry not installed - log locally
         error_data = {
             'error_type': type(error).__name__,
-            'error_message': str(error),
-            'context': context
+            'error_message': str(error)[:100],  # Truncate long messages
         }
-        _log_event_locally({
-            'event': 'error',
-            'timestamp': datetime.now().isoformat(),
-            'user_id': get_user_id(),
-            'version': VERSION_STRING,
-            'data': error_data
-        })
+        if context:
+            error_data.update(context)
+
+        log_event('error', error_data)
+
     except Exception as e:
-        # Silently fail
-        print(f"Warning: Could not log error to Sentry: {e}")
+        # Silently fail - never interrupt user workflow
+        print(f"Warning: Could not log error: {e}")
 
 
 # ============================================================================

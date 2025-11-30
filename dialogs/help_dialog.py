@@ -4,12 +4,14 @@ PhysioMetrics Help Dialog
 Quick reference guide with workflow and exported data documentation.
 """
 
+import sys
+import os
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QTextBrowser, QLabel, QDialogButtonBox, QTabWidget, QWidget
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
-import os
 
 
 class HelpDialog(QDialog):
@@ -20,9 +22,44 @@ class HelpDialog(QDialog):
         self.setWindowTitle("PhysioMetrics - Quick Reference")
         self.resize(850, 700)
         self.update_info = update_info  # Pre-checked update info from main window
+        self.parent_window = parent
+
+        # Load settings (position, size)
+        self.settings = None
+        if parent and hasattr(parent, 'settings'):
+            self.settings = parent.settings
+            # Restore window position (with validation to ensure on-screen)
+            if self.settings.contains("help_dialog_pos"):
+                from PyQt6.QtWidgets import QApplication
+                pos = self.settings.value("help_dialog_pos")
+                # Check if position is within any available screen
+                is_visible = False
+                for screen in QApplication.screens():
+                    if screen.availableGeometry().contains(pos):
+                        is_visible = True
+                        break
+                if is_visible:
+                    self.move(pos)
+                else:
+                    # Center on primary screen if saved position is off-screen
+                    screen_geometry = QApplication.primaryScreen().availableGeometry()
+                    center = screen_geometry.center()
+                    self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+            # Restore window size
+            if self.settings.contains("help_dialog_size"):
+                size = self.settings.value("help_dialog_size")
+                self.resize(size)
 
         self._setup_ui()
         self._apply_dark_theme()
+        self._enable_dark_title_bar()
+
+    def closeEvent(self, event):
+        """Save position and size when closing."""
+        if self.settings:
+            self.settings.setValue("help_dialog_pos", self.pos())
+            self.settings.setValue("help_dialog_size", self.size())
+        super().closeEvent(event)
 
     def _setup_ui(self):
         """Create the help dialog UI with two tabs."""
@@ -64,7 +101,7 @@ class HelpDialog(QDialog):
                 <li><b>Open File:</b> Ctrl+O → Select .abf, .smrx, or .edf file <i>(already analyzed? you'll be prompted to resume)</i></li>
                 <li><b>Select Channel:</b> Choose respiratory signal from dropdown</li>
                 <li><b>Detect Peaks:</b> Click "Apply" (threshold auto-detected)</li>
-                <li><b>Review/Edit:</b> Click editing mode button (<span style="color: #4CAF50;">Add</span>/<span style="color: #F44336;">Delete</span> Peak), then click plot to edit. Label sighs if needed.</li>
+                <li><b>Review/Edit:</b> Click "Toggle Breath" button, then left-click to toggle peaks on/off, right-click to toggle sigh labels.</li>
                 <li><b>Preview:</b> Click "View Summary" to review results before export</li>
                 <li><b>Export:</b> Click "Save Data" (Ctrl+S) → Enter animal info → Choose which files to save → Save</li>
             </ol>
@@ -72,19 +109,20 @@ class HelpDialog(QDialog):
             <h2 style="color: #2a7fff; margin-top: 20px;">Keyboard Shortcuts</h2>
             <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; margin-top: 5px;">
                 <tr style="background-color: #2a2a2a;">
-                    <th width="200">Shortcut</th>
+                    <th width="120">Mode/Button</th>
+                    <th width="160">Shortcut</th>
                     <th>Action</th>
                 </tr>
-                <tr><td><b>Ctrl+O</b></td><td>Open file</td></tr>
-                <tr><td><b>Ctrl+S</b></td><td>Save/export data</td></tr>
-                <tr><td><b>F1</b></td><td>Show this help</td></tr>
-                <tr><td><b>Shift+Click</b></td><td>(in <span style="color: #4CAF50;">add</span>/<span style="color: #F44336;">delete</span> mode) Toggle between <span style="color: #4CAF50;">Add</span>/<span style="color: #F44336;">Delete</span> peak</td></tr>
-                <tr><td><b>Ctrl+Click</b></td><td>(in <span style="color: #4CAF50;">add</span>/<span style="color: #F44336;">delete</span> mode) Switch to Add Sigh mode</td></tr>
-                <tr><td><b>Shift+Click & Drag</b></td><td>(in <span style="color: #FFD700;">move point</span> mode) Snap to zero crossings</td></tr>
-                <tr><td><b>Shift+Click</b></td><td>(in <span style="color: #9C27B0;">mark sniff</span> mode) <span style="color: #F44336;">Delete</span> sniffing region</td></tr>
-                <tr><td><b>Shift+Click</b></td><td>(in omit region mode) Delete omitted region</td></tr>
-                <tr><td><b>Ctrl+Shift+Click</b></td><td>(in omit region mode) Toggle full sweep omission</td></tr>
-                <tr><td><b>R</b></td><td>(in omit region mode) Snap regions to breath onsets</td></tr>
+                <tr><td>General</td><td><b>Ctrl+O</b></td><td>Open file</td></tr>
+                <tr><td>General</td><td><b>Ctrl+S</b></td><td>Save/export data</td></tr>
+                <tr><td>General</td><td><b>F1</b></td><td>Show this help</td></tr>
+                <tr><td><span style="color: #4CAF50;">Toggle Breath</span></td><td><b>Left-Click</b></td><td>Toggle peak on/off</td></tr>
+                <tr><td><span style="color: #4CAF50;">Toggle Breath</span></td><td><b>Right-Click</b></td><td>Toggle sigh label on/off</td></tr>
+                <tr><td><span style="color: #FFD700;">Move Point</span></td><td><b>Shift+Click & Drag</b></td><td>Snap to zero crossings</td></tr>
+                <tr><td><span style="color: #9C27B0;">Mark Sniff</span></td><td><b>Shift+Click</b></td><td>Delete sniffing region</td></tr>
+                <tr><td>Omit</td><td><b>Ctrl+Click</b></td><td>Delete omitted region</td></tr>
+                <tr><td>Omit</td><td><b>Ctrl+Shift+Click</b></td><td>Toggle full sweep omission</td></tr>
+                <tr><td>Omit</td><td><b>R</b></td><td>Snap regions to breath onsets</td></tr>
             </table>
 
             <h2 style="color: #2a7fff; margin-top: 20px;">Key Features</h2>
@@ -92,13 +130,13 @@ class HelpDialog(QDialog):
                 <li><b>Auto-Threshold:</b> Otsu's method finds optimal peak detection threshold automatically</li>
                 <li><b>Manual Editing Modes:</b>
                     <ul style="margin-top: 3px; margin-bottom: 3px;">
-                        <li><b><span style="color: #4CAF50;">Add</span>/<span style="color: #F44336;">Delete</span> Peak:</b> Click editing mode button first, then Shift+Click toggles between <span style="color: #4CAF50;">Add</span> and <span style="color: #F44336;">Delete</span> modes, Ctrl+Click for sigh mode</li>
+                        <li><b><span style="color: #4CAF50;">Toggle Breath:</span></b> Left-click to toggle peaks on/off, right-click to toggle sigh labels</li>
                         <li><b><span style="color: #FFD700;">Move Point:</span></b> Click and drag peaks, onsets, or offsets. Hold Shift to snap to zero crossings</li>
                         <li><b><span style="color: #9C27B0;">Mark Sniff:</span></b> Click and drag to highlight sniffing regions. Shift+Click to delete a region</li>
-                        <li><b>Omit Regions:</b> Click and drag to mark artifacts/noise for exclusion from analysis
+                        <li><b>Omit:</b> Click and drag to mark artifacts/noise for exclusion from analysis
                             <ul style="margin-top: 3px; margin-bottom: 3px;">
                                 <li>Omitted regions shown with gray overlay and "omitted" label</li>
-                                <li>Shift+Click to delete an omitted region</li>
+                                <li>Ctrl+Click to delete an omitted region</li>
                                 <li>Ctrl+Shift+Click to toggle full sweep omission</li>
                                 <li>Press 'R' to snap regions to breath onset boundaries</li>
                                 <li>Excluded from y-range calculation, metrics, and exports</li>
@@ -498,7 +536,7 @@ class HelpDialog(QDialog):
                 <p style='font-size: 9pt; margin-top: 10px; margin-bottom: 3px;'>
                     <b style='color: #2a7fff;'>Citation</b><br>
                     <span style='font-size: 8pt; font-family: monospace;'>
-                    Phillips, R.S. (2024). PhysioMetrics v""" + VERSION_STRING + """.<br>
+                    Phillips, R.S. (2025). PhysioMetrics v""" + VERSION_STRING + """.<br>
                     DOI: <a href='https://doi.org/10.5281/zenodo.17575911' style='color: #2a7fff;'>10.5281/zenodo.17575911</a>
                     </span>
                 </p>
@@ -743,3 +781,17 @@ class HelpDialog(QDialog):
                 color: #ffffff;
             }
         """)
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass

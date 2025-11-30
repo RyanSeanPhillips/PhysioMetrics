@@ -5,6 +5,7 @@ This dialog provides advanced peak detection parameters and experimental
 auto-threshold detection methods for testing and comparison.
 """
 
+import sys
 import numpy as np
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QPushButton,
@@ -42,11 +43,26 @@ class PeakDetectionDialog(QDialog):
         self.peak_count_vs_threshold = None  # Pre-computed curve
 
         self._setup_ui()
+        self._enable_dark_title_bar()
 
         # Calculate auto-thresholds if data provided
         if y_data is not None and len(y_data) > 0:
             self._detect_all_peaks_once()
             self._calculate_auto_thresholds()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _setup_ui(self):
         """Build the dialog UI."""

@@ -4,15 +4,16 @@ First-launch dialog for PhysioMetrics.
 Shows welcome message and telemetry opt-in/opt-out on first run.
 """
 
+import sys
+import os
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QPushButton, QTextBrowser, QGroupBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPixmap
-
-import os
-from pathlib import Path
 from version_info import VERSION_STRING
 
 
@@ -35,6 +36,21 @@ class FirstLaunchDialog(QDialog):
 
         self._setup_ui()
         self._apply_dark_theme()
+        self._enable_dark_title_bar()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _setup_ui(self):
         """Set up the dialog UI."""

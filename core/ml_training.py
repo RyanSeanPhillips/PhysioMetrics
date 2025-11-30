@@ -680,7 +680,8 @@ def _plot_learning_curve(model, X, y, model_name, model_type):
 def load_training_data_from_directory(
     data_dir: Path,
     deduplicate: bool = False,
-    model_number: int = 1
+    model_number: int = 1,
+    file_paths: Optional[List[str]] = None
 ) -> Tuple[pd.DataFrame, pd.Series, str, Optional[float], Optional[Dict[str, float]]]:
     """
     Load and combine ML training data from directory of .npz files.
@@ -689,12 +690,19 @@ def load_training_data_from_directory(
         data_dir: Path to directory containing .npz training files
         deduplicate: If True, remove duplicate files from same source (keep most recent)
         model_number: 1 for breath vs noise, 2 for sigh vs normal, 3 for eupnea vs sniffing
+        file_paths: Optional list of specific file paths to use (for filtering).
+                   If provided, only these files will be loaded (data_dir is ignored).
 
     Returns:
         (X, y, dataset_type, baseline_accuracy, baseline_recall): Features, labels, dataset type,
             optional baseline threshold accuracy, and optional per-class baseline recall
     """
-    npz_files = list(Path(data_dir).glob("*.npz"))
+    # Use provided file paths if given, otherwise glob the directory
+    if file_paths:
+        npz_files = [Path(p) for p in file_paths]
+        print(f"Using {len(npz_files)} filtered training files")
+    else:
+        npz_files = list(Path(data_dir).glob("*.npz"))
 
     if len(npz_files) == 0:
         raise ValueError(f"No .npz files found in {data_dir}")

@@ -11,6 +11,7 @@ Otsu's Method:
     - Separates "noise peaks" from "breath peaks" optimally
 """
 
+import sys
 import numpy as np
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QPushButton,
@@ -26,7 +27,7 @@ class ProminenceThresholdDialog(QDialog):
     """Interactive prominence threshold detection using Otsu's method."""
 
     def __init__(self, parent=None, y_data=None, sr_hz=None, current_prom=None, current_min_dist=None, current_height_threshold=None,
-                 percentile_cutoff=99, num_bins=200, skip_detection=False):
+                 percentile_cutoff=99, num_bins=200, skip_detection=False, cached_peaks=None, cached_peak_heights=None):
         super().__init__(parent)
         self.setWindowTitle("Auto-Detect Prominence Threshold")
         self.resize(1200, 700)  # 20% wider (1000 -> 1200)
@@ -40,9 +41,9 @@ class ProminenceThresholdDialog(QDialog):
         self.current_min_dist = current_min_dist or 0.05
         self.user_threshold = current_height_threshold  # Previously set threshold
 
-        # Cached peak detection
-        self.all_peaks = None
-        self.all_peak_heights = None
+        # Cached peak detection - use provided data if available
+        self.all_peaks = cached_peaks
+        self.all_peak_heights = cached_peak_heights
 
         # Auto-calculated threshold
         self.auto_threshold = None
@@ -73,12 +74,26 @@ class ProminenceThresholdDialog(QDialog):
 
         # Apply dark theme
         self._apply_dark_theme()
+        self._enable_dark_title_bar()
 
         self._setup_ui()
 
         # Detect peaks and calculate threshold (unless skip_detection=True for embedded display-only mode)
+        # Also skip detection if cached peak data was provided
         if not skip_detection and y_data is not None and len(y_data) > 0:
-            self._detect_all_peaks()
+            if self.all_peak_heights is None:
+                # No cached data - need to detect peaks
+                self._detect_all_peaks()
+            else:
+                # Cached data provided - calculate percentile for histogram filtering
+                import time
+                t_start = time.time()
+                print(f"[Prominence Dialog] Using {len(self.all_peak_heights)} cached peaks (skipping detection)")
+                if len(self.all_peak_heights) > 0:
+                    self.percentile_95 = np.percentile(self.all_peak_heights, self.percentile_cutoff)
+                else:
+                    self.percentile_95 = 1.0
+                print(f"[Prominence Dialog] Cached data processed in {(time.time() - t_start)*1000:.1f}ms")
             self._calculate_otsu_threshold()
 
             # Ensure canvas is sized before plotting
@@ -177,6 +192,20 @@ class ProminenceThresholdDialog(QDialog):
                 min-width: 80px;
             }
         """)
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _setup_ui(self):
         """Build the dialog UI."""
@@ -892,10 +921,13 @@ class ProminenceThresholdDialog(QDialog):
             self._plot_histogram()
 
             # Real-time update to main plot
-            if self.parent() is not None:
+            # Use main_window reference if available (when embedded), otherwise use parent()
+            main_window = getattr(self, 'main_window', None) or self.parent()
+            if main_window is not None:
                 try:
-                    self.parent().plot_host.update_threshold_line(self.current_threshold)
-                    self.parent().plot_host.canvas.draw_idle()
+                    if hasattr(main_window, 'plot_host'):
+                        main_window.plot_host.update_threshold_line(self.current_threshold)
+                        main_window.plot_host.canvas.draw_idle()
                 except Exception:
                     pass
 
@@ -1249,12 +1281,23 @@ class ProminenceThresholdDialog(QDialog):
             self.canvas.setCursor(Qt.CursorShape.ArrowCursor)
 
             # Update main plot ONCE after drag is complete
-            if self.parent() is not None:
+            # Use main_window reference if available (when embedded), otherwise use parent()
+            main_window = getattr(self, 'main_window', None) or self.parent()
+
+            if main_window is not None:
                 try:
-                    self.parent().plot_host.update_threshold_line(self.current_threshold)
-                    self.parent().plot_host.canvas.draw_idle()
+                    # Update main plot threshold line
+                    if hasattr(main_window, 'plot_host'):
+                        main_window.plot_host.update_threshold_line(self.current_threshold)
+                        main_window.plot_host.canvas.draw_idle()
+
+                    # Update stored prominence value in main window
+                    if hasattr(main_window, 'peak_prominence'):
+                        main_window.peak_prominence = self.current_threshold
+                    if hasattr(main_window, 'peak_height_threshold'):
+                        main_window.peak_height_threshold = self.current_threshold
                 except Exception as e:
-                    pass  # Silently fail if main plot update doesn't work
+                    print(f"[ProminenceDialog] Error updating main plot: {e}")  # Debug
 
     def _update_threshold_line_fast(self, new_threshold):
         """
@@ -1286,6 +1329,23 @@ class ProminenceThresholdDialog(QDialog):
             # If fast update fails, fall back to full replot
             print(f"[Fast Update] Failed: {e}")
             self._plot_histogram()
+
+    def update_threshold_from_external(self, new_threshold):
+        """
+        Update threshold from an external source (e.g., main plot dragging).
+        Syncs the histogram display with changes made elsewhere.
+        """
+        if new_threshold is not None and new_threshold > 0:
+            self.current_threshold = new_threshold
+            # Update UI labels
+            self.lbl_threshold.setText(f"{new_threshold:.4f}")
+            self.le_threshold_height.setText(f"{new_threshold:.4f}")
+            # Update histogram visualization
+            self._update_threshold_line_fast(new_threshold)
+            # Enable reset button if threshold changed from auto-detected value
+            if hasattr(self, 'auto_threshold') and abs(new_threshold - self.auto_threshold) > 1e-6:
+                if hasattr(self, 'btn_reset'):
+                    self.btn_reset.setEnabled(True)
 
     def _reset_threshold(self):
         """Reset threshold to auto-detected value."""

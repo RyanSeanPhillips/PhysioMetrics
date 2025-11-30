@@ -5,6 +5,7 @@ This dialog provides an interface for navigating through different categories of
 for efficient manual curation and ML training data labeling.
 """
 
+import sys
 import numpy as np
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -129,6 +130,21 @@ class PeakNavigatorDialog(QDialog):
         self.candidate_peaks = []  # List of (sweep_idx, peak_sample_idx) tuples
 
         self._setup_ui()
+        self._enable_dark_title_bar()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _setup_ui(self):
         """Set up the dialog UI."""

@@ -135,31 +135,58 @@ def _design_band(sr_hz: float, low_cut_hz: float, high_cut_hz: float, order: int
     return butter(order, wn, btype="bandpass", output="sos")
 
 
-def _sosfiltfilt_safe(sos: np.ndarray, y: np.ndarray) -> np.ndarray:
+def _sosfiltfilt_safe(sos: np.ndarray, y: np.ndarray, is_highpass: bool = False) -> np.ndarray:
     """
-    sosfiltfilt can raise if the signal is too short for padding.
-    Fall back to sosfiltfilt with smaller padlen; if still bad, return original y.
+    sosfiltfilt with improved edge handling to minimize artifacts.
+
+    For high-pass filters especially, edge effects can be significant because
+    removing low frequencies creates transients at boundaries.
+
+    Strategies used:
+    1. Longer padding (padlen) to allow filter to settle
+    2. 'odd' padding (reflection) which works well for most signals
+    3. Fallback to shorter padding if signal is too short
     """
+    n = y.shape[0]
+
+    # Calculate appropriate padding length
+    # For high-pass filters, use longer padding to reduce edge effects
+    # Rule of thumb: pad by at least 3x the filter's impulse response length
+    # For IIR filters, use a multiple of the signal length or a fixed minimum
+    if is_highpass:
+        # High-pass filters need more padding to handle DC offset removal
+        padlen = min(n - 1, max(500, n // 4))
+    else:
+        # For low-pass, standard padding is usually sufficient
+        padlen = min(n - 1, max(100, n // 8))
+
     try:
-        return sosfiltfilt(sos, y, axis=0)
+        # Use 'odd' padding (default) which reflects signal with odd symmetry
+        # This generally works well for continuous signals
+        return sosfiltfilt(sos, y, axis=0, padlen=padlen, padtype='odd')
     except ValueError:
-        # Try a minimal padding; if still too short, just return y
+        # Signal too short for requested padding - try smaller padding
         try:
-            # padlen must be less than data length; choose something conservative
-            padlen = max(0, min(99, y.shape[0] // 3))
-            return sosfiltfilt(sos, y, axis=0, padlen=padlen)
-        except Exception:
-            return y
+            padlen = max(0, min(99, n // 3))
+            return sosfiltfilt(sos, y, axis=0, padlen=padlen, padtype='odd')
+        except ValueError:
+            # Still too short - try minimal padding
+            try:
+                padlen = max(0, n // 4)
+                return sosfiltfilt(sos, y, axis=0, padlen=padlen, padtype='constant')
+            except Exception:
+                # Give up and return original
+                return y
 
 
 def low_pass_1d(y: np.ndarray, sr_hz: float, cutoff_hz: float, order: int = 4) -> np.ndarray:
     sos = _design_low(sr_hz, cutoff_hz, order)
-    return _sosfiltfilt_safe(sos, y)
+    return _sosfiltfilt_safe(sos, y, is_highpass=False)
 
 
 def high_pass_1d(y: np.ndarray, sr_hz: float, cutoff_hz: float, order: int = 4) -> np.ndarray:
     sos = _design_high(sr_hz, cutoff_hz, order)
-    return _sosfiltfilt_safe(sos, y)
+    return _sosfiltfilt_safe(sos, y, is_highpass=True)
 
 
 def band_pass_1d(y: np.ndarray, sr_hz: float,
@@ -169,7 +196,8 @@ def band_pass_1d(y: np.ndarray, sr_hz: float,
     and high_cut_hz is the LOW-PASS edge (upper bound).
     """
     sos = _design_band(sr_hz, low_cut_hz, high_cut_hz, order)
-    return _sosfiltfilt_safe(sos, y)
+    # Band-pass includes high-pass component, so use longer padding
+    return _sosfiltfilt_safe(sos, y, is_highpass=True)
 
 
 #                  use_low: bool,  low_hz: float | None,

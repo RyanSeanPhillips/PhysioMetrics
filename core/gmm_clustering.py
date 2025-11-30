@@ -186,7 +186,8 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
 
 
 def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sniffing_cluster_id,
-                                       cluster_probabilities=None, confidence_threshold=0.5):
+                                       cluster_probabilities=None, confidence_threshold=0.5,
+                                       update_editable=True):
     """
     Store GMM classification results in all_peaks_by_sweep['gmm_class'] field.
 
@@ -200,6 +201,8 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
         sniffing_cluster_id: Which cluster is sniffing
         cluster_probabilities: Optional probability matrix (n_breaths, n_clusters)
         confidence_threshold: Minimum probability to classify as sniffing (default 0.5)
+        update_editable: If True, also update gmm_class (editable). If False, only update
+                        gmm_class_ro (read-only reference for classifier switching).
 
     Returns:
         Number of breaths classified
@@ -218,9 +221,11 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
         if all_peaks is None:
             continue
 
-        # Initialize gmm_class array if it doesn't exist
+        # Initialize gmm_class and gmm_class_ro arrays if they don't exist
         if 'gmm_class' not in all_peaks:
             all_peaks['gmm_class'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
+        if 'gmm_class_ro' not in all_peaks:
+            all_peaks['gmm_class_ro'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
 
         # Find this peak in all_peaks_by_sweep
         peak_mask = all_peaks['indices'] == peak_sample_idx
@@ -237,7 +242,10 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
             # Use hard cluster assignment
             gmm_class = 1 if cluster_labels[i] == sniffing_cluster_id else 0
 
-        all_peaks['gmm_class'][peak_pos] = gmm_class
+        # Store in read-only array (always), and editable array (if update_editable=True)
+        all_peaks['gmm_class_ro'][peak_pos] = gmm_class  # Read-only reference for classifier switching
+        if update_editable:
+            all_peaks['gmm_class'][peak_pos] = gmm_class
         n_classified += 1
 
     return n_classified

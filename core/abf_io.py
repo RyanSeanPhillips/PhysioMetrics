@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple, Optional
 import re
 
 
-def load_data_file(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.ndarray], List[str], np.ndarray]:
+def load_data_file(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.ndarray], List[str], np.ndarray, dict]:
     """
     Load data file - dispatches to appropriate loader based on file extension
 
@@ -13,8 +13,9 @@ def load_data_file(path: Path, progress_callback=None) -> Tuple[float, Dict[str,
     - .smrx: Son64 format (CED Spike2) via Python 3.9 bridge
     - .edf: European Data Format (pyedflib)
 
-    Returns (sr_hz, sweeps_by_channel, channel_names, t)
+    Returns (sr_hz, sweeps_by_channel, channel_names, t, metadata)
     sweeps_by_channel[channel] -> 2D array (n_samples, n_sweeps)
+    metadata: dict with file-specific metadata (protocol, n_channels, etc.)
 
     progress_callback: optional function(current, total, message) for progress updates
     """
@@ -25,18 +26,23 @@ def load_data_file(path: Path, progress_callback=None) -> Tuple[float, Dict[str,
         return load_abf(path, progress_callback)
     elif suffix == '.smrx':
         from core.io.son64_loader import load_son64
-        return load_son64(str(path), progress_callback)
+        sr, sweeps, names, t = load_son64(str(path), progress_callback)
+        metadata = {'file_type': 'smrx', 'n_channels': len(names)}
+        return sr, sweeps, names, t, metadata
     elif suffix == '.edf':
         from core.io.edf_loader import load_edf
-        return load_edf(path, progress_callback)
+        sr, sweeps, names, t = load_edf(path, progress_callback)
+        metadata = {'file_type': 'edf', 'n_channels': len(names)}
+        return sr, sweeps, names, t, metadata
     else:
         raise ValueError(f"Unsupported file format: {suffix}\nSupported formats: .abf, .smrx, .edf")
 
 
-def load_abf(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.ndarray], List[str], np.ndarray]:
+def load_abf(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.ndarray], List[str], np.ndarray, dict]:
     """
-    Returns (sr_hz, sweeps_by_channel, channel_names, t)
+    Returns (sr_hz, sweeps_by_channel, channel_names, t, metadata)
     sweeps_by_channel[channel] -> 2D array (n_samples, n_sweeps)
+    metadata: dict with 'protocol', 'n_channels', 'n_sweeps' for ABF files (empty dict for other formats)
 
     progress_callback: optional function(current, total, message) for progress updates
     """
@@ -51,6 +57,14 @@ def load_abf(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.nd
     abf = pyabf.ABF(str(path))
     sr_hz = float(abf.dataRate)
     chan_names = [abf.adcNames[c] for c in range(abf.channelCount)]
+
+    # Extract ABF-specific metadata
+    metadata = {
+        'protocol': abf.protocol if hasattr(abf, 'protocol') else '',
+        'n_channels': abf.channelCount,
+        'n_sweeps': abf.sweepCount,
+        'file_type': 'abf'
+    }
 
     if progress_callback:
         progress_callback(10, 100, "Reading channel data...")
@@ -85,7 +99,7 @@ def load_abf(path: Path, progress_callback=None) -> Tuple[float, Dict[str, np.nd
     if progress_callback:
         progress_callback(100, 100, "Complete")
 
-    return sr_hz, sweeps_by_channel, chan_names, t
+    return sr_hz, sweeps_by_channel, chan_names, t, metadata
 
 
 def extract_date_from_filename(filename: str) -> Optional[str]:
@@ -365,3 +379,142 @@ def load_and_concatenate_abf_files(file_paths: List[Path], progress_callback=Non
         file_info[pad_info['file_idx']]['padded_samples'] = pad_info['padded_samples']
 
     return sr_hz, sweeps_by_channel, channel_names, t, file_info
+
+
+def detect_stimulus_channel(sweeps_by_channel: Dict[str, np.ndarray], channel_names: List[str]) -> Optional[str]:
+    """
+    Auto-detect which channel is most likely a stimulus/TTL channel.
+
+    Stimulus channels typically have:
+    - Digital-like behavior: values cluster around low (0) and high (e.g., 5V)
+    - Sharp transitions between discrete levels
+    - Few unique value levels compared to analog signals
+
+    Returns the name of the detected stimulus channel, or None if no clear candidate.
+    """
+    candidates = []
+
+    for ch_name in channel_names:
+        data = sweeps_by_channel[ch_name]
+
+        # Flatten all sweeps for analysis
+        flat_data = data.flatten()
+
+        # Remove NaN values
+        flat_data = flat_data[np.isfinite(flat_data)]
+
+        if len(flat_data) < 100:
+            continue
+
+        # Check for TTL-like characteristics
+        score = _score_stimulus_likelihood(flat_data)
+
+        if score > 0:
+            candidates.append((ch_name, score))
+
+    if not candidates:
+        return None
+
+    # Sort by score (highest first) and return the best candidate
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
+    # Only return if the score is high enough (indicates likely stimulus channel)
+    best_name, best_score = candidates[0]
+    if best_score >= 50:  # Threshold for confidence
+        return best_name
+
+    return None
+
+
+def _score_stimulus_likelihood(data: np.ndarray) -> float:
+    """
+    Score how likely a data array is from a stimulus/TTL channel.
+
+    Returns a score from 0-100, where higher = more likely stimulus.
+    """
+    score = 0.0
+
+    # 1. Check for bimodal distribution (low and high values)
+    data_min = np.min(data)
+    data_max = np.max(data)
+    data_range = data_max - data_min
+
+    if data_range < 0.1:
+        # Nearly constant signal - not a stimulus channel
+        return 0
+
+    # Normalize to 0-1
+    normalized = (data - data_min) / data_range
+
+    # 2. Count how many values are near 0 or 1 (within 10% of range)
+    near_low = np.sum(normalized < 0.1)
+    near_high = np.sum(normalized > 0.9)
+    total = len(normalized)
+
+    bimodal_fraction = (near_low + near_high) / total
+
+    if bimodal_fraction > 0.95:
+        # Very bimodal - strong TTL indicator
+        score += 50
+    elif bimodal_fraction > 0.85:
+        score += 35
+    elif bimodal_fraction > 0.70:
+        score += 20
+
+    # 3. Check if the high value looks like TTL (around 5V typical)
+    # Common TTL values: 5V, 3.3V, or similar discrete levels
+    if 4.5 <= data_max <= 5.5:
+        score += 20  # Looks like 5V TTL
+    elif 3.0 <= data_max <= 3.6:
+        score += 15  # Looks like 3.3V logic
+    elif data_max > 2.0 and data_min < 0.5:
+        score += 10  # Has reasonable on/off levels
+
+    # 4. Check for sharp transitions (derivative has large spikes)
+    if len(data) > 1000:
+        # Sample for speed
+        sample = data[::max(1, len(data) // 1000)]
+    else:
+        sample = data
+
+    diff = np.abs(np.diff(sample))
+    if len(diff) > 0:
+        # Check if most differences are near zero (stable) with some large jumps
+        small_diffs = np.sum(diff < data_range * 0.05)
+        large_diffs = np.sum(diff > data_range * 0.5)
+
+        if small_diffs / len(diff) > 0.95 and large_diffs > 0:
+            # Mostly stable with some sharp transitions - TTL-like
+            score += 20
+
+    # 5. Penalty if the channel name suggests it's NOT a stimulus
+    # (This won't work since we're just looking at data, but good to note)
+
+    return score
+
+
+def auto_select_channels(sweeps_by_channel: Dict[str, np.ndarray],
+                         channel_names: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Auto-select stimulus and analysis channels based on data patterns.
+
+    Returns (stim_channel, analysis_channel):
+    - stim_channel: Detected stimulus channel name, or None
+    - analysis_channel: Suggested analysis channel, or None
+    """
+    # First, detect stimulus channel
+    stim_channel = detect_stimulus_channel(sweeps_by_channel, channel_names)
+
+    analysis_channel = None
+
+    if stim_channel:
+        # Find remaining channels (excluding stimulus)
+        remaining = [ch for ch in channel_names if ch != stim_channel]
+
+        # Only auto-select analysis channel if exactly one remains
+        # If multiple channels exist, let user choose
+        if len(remaining) == 1:
+            analysis_channel = remaining[0]
+        # If len(remaining) > 1, leave analysis_channel as None
+
+    return stim_channel, analysis_channel

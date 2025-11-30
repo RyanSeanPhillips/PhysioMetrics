@@ -5,15 +5,17 @@ This dialog allows users to select which breath metrics should be used for
 outlier detection during breathing analysis.
 """
 
+import sys
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QCheckBox,
-    QPushButton, QScrollArea, QWidget
+    QPushButton, QScrollArea, QWidget, QLineEdit
 )
 from PyQt6.QtCore import Qt
 
 
 class OutlierMetricsDialog(QDialog):
-    def __init__(self, parent=None, available_metrics=None, selected_metrics=None):
+    def __init__(self, parent=None, available_metrics=None, selected_metrics=None, outlier_sd=3.0):
         from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QCheckBox,
                                     QPushButton, QScrollArea, QWidget)
         from PyQt6.QtCore import Qt
@@ -24,10 +26,12 @@ class OutlierMetricsDialog(QDialog):
 
         # Apply dark theme
         self._apply_dark_theme()
+        self._enable_dark_title_bar()
 
         # Store available metrics
         self.available_metrics = available_metrics or []
         self.selected_metrics = set(selected_metrics or [])
+        self.outlier_sd = outlier_sd
 
         # Metric descriptions
         self.metric_descriptions = {
@@ -98,6 +102,20 @@ class OutlierMetricsDialog(QDialog):
             }
         """)
 
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
+
     def _setup_ui(self):
         """Build the dialog UI."""
         # Main layout
@@ -109,11 +127,42 @@ class OutlierMetricsDialog(QDialog):
         main_layout.addWidget(title)
 
         # Info label
-        info = QLabel("Breaths with values beyond ±N standard deviations (set in SD field) "
+        info = QLabel("Breaths with values beyond ±N standard deviations (set below) "
                      "for ANY selected metric will be flagged as outliers.")
         info.setWordWrap(True)
-        info.setStyleSheet("color: #B0B0B0; margin-bottom: 15px;")
+        info.setStyleSheet("color: #B0B0B0; margin-bottom: 10px;")
         main_layout.addWidget(info)
+
+        # Outlier SD threshold input
+        sd_layout = QHBoxLayout()
+        sd_label = QLabel("Outlier Threshold (SD):")
+        sd_label.setStyleSheet("font-weight: bold;")
+        sd_layout.addWidget(sd_label)
+
+        self.sd_input = QLineEdit()
+        self.sd_input.setText(str(self.outlier_sd))
+        self.sd_input.setFixedWidth(100)
+        self.sd_input.setPlaceholderText("3.0")
+        self.sd_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #0e639c;
+            }
+        """)
+        sd_layout.addWidget(self.sd_input)
+
+        sd_help = QLabel("(Number of standard deviations from mean)")
+        sd_help.setStyleSheet("color: #B0B0B0; font-style: italic;")
+        sd_layout.addWidget(sd_help)
+        sd_layout.addStretch()
+
+        main_layout.addLayout(sd_layout)
 
         # Scroll area for checkboxes
         scroll = QScrollArea()
@@ -196,3 +245,10 @@ class OutlierMetricsDialog(QDialog):
     def get_selected_metrics(self):
         """Return list of selected metric keys."""
         return [metric for metric, checkbox in self.checkboxes.items() if checkbox.isChecked()]
+
+    def get_outlier_sd(self):
+        """Return the outlier SD threshold value."""
+        try:
+            return float(self.sd_input.text())
+        except (ValueError, AttributeError):
+            return 3.0  # Default value

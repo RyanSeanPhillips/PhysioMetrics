@@ -8,6 +8,8 @@ This dialog provides tools for detecting and marking events in the event channel
 - Region deletion (Shift+click)
 """
 
+import sys
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QDoubleSpinBox, QGroupBox, QCheckBox, QMessageBox, QRadioButton, QButtonGroup
@@ -235,6 +237,115 @@ class EventDetectionDialog(QDialog):
 
         # Resize dialog to minimum size that fits all content
         self.adjustSize()
+
+        # Apply dark theme and title bar
+        self._apply_dark_theme()
+        self._enable_dark_title_bar()
+
+    def _apply_dark_theme(self):
+        """Apply dark theme styling to match main application."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QLabel {
+                color: #d4d4d4;
+            }
+            QGroupBox {
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                font-weight: bold;
+                background-color: #2a2a2a;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 2px 8px;
+                color: #2a7fff;
+            }
+            QRadioButton {
+                color: #d4d4d4;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #555;
+                border-radius: 7px;
+                background-color: #2a2a2a;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #2a7fff;
+                border-color: #2a7fff;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #2a7fff;
+            }
+            QCheckBox {
+                color: #d4d4d4;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #2a2a2a;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2a7fff;
+                border-color: #2a7fff;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #2a7fff;
+            }
+            QDoubleSpinBox, QSpinBox {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 3px;
+                padding: 3px;
+            }
+            QDoubleSpinBox:focus, QSpinBox:focus {
+                border: 1px solid #2a7fff;
+            }
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #d4d4d4;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #2a7fff;
+            }
+            QPushButton:pressed {
+                background-color: #2a7fff;
+            }
+            QPushButton:default {
+                border-color: #2a7fff;
+            }
+        """)
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def on_threshold_changed(self, value):
         """Redraw plot when threshold changes to update threshold line."""

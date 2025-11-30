@@ -5,9 +5,11 @@ Allows users to select which metrics to include in data exports.
 Metrics are organized into logical groups for easy navigation.
 """
 
+import sys
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox,
-    QPushButton, QScrollArea, QWidget, QLabel
+    QPushButton, QScrollArea, QWidget, QLabel, QGridLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -26,13 +28,13 @@ class ExportOptionsDialog(QDialog):
             'metrics': ['if', 'amp_insp', 'amp_exp', 'area_insp', 'area_exp',
                        'ti', 'te', 'vent_proxy', 'regularity']
         },
+        'Region Detection & Probabilities': {
+            'description': 'Automated breath pattern detection and model probabilities',
+            'metrics': ['eupnic', 'apnea', 'sniff_conf', 'eupnea_conf', 'p_noise', 'p_breath']
+        },
         'Derivative Metrics': {
             'description': 'Rate of change measurements',
             'metrics': ['d1', 'd2', 'max_dinsp', 'max_dexp']
-        },
-        'Region Detection': {
-            'description': 'Automated breath pattern detection',
-            'metrics': ['eupnic', 'apnea', 'sniff_conf', 'eupnea_conf']
         },
         'Peak Candidate Metrics': {
             'description': 'ML features for merge detection and noise classification',
@@ -58,10 +60,6 @@ class ExportOptionsDialog(QDialog):
             'description': 'Z-scored relative measurements',
             'metrics': ['amp_insp_norm', 'amp_exp_norm', 'peak_to_trough_norm',
                        'prominence_norm', 'ibi_norm', 'ti_norm', 'te_norm']
-        },
-        'Probability Scores': {
-            'description': 'Auto-threshold model probabilities',
-            'metrics': ['p_noise', 'p_breath']
         }
     }
 
@@ -69,8 +67,7 @@ class ExportOptionsDialog(QDialog):
     # Start with commonly used metrics, user can enable advanced features as needed
     DEFAULT_ENABLED = {
         'Basic Breathing Metrics',
-        'Region Detection',
-        'Probability Scores'
+        'Region Detection & Probabilities'
     }
 
     def __init__(self, parent=None, current_options=None):
@@ -96,6 +93,8 @@ class ExportOptionsDialog(QDialog):
             self.current_options = current_options.copy()
 
         self._setup_ui()
+        self._apply_dark_theme()
+        self._enable_dark_title_bar()
         self._load_current_settings()
 
     def _get_default_options(self):
@@ -183,12 +182,18 @@ class ExportOptionsDialog(QDialog):
         self.group_checkboxes[group_name] = select_all_cb
         layout.addWidget(select_all_cb)
 
-        # Individual metric checkboxes
-        for metric in group_data['metrics']:
+        # Individual metric checkboxes in 3-column grid
+        grid = QGridLayout()
+        grid.setSpacing(5)
+        metrics = group_data['metrics']
+        for i, metric in enumerate(metrics):
+            row = i // 3
+            col = i % 3
             cb = QCheckBox(metric)
             cb.stateChanged.connect(self._on_metric_changed)
             self.metric_checkboxes[metric] = cb
-            layout.addWidget(cb)
+            grid.addWidget(cb, row, col)
+        layout.addLayout(grid)
 
         group_box.setLayout(layout)
         return group_box
@@ -273,3 +278,118 @@ class ExportOptionsDialog(QDialog):
             metric: cb.isChecked()
             for metric, cb in self.metric_checkboxes.items()
         }
+
+    def _apply_dark_theme(self):
+        """Apply dark theme styling to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QWidget {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+                background-color: transparent;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #3a3a3a;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background-color: #2a2a2a;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: #2a7fff;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                spacing: 8px;
+                background-color: transparent;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #2a2a2a;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2a7fff;
+                border-color: #2a7fff;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #2a7fff;
+            }
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #2a7fff;
+            }
+            QPushButton:pressed {
+                background-color: #2a7fff;
+            }
+            QPushButton:default {
+                border-color: #2a7fff;
+            }
+            QScrollArea {
+                border: none;
+                background-color: #1e1e1e;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #1e1e1e;
+            }
+            QScrollBar:vertical {
+                background-color: #2a2a2a;
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #555;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #666;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+
+                # DWMWA_USE_IMMERSIVE_DARK_MODE
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+
+                # Get window handle
+                hwnd = int(self.winId())
+
+                # Set dark mode (1 = dark, 0 = light)
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    byref(value),
+                    sizeof(value)
+                )
+            except Exception:
+                # Silently fail if not supported (Windows 10 older builds)
+                pass

@@ -445,6 +445,47 @@ class ExportManager:
                 sniff_count=sniff_count,
                 num_sweeps=len(self.window.state.sweeps)
             )
+
+            # Mark the active master list row as completed (if opened from Project Builder)
+            if hasattr(self.window, 'mark_active_analysis_complete'):
+                channel_used = st.analyze_chan if hasattr(st, 'analyze_chan') else None
+                stim_channel_used = st.stim_chan if hasattr(st, 'stim_chan') else None
+                events_channel_used = st.event_chan if hasattr(st, 'event_chan') else None
+
+                # Get save metadata and export info
+                save_meta = getattr(self.window, '_save_meta', {})
+                save_dir = getattr(self.window, '_save_dir', None)
+                save_base = getattr(self.window, '_save_base', '')
+
+                # Build export info dict
+                export_info = {
+                    'export_path': str(save_dir) if save_dir else '',
+                    'export_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'export_version': self.window.app_version if hasattr(self.window, 'app_version') else '',
+                    'export_base_name': save_base,
+                    'exports': {
+                        'npz': save_meta.get('save_npz', True),
+                        'timeseries_csv': save_meta.get('save_timeseries_csv', True),
+                        'breaths_csv': save_meta.get('save_breaths_csv', True),
+                        'events_csv': save_meta.get('save_events_csv', True),
+                        'pdf': save_meta.get('save_pdf', True),
+                        'session_state': save_meta.get('save_session', True),
+                        'ml_training': save_meta.get('save_ml_training', False),
+                    },
+                    # Metadata from dialog
+                    'strain': save_meta.get('strain', ''),
+                    'stim_type': save_meta.get('stim', ''),
+                    'power': save_meta.get('power', ''),
+                    'sex': save_meta.get('sex', ''),
+                    'animal_id': save_meta.get('animal', ''),
+                }
+
+                self.window.mark_active_analysis_complete(
+                    channel_used=channel_used,
+                    stim_channel_used=stim_channel_used,
+                    events_channel_used=events_channel_used,
+                    export_info=export_info
+                )
         except Exception as e:
             t_elapsed = time.time() - t_start
             self.window._log_status_message(f"✗ Data export failed ({t_elapsed:.1f}s)", 3000)
@@ -804,6 +845,9 @@ class ExportManager:
             # Get GMM classification if available (stored in all_peaks_by_sweep)
             gmm_class_array = all_peaks.get('gmm_class', None)
 
+            # Get sigh classification if available
+            sigh_class_array = all_peaks.get('sigh_class', None)
+
             # Iterate through ALL peaks (label=0 and label=1)
             for i, (peak_idx, label, label_source) in enumerate(zip(
                 all_peaks['indices'],
@@ -814,20 +858,35 @@ class ExportManager:
                 metric_dict = metrics[i] if i < len(metrics) else {}
 
                 # Check if this peak is labeled as a sigh
-                is_sigh = 1 if peak_idx in sigh_indices else 0
+                # Use sigh_class_array if available, otherwise fall back to sigh_by_sweep
+                # NaN = no label (for ML training to ignore)
+                if sigh_class_array is not None and i < len(sigh_class_array):
+                    sigh_val = sigh_class_array[i]
+                    is_sigh = 1 if sigh_val == 1 else (0 if sigh_val == 0 else float('nan'))
+                elif peak_idx in sigh_indices:
+                    is_sigh = 1
+                else:
+                    # No sigh classification available - use NaN to indicate "no label"
+                    is_sigh = float('nan') if sigh_class_array is None else 0
 
                 # Determine eupnea/sniffing classification from GMM labels
-                is_eupnea = 0
-                is_sniffing = 0
+                # NaN = no label (for ML training to ignore)
+                is_eupnea = float('nan')
+                is_sniffing = float('nan')
 
-                # Only classify if this is a labeled breath (label=1) and GMM was run
+                # Only classify if this is a labeled breath (label=1) and gmm_class exists
                 if label == 1 and gmm_class_array is not None and i < len(gmm_class_array):
                     gmm_class = gmm_class_array[i]
                     if gmm_class == 0:
                         is_eupnea = 1
+                        is_sniffing = 0
                     elif gmm_class == 1:
+                        is_eupnea = 0
                         is_sniffing = 1
-                    # gmm_class == -1 means unclassified, leave both at 0
+                    elif gmm_class == -1:
+                        # Unclassified - use NaN
+                        is_eupnea = float('nan')
+                        is_sniffing = float('nan')
 
                 # Get export options (which metrics to include)
                 export_options = getattr(st, 'export_metric_options', None)
@@ -920,9 +979,10 @@ class ExportManager:
 
             sigh_indices = set(st.sigh_by_sweep.get(sweep_idx, []))
 
-            # Get GMM classification
+            # Get GMM and sigh classifications
             all_peaks = st.all_peaks_by_sweep.get(sweep_idx)
             gmm_class_array = all_peaks.get('gmm_class', None) if all_peaks else None
+            sigh_class_array = all_peaks.get('sigh_class', None) if all_peaks else None
 
             # Iterate through ONLY the breath peaks
             for breath_idx, peak_idx in enumerate(breath_peaks):
@@ -935,29 +995,40 @@ class ExportManager:
                         label = all_peaks['labels'][i_in_all]
                         label_source = all_peaks['label_source'][i_in_all]
 
-                        # Get GMM class
-                        is_eupnea = 0
-                        is_sniffing = 0
+                        # Get GMM class - NaN if not available
+                        is_eupnea = float('nan')
+                        is_sniffing = float('nan')
                         if gmm_class_array is not None and i_in_all < len(gmm_class_array):
                             gmm_class = gmm_class_array[i_in_all]
                             if gmm_class == 0:
                                 is_eupnea = 1
+                                is_sniffing = 0
                             elif gmm_class == 1:
+                                is_eupnea = 0
                                 is_sniffing = 1
+                            # gmm_class == -1 means unclassified, leave as NaN
+
+                        # Get sigh class - NaN if not available
+                        if sigh_class_array is not None and i_in_all < len(sigh_class_array):
+                            sigh_val = sigh_class_array[i_in_all]
+                            is_sigh = 1 if sigh_val == 1 else (0 if sigh_val == 0 else float('nan'))
+                        elif peak_idx in sigh_indices:
+                            is_sigh = 1
+                        else:
+                            is_sigh = float('nan') if sigh_class_array is None else 0
                     else:
                         # Shouldn't happen, but handle gracefully
                         label = 1
                         label_source = 'unknown'
-                        is_eupnea = 0
-                        is_sniffing = 0
+                        is_eupnea = float('nan')
+                        is_sniffing = float('nan')
+                        is_sigh = float('nan')
                 else:
                     label = 1
                     label_source = 'unknown'
-                    is_eupnea = 0
-                    is_sniffing = 0
-
-                # Check if sigh
-                is_sigh = 1 if peak_idx in sigh_indices else 0
+                    is_eupnea = float('nan')
+                    is_sniffing = float('nan')
+                    is_sigh = float('nan')
 
                 # Get recalculated metrics for this breath
                 # NOTE: recalc_metrics is indexed by breath_idx (position in filtered list)
@@ -1317,7 +1388,7 @@ class ExportManager:
                 # User chooses a folder; we keep your previous smart logic here.
                 default_root = Path(self.window.settings.value("save_root", str(st.in_path.parent)))
                 chosen = QFileDialog.getExistingDirectory(
-                    self,
+                    self.window,  # Use window (QWidget) as parent, not self (ExportManager)
                     "Choose a folder (files may go into an existing 'Pleth_App_analysis' here)",
                     str(default_root)
                 )
@@ -1639,7 +1710,7 @@ class ExportManager:
                 "kept_sweeps": [int(s) for s in kept_sweeps],                  # original indices
                 "omitted_sweeps": sorted(int(x) for x in getattr(st, "omitted_sweeps", set())),
                 "abf_path": str(getattr(st, "in_path", "")),
-                "ui_meta": getattr(self, "_save_meta", {}),
+                "ui_meta": getattr(self.window, "_save_meta", {}),
                 "excluded_for_csv": sorted(list(self._EXCLUDE_FOR_CSV)),
                 "ds_target_hz": float(DS_TARGET_HZ),
                 "ds_step": int(ds_step),

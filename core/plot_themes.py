@@ -26,7 +26,7 @@ DARK_THEME = {
     'tick_color': '#cccccc',
 
     # Signal trace
-    'trace_color': '#ffffff',       # White (matches main plot)
+    'trace_color': '#d4d4d4',       # Off-white (softer than pure white, matches text color)
     'trace_linewidth': 0.8,
 
     # Peak markers (inspiratory peaks)

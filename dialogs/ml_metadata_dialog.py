@@ -5,14 +5,16 @@ Prompts user to enter metadata for ML training data exports.
 Captures quality score and optional user name (system info captured automatically).
 """
 
+import sys
+import os
+import socket
+from datetime import datetime
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLineEdit, QSpinBox, QLabel, QPushButton, QMessageBox, QComboBox, QTextEdit
 )
 from PyQt6.QtCore import Qt
-import os
-import socket
-from datetime import datetime
 
 
 class MLMetadataDialog(QDialog):
@@ -40,6 +42,21 @@ class MLMetadataDialog(QDialog):
         self.computer_name = socket.gethostname()
 
         self._setup_ui()
+        self._enable_dark_title_bar()
+
+    def _enable_dark_title_bar(self):
+        """Enable dark title bar on Windows 10/11."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import windll, byref, sizeof, c_int
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                value = c_int(1)
+                windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, byref(value), sizeof(value)
+                )
+            except Exception:
+                pass
 
     def _setup_ui(self):
         """Setup the dialog UI."""
