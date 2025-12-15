@@ -184,8 +184,15 @@ class PlotManager:
             channel_configs: List of ChannelPanelConfig objects defining what to plot
             grid_mode: If True, use grid layout instead of stacked panels
         """
-        from matplotlib.gridspec import GridSpec
         st = self.state
+
+        # Check backend and route to appropriate implementation
+        if st.plotting_backend == 'pyqtgraph':
+            self._draw_channels_pyqtgraph(channel_configs, grid_mode)
+            return
+
+        # Matplotlib implementation
+        from matplotlib.gridspec import GridSpec
 
         if not channel_configs:
             return
@@ -413,6 +420,246 @@ class PlotManager:
             self.plot_host.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
 
         self.plot_host.canvas.draw_idle()
+
+    def _draw_channels_pyqtgraph(self, channel_configs: List[ChannelPanelConfig], grid_mode: bool = False):
+        """
+        PyQtGraph-specific implementation of draw_channels().
+
+        Uses native PyQtGraph APIs for high-performance rendering.
+        """
+        import pyqtgraph as pg
+        st = self.state
+
+        if not channel_configs:
+            return
+
+        n_panels = len(channel_configs)
+
+        # Get current sweep info
+        s = max(0, min(st.sweep_idx, next(iter(st.sweeps.values())).shape[1] - 1))
+
+        # Get time normalization (stim offset)
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_plot = st.t - t0
+            spans_plot = [(a - t0, b - t0) for (a, b) in spans]
+        else:
+            t0 = 0.0
+            t_plot = st.t
+            spans_plot = spans
+
+        # Extract Opto Stim spans from any Opto Stim channel (for blue backgrounds)
+        opto_spans_plot = []
+        for config in channel_configs:
+            if config.channel_type == "Opto Stim" and config.name in st.sweeps:
+                opto_data = st.sweeps[config.name][:, s]
+                opto_spans_plot = self._extract_stim_spans_from_channel(st.t, opto_data, t0)
+                break
+
+        # Also check hidden opto channels
+        if not opto_spans_plot and hasattr(self.window, 'channel_manager'):
+            channels = self.window.channel_manager.get_channels()
+            for name, cm_config in channels.items():
+                if cm_config.channel_type == "Opto Stim" and name in st.sweeps:
+                    opto_data = st.sweeps[name][:, s]
+                    opto_spans_plot = self._extract_stim_spans_from_channel(st.t, opto_data, t0)
+                    break
+
+        # Get theme colors
+        is_dark = self.plot_host._current_theme == 'dark'
+        trace_color = '#d4d4d4' if is_dark else '#000000'
+        text_color = '#d4d4d4' if is_dark else '#000000'
+        bg_color = '#1e1e1e' if is_dark else '#ffffff'
+
+        # Clear and rebuild layout
+        self.plot_host.graphics_layout.clear()
+        self.plot_host._subplots = []
+        self.plot_host.graphics_layout.setBackground(bg_color)
+
+        # Create subplots
+        plots = []
+        ax_main = None
+        ax_event = None
+        primary_y_data = None
+
+        for i, config in enumerate(channel_configs):
+            # Create plot widget
+            plot = self.plot_host.graphics_layout.addPlot(row=i, col=0)
+            plot.showGrid(x=False, y=False)
+
+            # Style axes
+            plot.getAxis('bottom').setTextPen(text_color)
+            plot.getAxis('left').setTextPen(text_color)
+            plot.getAxis('bottom').setPen(text_color)
+            plot.getAxis('left').setPen(text_color)
+
+            # Link x-axis to first plot
+            if i > 0 and plots:
+                plot.setXLink(plots[0])
+
+            # Hide x-axis labels except on bottom
+            if i < n_panels - 1:
+                plot.getAxis('bottom').setStyle(showValues=False)
+
+            plots.append(plot)
+            self.plot_host._subplots.append(plot)
+
+            # Track primary Pleth axis
+            if config.is_primary_pleth:
+                ax_main = plot
+                self.plot_host.ax_main = plot
+
+            # Track Event channel axis
+            if config.is_event_channel:
+                ax_event = plot
+                self.plot_host.ax_event = plot
+                if config.name != st.event_channel:
+                    st.event_channel = config.name
+
+            # Get channel data
+            if config.name not in st.sweeps:
+                continue
+
+            y_data = st.sweeps[config.name][:, s]
+
+            # Apply filtering if configured (Pleth channels)
+            if config.apply_filtering and config.name == st.analyze_chan:
+                _, y_filtered = self.window._current_trace()
+                y_data = y_filtered
+
+            # Store primary Pleth data for overlays
+            if config.is_primary_pleth:
+                primary_y_data = y_data
+
+            # Plot trace
+            plot.plot(t_plot, y_data, pen=pg.mkPen(trace_color, width=1))
+
+            # Add zero line
+            zero_line = pg.InfiniteLine(pos=0, angle=0,
+                                        pen=pg.mkPen('#666666', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
+            zero_line.setZValue(-5)
+            plot.addItem(zero_line)
+
+            # Add stim spans (blue background) if configured
+            if config.show_stim_spans:
+                all_spans = opto_spans_plot if opto_spans_plot else list(spans_plot)
+                for (t0_span, t1_span) in all_spans:
+                    if t1_span > t0_span:
+                        region = pg.LinearRegionItem(
+                            values=[t0_span, t1_span],
+                            brush=pg.mkBrush(46, 80, 144, 60),
+                            movable=False
+                        )
+                        region.setZValue(-10)
+                        plot.addItem(region)
+
+            # Set labels
+            plot.setLabel('left', config.name)
+
+        # Set title on first plot
+        if plots:
+            title = self._build_plot_title(s)
+            plots[0].setTitle(title, color=text_color)
+
+        # Set xlabel on bottom plot
+        if plots:
+            plots[-1].setLabel('bottom', 'Time (s)')
+
+        # Update main plot reference
+        self.plot_host.plot_widget = plots[0] if plots else None
+
+        # Draw overlays on primary Pleth channel (if configured and we have data)
+        if ax_main is not None and primary_y_data is not None:
+            primary_config = next((c for c in channel_configs if c.is_primary_pleth), None)
+
+            if primary_config and primary_config.show_overlays:
+                # Draw peak markers
+                self._draw_peaks_pyqtgraph(ax_main, s, t_plot, primary_y_data)
+
+                # Draw breath markers
+                self._draw_breath_markers_pyqtgraph(ax_main, s, t_plot, primary_y_data)
+
+                # Draw region overlays (eupnea, apnea, etc.)
+                self._draw_region_overlays_pyqtgraph(ax_main, s, t_plot, t0)
+
+    def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
+        """Draw peak markers on PyQtGraph plot."""
+        import pyqtgraph as pg
+        st = self.state
+
+        if sweep_idx not in st.peaks_by_sweep:
+            return
+
+        peak_idxs = st.peaks_by_sweep[sweep_idx]
+        if len(peak_idxs) == 0:
+            return
+
+        # Get peak times and values
+        t_peaks = t_plot[peak_idxs]
+        y_peaks = y_data[peak_idxs]
+
+        # Create scatter plot for peaks
+        scatter = pg.ScatterPlotItem(
+            x=t_peaks, y=y_peaks,
+            size=10, brush=pg.mkBrush(255, 0, 0),
+            pen=None
+        )
+        scatter.setZValue(10)
+        plot.addItem(scatter)
+
+    def _draw_breath_markers_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
+        """Draw breath event markers on PyQtGraph plot."""
+        import pyqtgraph as pg
+        st = self.state
+
+        if sweep_idx not in st.breath_by_sweep:
+            return
+
+        breath = st.breath_by_sweep[sweep_idx]
+
+        def add_markers(indices, color, symbol):
+            if indices is None or len(indices) == 0:
+                return
+            valid = indices[indices < len(t_plot)]
+            if len(valid) == 0:
+                return
+            scatter = pg.ScatterPlotItem(
+                x=t_plot[valid], y=y_data[valid],
+                size=8, brush=pg.mkBrush(*color),
+                symbol=symbol, pen=None
+            )
+            scatter.setZValue(8)
+            plot.addItem(scatter)
+
+        # Onsets (green triangles)
+        add_markers(breath.get('onsets'), (46, 204, 113), 't')
+        # Offsets (orange triangles)
+        add_markers(breath.get('offsets'), (243, 156, 18), 't1')
+        # Exp mins (blue squares)
+        add_markers(breath.get('expmins'), (31, 120, 180), 's')
+
+    def _draw_region_overlays_pyqtgraph(self, plot, sweep_idx, t_plot, t0):
+        """Draw region overlays (eupnea, apnea, etc.) on PyQtGraph plot."""
+        import pyqtgraph as pg
+        st = self.state
+
+        # Get eupnea regions
+        eupnea_regions = st.sniff_regions_by_sweep.get(sweep_idx, [])
+
+        # Draw eupnea regions (green)
+        for start_t, end_t in eupnea_regions:
+            # Adjust for t0 offset
+            start_adj = start_t - t0
+            end_adj = end_t - t0
+            if end_adj > start_adj:
+                region = pg.LinearRegionItem(
+                    values=[start_adj, end_adj],
+                    brush=pg.mkBrush(46, 125, 50, 60),  # Green with alpha
+                    movable=False
+                )
+                region.setZValue(-8)
+                plot.addItem(region)
 
     def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
         """Build ChannelPanelConfig list from channel manager.

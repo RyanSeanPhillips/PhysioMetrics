@@ -619,6 +619,35 @@ class PyQtGraphPlotHost(QWidget):
             pass
 
     # ------- Compatibility Methods -------
+    def clear(self):
+        """Clear all plots - compatibility with matplotlib figure.clear()."""
+        self._clear_all_items()
+        # Clear and rebuild graphics layout for multi-panel support
+        self.graphics_layout.clear()
+        self._subplots = []
+        # Recreate main plot widget
+        self.plot_widget = self.graphics_layout.addPlot(row=0, col=0)
+        self.plot_widget.showGrid(x=False, y=False)
+        self.ax_main = self.plot_widget
+        self._subplots = [self.plot_widget]
+        # Reconnect click handler
+        self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+
+    def add_subplot(self, gs_item):
+        """Compatibility method for matplotlib add_subplot - returns a PlotItem.
+
+        Note: This is a simplified compatibility layer. PyQtGraph doesn't use
+        GridSpec, so we just add plots to the layout sequentially.
+        """
+        row = len(self._subplots)
+        plot = self.graphics_layout.addPlot(row=row, col=0)
+        plot.showGrid(x=False, y=False)
+        # Link x-axis to first plot for synchronized panning
+        if self._subplots:
+            plot.setXLink(self._subplots[0])
+        self._subplots.append(plot)
+        return plot
+
     def draw_idle(self):
         """Compatibility method - pyqtgraph updates automatically."""
         pass
@@ -631,3 +660,11 @@ class PyQtGraphPlotHost(QWidget):
     def axes(self):
         """Return list of axes for compatibility."""
         return self._subplots
+
+    def tight_layout(self, *args, **kwargs):
+        """Compatibility method - pyqtgraph handles layout automatically."""
+        pass
+
+    def subplots_adjust(self, *args, **kwargs):
+        """Compatibility method - pyqtgraph handles layout automatically."""
+        pass
