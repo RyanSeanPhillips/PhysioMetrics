@@ -5,7 +5,86 @@ This module extracts plotting logic from main.py to improve maintainability.
 """
 
 import numpy as np
+from dataclasses import dataclass
+from typing import Optional, List, Tuple, Dict, Any
 from core import metrics
+
+
+@dataclass
+class ChannelPanelConfig:
+    """Configuration for a single channel panel in multi-channel plotting.
+
+    This standardizes channel configuration across all plotting code paths,
+    enabling unified handling of 1-N channel displays.
+    """
+    name: str                          # Channel name
+    channel_type: str                  # "Pleth", "Opto Stim", "Event", "Raw Signal"
+    height_ratio: float = 0.25         # Relative height (0.0-1.0, normalized later)
+    show_overlays: bool = False        # Show peak/breath/region overlays (Pleth only)
+    is_primary_pleth: bool = False     # Is this the primary Pleth for editing/analysis
+    is_event_channel: bool = False     # Show bout annotations on this panel
+    show_stim_spans: bool = False      # Show blue stim background spans
+    apply_filtering: bool = False      # Apply filtering (Pleth channels only)
+
+    @classmethod
+    def from_channel_manager(cls, name: str, config, is_primary: bool = False) -> 'ChannelPanelConfig':
+        """Create ChannelPanelConfig from a ChannelManager ChannelConfig.
+
+        Args:
+            name: Channel name
+            config: ChannelConfig from channel_manager.py
+            is_primary: Whether this is the primary Pleth channel for analysis
+        """
+        channel_type = config.channel_type
+
+        # Determine height ratio based on channel type
+        if channel_type == "Pleth":
+            height_ratio = 0.6
+        elif channel_type == "Opto Stim":
+            height_ratio = 0.15
+        elif channel_type == "Event":
+            height_ratio = 0.25
+        else:  # Raw Signal
+            height_ratio = 0.25
+
+        return cls(
+            name=name,
+            channel_type=channel_type,
+            height_ratio=height_ratio,
+            show_overlays=(channel_type == "Pleth" and is_primary),
+            is_primary_pleth=is_primary,
+            is_event_channel=(channel_type == "Event"),
+            show_stim_spans=(channel_type == "Pleth"),
+            apply_filtering=(channel_type == "Pleth"),
+        )
+
+    @classmethod
+    def for_single_panel(cls, name: str) -> 'ChannelPanelConfig':
+        """Create config for single-panel mode (legacy mode without channel manager)."""
+        return cls(
+            name=name,
+            channel_type="Pleth",
+            height_ratio=1.0,
+            show_overlays=True,
+            is_primary_pleth=True,
+            is_event_channel=False,
+            show_stim_spans=True,
+            apply_filtering=True,
+        )
+
+    @classmethod
+    def for_grid_preview(cls, name: str) -> 'ChannelPanelConfig':
+        """Create config for grid preview mode (all channels, no overlays)."""
+        return cls(
+            name=name,
+            channel_type="Raw Signal",  # All channels treated as raw in preview
+            height_ratio=1.0,  # Equal height for all in grid
+            show_overlays=False,
+            is_primary_pleth=False,
+            is_event_channel=False,
+            show_stim_spans=False,
+            apply_filtering=False,  # No filtering in preview
+        )
 
 
 class PlotManager:
@@ -25,31 +104,354 @@ class PlotManager:
         # Threshold line artists (for manual removal)
         self._thresh_line_artists = []
 
-    def redraw_main_plot(self):
+    def redraw_main_plot(self, use_unified: bool = True):
         """
         Main plot orchestration method.
         Determines whether to show single-panel, multi-channel, or grid mode.
+
+        Args:
+            use_unified: If True, use the new unified draw_channels() method.
+                        If False, use legacy methods (for backward compatibility during transition).
         """
         st = self.state
         if st.t is None:
             return
 
-        # Always check channel manager first
-        channel_config = self._get_channel_manager_config()
-        visible_channels = channel_config['visible_channels']
+        if use_unified:
+            # NEW: Use unified draw_channels() for all modes
+            configs = self._build_channel_configs_from_manager()
 
-        # If channel manager has any visible channels, use multi-channel plot
-        # This ensures we use the channel manager's selections, not the old dropdown
-        if len(visible_channels) >= 1:
-            self._draw_multi_channel_plot(channel_config)
-            self._restore_editing_mode_connections()
-        elif self.window.single_panel_mode:
-            # No channel manager config, use single panel mode
-            self._draw_single_panel_plot()
-            self._restore_editing_mode_connections()
+            if configs:
+                # Channel manager has visible channels - use unified drawing
+                self.draw_channels(configs, grid_mode=False)
+                self._restore_editing_mode_connections()
+            elif self.window.single_panel_mode:
+                # No channel manager config - create single Pleth config
+                single_config = ChannelPanelConfig.for_single_panel(st.analyze_chan or "Signal")
+
+                # Check for event channel and add it if present
+                if st.event_channel and st.event_channel in st.sweeps:
+                    event_config = ChannelPanelConfig(
+                        name=st.event_channel,
+                        channel_type="Event",
+                        height_ratio=0.3,
+                        show_overlays=False,
+                        is_primary_pleth=False,
+                        is_event_channel=True,
+                        show_stim_spans=False,
+                        apply_filtering=False,
+                    )
+                    # Adjust Pleth height for dual layout
+                    single_config.height_ratio = 0.7
+                    self.draw_channels([single_config, event_config], grid_mode=False)
+                else:
+                    self.draw_channels([single_config], grid_mode=False)
+
+                self._restore_editing_mode_connections()
+            else:
+                # Grid preview mode - all channels, equal size, no overlays
+                grid_configs = [
+                    ChannelPanelConfig.for_grid_preview(ch_name)
+                    for ch_name in st.channel_names
+                ]
+                self.draw_channels(grid_configs, grid_mode=True)
         else:
-            # Multi-channel grid mode - show all channels for current sweep
-            self.plot_all_channels()
+            # LEGACY: Use old methods (for transition/debugging)
+            channel_config = self._get_channel_manager_config()
+            visible_channels = channel_config['visible_channels']
+
+            if len(visible_channels) >= 1:
+                self._draw_multi_channel_plot(channel_config)
+                self._restore_editing_mode_connections()
+            elif self.window.single_panel_mode:
+                self._draw_single_panel_plot()
+                self._restore_editing_mode_connections()
+            else:
+                self.plot_all_channels()
+
+    def draw_channels(self, channel_configs: List[ChannelPanelConfig], grid_mode: bool = False):
+        """
+        Unified multi-channel plotting method that handles 1-N channels.
+
+        This is the core drawing method that all plotting modes should use.
+        It handles:
+        - Single channel (1 config)
+        - Dual channels (2 configs, e.g., Pleth + Event)
+        - Multi-channel (N configs from Channel Manager)
+        - Grid preview mode (all channels, equal size, no overlays)
+
+        Args:
+            channel_configs: List of ChannelPanelConfig objects defining what to plot
+            grid_mode: If True, use grid layout instead of stacked panels
+        """
+        from matplotlib.gridspec import GridSpec
+        st = self.state
+
+        if not channel_configs:
+            return
+
+        n_panels = len(channel_configs)
+
+        # Get current sweep info
+        s = max(0, min(st.sweep_idx, next(iter(st.sweeps.values())).shape[1] - 1))
+
+        # Get time normalization (stim offset)
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_plot = st.t - t0
+            spans_plot = [(a - t0, b - t0) for (a, b) in spans]
+        else:
+            t0 = 0.0
+            t_plot = st.t
+            spans_plot = spans
+
+        # Extract Opto Stim spans from any Opto Stim channel (for blue backgrounds)
+        opto_spans_plot = []
+        for config in channel_configs:
+            if config.channel_type == "Opto Stim" and config.name in st.sweeps:
+                opto_data = st.sweeps[config.name][:, s]
+                opto_spans_plot = self._extract_stim_spans_from_channel(st.t, opto_data, t0)
+                break  # Use first opto channel found
+
+        # Also check hidden opto channels (from channel manager)
+        if not opto_spans_plot and hasattr(self.window, 'channel_manager'):
+            channels = self.window.channel_manager.get_channels()
+            for name, cm_config in channels.items():
+                if cm_config.channel_type == "Opto Stim" and name in st.sweeps:
+                    opto_data = st.sweeps[name][:, s]
+                    opto_spans_plot = self._extract_stim_spans_from_channel(st.t, opto_data, t0)
+                    break
+
+        # Calculate height ratios (normalize)
+        if grid_mode:
+            # Grid mode: equal heights
+            height_ratios = [1.0] * n_panels
+        else:
+            height_ratios = [cfg.height_ratio for cfg in channel_configs]
+            total = sum(height_ratios)
+            if total > 0:
+                height_ratios = [h/total for h in height_ratios]
+
+        # Save previous view if needed
+        prev_xlim = self.plot_host._last_single["xlim"] if self.plot_host._preserve_x else None
+        prev_ylim = self.plot_host._last_single["ylim"] if self.plot_host._preserve_y else None
+
+        # Clear figure and create layout
+        self.plot_host.fig.clear()
+
+        if grid_mode and n_panels > 1:
+            # Grid layout: calculate rows and columns
+            import math
+            n_cols = min(3, n_panels)  # Max 3 columns
+            n_rows = math.ceil(n_panels / n_cols)
+            gs = GridSpec(n_rows, n_cols, hspace=0.3, wspace=0.3, figure=self.plot_host.fig)
+        else:
+            # Stacked layout: single column
+            gs = GridSpec(n_panels, 1, height_ratios=height_ratios, hspace=0.05, figure=self.plot_host.fig)
+
+        # Create subplots
+        axes = []
+        ax_main = None  # Primary Pleth axis for overlays
+        ax_event = None  # Event channel axis for bout annotations
+
+        for i, config in enumerate(channel_configs):
+            if grid_mode and n_panels > 1:
+                row = i // n_cols
+                col = i % n_cols
+                ax = self.plot_host.fig.add_subplot(gs[row, col])
+            else:
+                if i == 0:
+                    ax = self.plot_host.fig.add_subplot(gs[i])
+                else:
+                    ax = self.plot_host.fig.add_subplot(gs[i], sharex=axes[0])
+            axes.append(ax)
+
+            # Track primary Pleth axis
+            if config.is_primary_pleth:
+                ax_main = ax
+                self.plot_host.ax_main = ax
+
+            # Track Event channel axis
+            if config.is_event_channel:
+                ax_event = ax
+                self.plot_host.ax_event = ax
+                # Sync event channel to state
+                if config.name != st.event_channel:
+                    st.event_channel = config.name
+
+            # Hide x-axis labels except on bottom (for stacked layout)
+            if not grid_mode and i < n_panels - 1:
+                ax.tick_params(labelbottom=False)
+
+            # Apply theme
+            self.plot_host.theme_manager.apply_theme(ax, self.plot_host.fig, self.plot_host._current_theme)
+
+        # Get theme colors
+        trace_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['trace_color']
+        text_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['text_color']
+
+        # Clear old scatter references
+        self.plot_host.scatter_peaks = None
+        self.plot_host.scatter_onsets = None
+        self.plot_host.scatter_offsets = None
+        self.plot_host.scatter_expmins = None
+        self.plot_host.scatter_expoffs = None
+        self.plot_host._sigh_artist = None
+        self.plot_host.ax_y2 = None
+        self.plot_host.line_y2 = None
+        self.plot_host.line_y2_secondary = None
+        if ax_event is None:
+            self.plot_host.ax_event = None
+
+        # Plot each channel
+        primary_y_data = None  # Store primary Pleth data for overlays
+
+        for i, (config, ax) in enumerate(zip(channel_configs, axes)):
+            # Get channel data
+            if config.name not in st.sweeps:
+                continue
+
+            y_data = st.sweeps[config.name][:, s]
+
+            # Apply filtering if configured (Pleth channels)
+            if config.apply_filtering and config.name == st.analyze_chan:
+                _, y_filtered = self.window._current_trace()
+                y_data = y_filtered
+
+            # Store primary Pleth data for overlays
+            if config.is_primary_pleth:
+                primary_y_data = y_data
+
+            # Plot trace
+            ax.plot(t_plot, y_data, linewidth=0.9, color=trace_color)
+            ax.axhline(0.0, linestyle="--", linewidth=0.8, color="#666666", alpha=0.9, zorder=0)
+
+            # Add stim spans (blue background) if configured
+            if config.show_stim_spans:
+                # Prefer Opto Stim channel spans
+                all_spans = opto_spans_plot if opto_spans_plot else list(spans_plot)
+                for (t0_span, t1_span) in all_spans:
+                    if t1_span > t0_span:
+                        ax.axvspan(t0_span, t1_span, color="#2E5090", alpha=0.25)
+
+            # Set labels
+            ax.set_ylabel(config.name, fontsize=10)
+            ax.grid(False)
+
+            # Apply Y-axis autoscaling
+            if not grid_mode:
+                self._autoscale_axis(ax, y_data)
+
+        # Set title on first axis
+        title = self._build_plot_title(s)
+        if axes:
+            axes[0].set_title(title, color=text_color)
+
+        # Set xlabel on bottom axis (for stacked layout)
+        if axes and not grid_mode:
+            axes[-1].set_xlabel('Time (s)', fontsize=10)
+
+        # Draw overlays on primary Pleth channel (if configured)
+        if ax_main is not None and primary_y_data is not None:
+            # Find the primary config
+            primary_config = next((c for c in channel_configs if c.is_primary_pleth), None)
+
+            if primary_config and primary_config.show_overlays:
+                # Clear region overlays (will be redrawn)
+                self.plot_host.clear_region_overlays()
+
+                # Draw peak markers
+                self._draw_peak_markers(s, t_plot, primary_y_data)
+
+                # Draw sigh markers
+                self._draw_sigh_markers(s, t_plot, primary_y_data)
+
+                # Draw breath markers
+                self._draw_breath_markers(s, t_plot, primary_y_data)
+
+                # Draw Y2 metric if selected
+                self._draw_y2_metric(s, st.t, t_plot)
+
+                # Draw omitted region overlays
+                self._draw_omitted_regions(s, t_plot)
+
+                # Refresh threshold lines
+                self.refresh_threshold_lines()
+
+                # Set y-limits excluding omitted
+                self._set_ylim_excluding_omitted(s, primary_y_data, t_plot)
+
+                # Draw region overlays (eupnea, apnea, etc.)
+                self._draw_region_overlays(s, st.t, primary_y_data, t_plot, t0)
+
+        # Draw bout annotations on Event channel (if present)
+        if ax_event is not None and ax_main is not None:
+            if s in st.bout_annotations and st.bout_annotations[s]:
+                self._plot_bout_annotations(ax_main, ax_event, st.bout_annotations[s], t0)
+
+        # Restore preserved view or set default xlim
+        if axes:
+            if prev_xlim is not None:
+                axes[0].set_xlim(prev_xlim)
+            elif not grid_mode:
+                # Set default xlim to full time range
+                axes[0].set_xlim(t_plot[0], t_plot[-1])
+        if prev_ylim is not None and ax_main is not None:
+            ax_main.set_ylim(prev_ylim)
+
+        # Set up limit listeners
+        if not grid_mode:
+            self.plot_host._attach_limit_listeners(axes, mode="single")
+            self.plot_host._store_from_axes(mode="single")
+
+        # Layout adjustments
+        if grid_mode:
+            self.plot_host.fig.tight_layout(pad=1.0)
+        else:
+            self.plot_host.fig.tight_layout(pad=0.5, h_pad=0.1, w_pad=0.1)
+            self.plot_host.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
+
+        self.plot_host.canvas.draw_idle()
+
+    def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
+        """Build ChannelPanelConfig list from channel manager.
+
+        Returns:
+            List of ChannelPanelConfig for visible channels
+        """
+        configs = []
+        st = self.state
+
+        if not hasattr(self.window, 'channel_manager'):
+            return configs
+
+        channels = self.window.channel_manager.get_channels()
+
+        # Collect visible channels sorted by order
+        visible_list = []
+        for name, cm_config in channels.items():
+            if cm_config.visible:
+                visible_list.append((name, cm_config))
+
+        # Sort by order attribute
+        visible_list.sort(key=lambda x: x[1].order)
+
+        # Find primary Pleth channel (first Pleth or the analyze_chan)
+        primary_pleth_name = st.analyze_chan
+
+        for name, cm_config in visible_list:
+            is_primary = (cm_config.channel_type == "Pleth" and name == primary_pleth_name)
+            config = ChannelPanelConfig.from_channel_manager(name, cm_config, is_primary)
+            configs.append(config)
+
+        # If no primary was found but there are Pleth channels, make first one primary
+        pleth_configs = [c for c in configs if c.channel_type == "Pleth"]
+        if pleth_configs and not any(c.is_primary_pleth for c in configs):
+            pleth_configs[0].is_primary_pleth = True
+            pleth_configs[0].show_overlays = True
+
+        return configs
 
     def _draw_single_panel_plot(self):
         """Draw the main single-panel plot with all overlays."""
@@ -951,6 +1353,7 @@ class PlotManager:
                 'pleth_channels': [(name, config), ...],  # Channels marked as Pleth
                 'opto_stim_channels': [(name, config), ...],  # All Opto Stim channels (for blue spans)
                 'visible_opto_channels': [(name, config), ...],  # Visible Opto Stim channels (for panels)
+                'event_channels': [(name, config), ...],  # Channels marked as Event
                 'raw_channels': [(name, config), ...],  # Channels marked as Raw Signal
                 'visible_channels': [(name, config), ...],  # All visible channels in order
             }
@@ -959,6 +1362,7 @@ class PlotManager:
             'pleth_channels': [],
             'opto_stim_channels': [],  # All opto channels (for blue spans even if hidden)
             'visible_opto_channels': [],  # Visible opto channels (for panels)
+            'event_channels': [],  # Channels marked as Event (for bout annotations)
             'raw_channels': [],
             'visible_channels': []
         }
@@ -990,6 +1394,8 @@ class PlotManager:
                 result['pleth_channels'].append((name, config))
             elif config.channel_type == "Opto Stim":
                 result['visible_opto_channels'].append((name, config))
+            elif config.channel_type == "Event":
+                result['event_channels'].append((name, config))
             else:  # "Raw Signal"
                 result['raw_channels'].append((name, config))
 
@@ -1026,6 +1432,8 @@ class PlotManager:
                 height_ratios.append(0.6)  # Pleth gets 60%
             elif config.channel_type == "Opto Stim":
                 height_ratios.append(0.15)  # Opto Stim panels are small (TTL signal)
+            elif config.channel_type == "Event":
+                height_ratios.append(0.25)  # Event channels get 25% (like dual subplot)
             else:
                 height_ratios.append(0.25)  # Raw channels get 25% each
 
@@ -1102,6 +1510,10 @@ class PlotManager:
         self.plot_host.line_y2_secondary = None
         self.plot_host.ax_event = None
 
+        # Track Event channel axis for bout annotations
+        ax_event = None
+        event_channel_name = None
+
         # Plot each channel
         for i, ((ch_name, config), ax) in enumerate(zip(plot_channels, axes)):
             # Get channel data
@@ -1116,6 +1528,12 @@ class PlotManager:
                 if ch_name == st.analyze_chan:
                     _, y_filtered = self.window._current_trace()
                     y_data = y_filtered
+
+            # Track Event channel axis
+            if config.channel_type == "Event":
+                ax_event = ax
+                event_channel_name = ch_name
+                self.plot_host.ax_event = ax
 
             # Plot trace
             ax.plot(t_plot, y_data, linewidth=0.9, color=trace_color)
@@ -1139,6 +1557,10 @@ class PlotManager:
 
             # Apply Y-axis autoscaling
             self._autoscale_axis(ax, y_data)
+
+        # Sync Event channel to state (for event detection dialog)
+        if event_channel_name and event_channel_name != st.event_channel:
+            st.event_channel = event_channel_name
 
         # Set title on first axis
         title = self._build_plot_title(s)
@@ -1185,6 +1607,11 @@ class PlotManager:
 
             # Draw region overlays (eupnea, apnea, etc.)
             self._draw_region_overlays(s, st.t, y_pleth, t_plot, t0)
+
+        # Draw bout annotations on Event channel (if present)
+        if ax_event is not None and ax_main is not None:
+            if s in st.bout_annotations and st.bout_annotations[s]:
+                self._plot_bout_annotations(ax_main, ax_event, st.bout_annotations[s], t0)
 
         # Restore preserved view or set default xlim to full data range
         if axes:
