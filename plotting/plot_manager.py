@@ -472,6 +472,19 @@ class PlotManager:
         text_color = '#d4d4d4' if is_dark else '#000000'
         bg_color = '#1e1e1e' if is_dark else '#ffffff'
 
+        # Save current view range to prevent jumpiness on sweep change
+        prev_x_range = None
+        prev_y_range = None
+        if hasattr(self.plot_host, '_subplots') and self.plot_host._subplots:
+            try:
+                first_plot = self.plot_host._subplots[0]
+                if self.plot_host._preserve_x:
+                    prev_x_range = first_plot.viewRange()[0]
+                if self.plot_host._preserve_y:
+                    prev_y_range = first_plot.viewRange()[1]
+            except:
+                pass
+
         # Clear and rebuild layout
         self.plot_host.graphics_layout.clear()
         self.plot_host._subplots = []
@@ -532,8 +545,12 @@ class PlotManager:
             if config.is_primary_pleth:
                 primary_y_data = y_data
 
-            # Plot trace
-            plot.plot(t_plot, y_data, pen=pg.mkPen(trace_color, width=1))
+            # Plot trace with smart downsampling
+            # clipToView=True only sends visible data to GPU
+            # autoDownsample uses a peak-preserving algorithm that looks better when zoomed out
+            # downsampleMethod='peak' preserves peaks/valleys for cleaner rendering
+            plot.plot(t_plot, y_data, pen=pg.mkPen(trace_color, width=1),
+                      clipToView=True, autoDownsample=True, downsampleMethod='peak')
 
             # Add zero line
             zero_line = pg.InfiniteLine(pos=0, angle=0,
@@ -548,7 +565,7 @@ class PlotManager:
                     if t1_span > t0_span:
                         region = pg.LinearRegionItem(
                             values=[t0_span, t1_span],
-                            brush=pg.mkBrush(46, 80, 144, 80),  # Blue with alpha
+                            brush=pg.mkBrush(70, 130, 220, 100),  # Brighter blue with alpha
                             pen=pg.mkPen(None),  # No border lines
                             movable=False
                         )
@@ -583,6 +600,17 @@ class PlotManager:
 
                 # Draw region overlays (eupnea, apnea, etc.)
                 self._draw_region_overlays_pyqtgraph(ax_main, s, t_plot, t0)
+
+        # Restore previous view range to prevent jumpiness on sweep change
+        if plots and (prev_x_range is not None or prev_y_range is not None):
+            try:
+                first_plot = plots[0]
+                if prev_x_range is not None:
+                    first_plot.setXRange(prev_x_range[0], prev_x_range[1], padding=0)
+                if prev_y_range is not None:
+                    first_plot.setYRange(prev_y_range[0], prev_y_range[1], padding=0)
+            except:
+                pass
 
     def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw peak markers on PyQtGraph plot."""
