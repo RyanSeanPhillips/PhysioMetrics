@@ -65,7 +65,7 @@ class AppState:
     #   'labels_mlp_ro': np.ndarray,        # Read-only MLP predictions (for classifier switching)
     #
     #   # Eupnea/Sniffing classification (only for breaths where labels==1)
-    #   'gmm_class': np.ndarray,            # USER-EDITABLE: -1=unclassified, 0=eupnea, 1=sniffing
+    #   'breath_type_class': np.ndarray,    # USER-EDITABLE: -1=unclassified, 0=eupnea, 1=sniffing (from active classifier)
     #   'eupnea_sniff_source': np.ndarray,  # 'gmm', 'user_region', 'xgboost', etc.
     #   'gmm_class_ro': np.ndarray,         # Read-only GMM predictions (for classifier switching)
     #   'eupnea_sniff_xgboost_ro': np.ndarray,  # Read-only XGBoost predictions
@@ -83,7 +83,7 @@ class AppState:
     # ML Models: Loaded models and their metadata
     loaded_ml_models: Dict[str, Dict] = field(default_factory=dict)  # {'model1_xgboost': {'model': model_obj, 'metadata': {...}}, ...}
     active_classifier: str = 'xgboost'  # Which classifier to use for display: 'threshold', 'xgboost', 'rf', 'mlp'
-    active_eupnea_sniff_classifier: str = 'xgboost'  # Which classifier for eupnea/sniff: 'gmm', 'xgboost', 'rf', 'mlp'
+    active_eupnea_sniff_classifier: str = 'gmm'  # Which classifier for eupnea/sniff: 'gmm', 'xgboost', 'rf', 'mlp', 'all_eupnea', 'none'
     active_sigh_classifier: str = 'xgboost'  # Which classifier for sigh: 'manual', 'xgboost', 'rf', 'mlp'
     omitted_points: Dict[int, List[int]] = field(default_factory=dict)       # sweep -> sample idxs
     omitted_ranges: Dict[int, List[Tuple[int,int]]] = field(default_factory=dict)  # sweep -> [(i0,i1), ...]

@@ -12,7 +12,7 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
     """
     Build eupnea and sniffing regions from GMM classifications in all_peaks_by_sweep.
 
-    Reads the 'gmm_class' field from state.all_peaks_by_sweep where:
+    Reads the 'breath_type_class' field from state.all_peaks_by_sweep where:
     - 0 = eupnea
     - 1 = sniffing
     - -1 = unclassified
@@ -21,7 +21,7 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
 
     Args:
         state: Application state object containing:
-            - all_peaks_by_sweep: Dict with gmm_class field
+            - all_peaks_by_sweep: Dict with breath_type_class field
             - breath_by_sweep: Dict with onsets/offsets
             - peaks_by_sweep: Dict with peak indices
             - t: Time array
@@ -56,8 +56,8 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
     for sweep_idx in sorted(state.all_peaks_by_sweep.keys()):
         all_peaks = state.all_peaks_by_sweep[sweep_idx]
 
-        # Skip if no GMM classification
-        if 'gmm_class' not in all_peaks:
+        # Skip if no GMM classification (key missing or value is None)
+        if 'breath_type_class' not in all_peaks or all_peaks['breath_type_class'] is None:
             continue
 
         # Get breath data for time mapping
@@ -80,16 +80,16 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
         current_eupnea_start = None
         current_eupnea_end = None
 
-        # Iterate through all peaks (but only process label=1 breaths with gmm classification)
-        for i, (peak_idx, label, gmm_class) in enumerate(zip(
+        # Iterate through all peaks (but only process label=1 breaths with breath type classification)
+        for i, (peak_idx, label, breath_type_class) in enumerate(zip(
             all_peaks['indices'],
             all_peaks['labels'],
-            all_peaks['gmm_class']
+            all_peaks['breath_type_class']
         )):
-            # Skip non-breath peaks (label=0) or unclassified peaks (gmm_class=-1)
+            # Skip non-breath peaks (label=0) or unclassified peaks (breath_type_class=-1)
             # IMPORTANT: Don't close runs when skipping - let consecutive breaths stay continuous
             # Only close when switching between eupnea ↔ sniffing
-            if label == 0 or gmm_class == -1:
+            if label == 0 or breath_type_class == -1:
                 continue
 
             # Find this peak's breath index to get onset/offset
@@ -112,8 +112,8 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
                 else:
                     end_idx = len(t) - 1
 
-            # Classify based on gmm_class label
-            if gmm_class == 1:  # Sniffing
+            # Classify based on breath_type_class label
+            if breath_type_class == 1:  # Sniffing
                 n_confident_sniffs += 1
 
                 if current_sniff_start is None:
@@ -128,7 +128,7 @@ def build_eupnea_sniffing_regions(state, verbose=True, log_prefix="[gmm]"):
                     current_eupnea_start = None
                     current_eupnea_end = None
 
-            elif gmm_class == 0:  # Eupnea
+            elif breath_type_class == 0:  # Eupnea
                 n_confident_eupnea += 1
 
                 if current_eupnea_start is None:
@@ -189,7 +189,7 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
                                        cluster_probabilities=None, confidence_threshold=0.5,
                                        update_editable=True):
     """
-    Store GMM classification results in all_peaks_by_sweep['gmm_class'] field.
+    Store GMM classification results in all_peaks_by_sweep['breath_type_class'] field.
 
     This allows the classification to persist through manual peak edits, since it's
     keyed by peak sample index (which is stable).
@@ -201,7 +201,7 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
         sniffing_cluster_id: Which cluster is sniffing
         cluster_probabilities: Optional probability matrix (n_breaths, n_clusters)
         confidence_threshold: Minimum probability to classify as sniffing (default 0.5)
-        update_editable: If True, also update gmm_class (editable). If False, only update
+        update_editable: If True, also update breath_type_class (editable). If False, only update
                         gmm_class_ro (read-only reference for classifier switching).
 
     Returns:
@@ -221,10 +221,10 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
         if all_peaks is None:
             continue
 
-        # Initialize gmm_class and gmm_class_ro arrays if they don't exist
-        if 'gmm_class' not in all_peaks:
-            all_peaks['gmm_class'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
-        if 'gmm_class_ro' not in all_peaks:
+        # Initialize breath_type_class and gmm_class_ro arrays if they don't exist or are None
+        if 'breath_type_class' not in all_peaks or all_peaks['breath_type_class'] is None:
+            all_peaks['breath_type_class'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
+        if 'gmm_class_ro' not in all_peaks or all_peaks['gmm_class_ro'] is None:
             all_peaks['gmm_class_ro'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
 
         # Find this peak in all_peaks_by_sweep
@@ -233,19 +233,19 @@ def store_gmm_classifications_in_peaks(state, breath_cycles, cluster_labels, sni
             continue
         peak_pos = np.where(peak_mask)[0][0]
 
-        # Determine classification
+        # Determine classification (0=eupnea, 1=sniffing)
         if cluster_probabilities is not None:
             # Use probability threshold
             sniff_prob = cluster_probabilities[i, sniffing_cluster_id]
-            gmm_class = 1 if sniff_prob >= confidence_threshold else 0
+            computed_class = 1 if sniff_prob >= confidence_threshold else 0
         else:
             # Use hard cluster assignment
-            gmm_class = 1 if cluster_labels[i] == sniffing_cluster_id else 0
+            computed_class = 1 if cluster_labels[i] == sniffing_cluster_id else 0
 
         # Store in read-only array (always), and editable array (if update_editable=True)
-        all_peaks['gmm_class_ro'][peak_pos] = gmm_class  # Read-only reference for classifier switching
+        all_peaks['gmm_class_ro'][peak_pos] = computed_class  # Read-only reference for classifier switching
         if update_editable:
-            all_peaks['gmm_class'][peak_pos] = gmm_class
+            all_peaks['breath_type_class'][peak_pos] = computed_class
         n_classified += 1
 
     return n_classified

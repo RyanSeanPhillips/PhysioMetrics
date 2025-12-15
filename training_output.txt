@@ -1,0 +1,860 @@
+C:\Users\rphil2\Dropbox\python scripts\breath_analysis\pyqt6\_internal\scripts\train_ml_models.py:1030: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined_breaths_df = pd.concat(breaths_dfs, ignore_index=True)
+Found 6 NPZ file(s)
+
+================================================================================
+Deduplicating NPZ files by source recording...
+================================================================================
+
+[DEDUP] Source: Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_0
+  [KEEP] Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_0_20251114_164426_ml_training.npz
+    Timestamp: 2025-11-14T16:44:26.314751, Quality: 9/10
+    User: Ryan Phillips
+  [SKIP] Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_0_20251114_143132_ml_training.npz
+    Timestamp: 2025-11-14T14:31:32.741401, Quality: 9/10
+    User: Ryan Phillips
+  [SKIP] Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_0_20251114_125438_ml_training.npz
+    Timestamp: , Quality: 9/10
+    User: Ryan Phillips
+
+[DEDUP] Source: Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_2
+  [KEEP] Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_2_20251114_162143_ml_training.npz
+    Timestamp: 2025-11-14T16:21:43.054480, Quality: 9/10
+    User: Ryan Phillips
+  [SKIP] Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_2_20251114_161104_ml_training.npz
+    Timestamp: 2025-11-14T16:11:04.118219, Quality: 5/10
+    User: Ryan Phillips
+
+================================================================================
+Deduplication Summary:
+  Total files: 6
+  Unique recordings: 3
+  Files to use: 3
+  Duplicates filtered: 3
+================================================================================
+
+
+[INFO] Combining 3 unique recordings for training
+
+================================================================================
+Combining 3 datasets...
+================================================================================
+
+[1/3] Loading Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_0_20251114_164426_ml_training.npz...
+  ALL_PEAKS: 4703, BREATHS_ONLY: 3122, Merges: 14
+
+[2/3] Loading Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_1_20251114_200936_ml_training.npz...
+  ALL_PEAKS: 3472, BREATHS_ONLY: 3117, Merges: 18
+
+[3/3] Loading Vgat_Con-ChR2_RVM_30Hz15s10ms_10_25121004_IN_2_20251114_162143_ml_training.npz...
+  ALL_PEAKS: 4967, BREATHS_ONLY: 4953, Merges: 2
+
+================================================================================
+Combining datasets...
+================================================================================
+
+Combined totals:
+  ALL_PEAKS: 13142 peaks
+  BREATHS_ONLY: 11192 breaths
+  Merges: 34
+
+================================================================================
+Building Dataset 1 (Model 1: Breath vs Noise)
+================================================================================
+Columns: 58
+Total peaks: 13142
+Feature columns: 48
+  Examples: ['peak_number', 'gap_to_prev', 'gap_to_next', 'gap_to_prev_norm', 'gap_to_next_norm']
+
+[WARNING] Missing values detected:
+gap_to_prev                       30
+gap_to_next                       30
+gap_to_prev_norm                  30
+gap_to_next_norm                  30
+trough_depth_prev                 30
+trough_ratio_prev                 30
+trough_value_prev                 30
+trough_depth_next                 30
+trough_ratio_next                 30
+trough_value_next                 30
+left_prominence                   30
+right_prominence                  30
+prom_asymmetry                    60
+prom_asymmetry_signed             60
+total_prominence                  60
+trough_asymmetry_signed           60
+expmin_value                      30
+te                                30
+next_peak_amplitude               30
+prev_peak_amplitude               30
+amplitude_ratio_to_next           30
+amplitude_ratio_to_prev           30
+amplitude_diff_to_next_signed     30
+amplitude_diff_to_prev_signed     30
+next_peak_prominence              60
+prev_peak_prominence              60
+prominence_ratio_to_next          90
+prominence_ratio_to_prev          90
+next_peak_onset_height_ratio      30
+prev_peak_onset_height_ratio      30
+next_peak_ti                      30
+prev_peak_ti                      30
+ti_ratio_to_next                  30
+ti_ratio_to_prev                  30
+next_peak_te                      60
+prev_peak_te                      30
+te_ratio_to_next                 354
+te_ratio_to_prev                 356
+dtype: int64
+
+[Missing Values Histogram]
+  Saved: examples\ML_Training_Data\figures\missing_values_model1.png
+  Features with missing values: 38/48
+  Max missing: 356 (2.7%)
+  -> Filling missing values with column medians
+
+[Class distribution]
+  Noise (0): 1950 (14.8%)
+  Breath (1): 11192 (85.2%)
+
+[Baseline Threshold Performance]
+  Threshold correct (auto/threshold): 13041 (99.2%)
+  Manual corrections needed (manual/user): 101 (0.8%)
+  GMM labeled: 0 (0.0%)
+
+  --> Baseline accuracy: 99.2%
+  --> Error rate to improve: 0.8%
+
+================================================================================
+Training Random Forest - Model 1 (Breath vs Noise)
+================================================================================
+Train size: 10513, Test size: 2629
+
+Training Random Forest...
+
+[ACCURACY] 0.996
+  vs Baseline: 99.2% --> 99.6% (+0.4% absolute)
+  Error reduction: 45.6%
+
+Performing 5-fold cross-validation...
+CV Accuracy: 0.990 (+/- 0.014)
+
+[Classification Report]
+              precision    recall  f1-score   support
+
+           0       0.98      0.99      0.99       390
+           1       1.00      1.00      1.00      2239
+
+    accuracy                           1.00      2629
+   macro avg       0.99      0.99      0.99      2629
+weighted avg       1.00      1.00      1.00      2629
+
+Confusion Matrix:
+[[ 385    5]
+ [   6 2233]]
+
+[Top 10 Most Important Features]
+  amplitude_absolute                       0.1429
+  right_prominence                         0.1321
+  amplitude_normalized                     0.1244
+  trough_depth_next                        0.0802
+  total_prominence                         0.0778
+  prominence_ratio_to_prev                 0.0692
+  trough_value_next                        0.0569
+  amplitude_ratio_to_prev                  0.0540
+  prom_asymmetry_signed                    0.0400
+  expmin_value                             0.0275
+  Saved feature importance: feature_importance_rf_model_1_(breath_vs_noise).png
+  Saved confusion matrix: confusion_matrix_rf_model_1_(breath_vs_noise).png
+
+================================================================================
+Training XGBoost - Model 1 (Breath vs Noise)
+================================================================================
+Train size: 10513, Test size: 2629
+
+Training XGBoost (binary:logistic)...
+
+[ACCURACY] 0.996
+  vs Baseline: 99.2% --> 99.6% (+0.4% absolute)
+  Error reduction: 50.5%
+
+Performing 5-fold cross-validation...
+CV Accuracy: 0.987 (+/- 0.017)
+
+[Classification Report]
+              precision    recall  f1-score   support
+
+           0       0.99      0.98      0.99       390
+           1       1.00      1.00      1.00      2239
+
+    accuracy                           1.00      2629
+   macro avg       0.99      0.99      0.99      2629
+weighted avg       1.00      1.00      1.00      2629
+
+Confusion Matrix:
+[[ 384    6]
+ [   4 2235]]
+
+[Top 10 Most Important Features]
+  amplitude_absolute                       0.7833
+  right_prominence                         0.0349
+  prominence_ratio_to_prev                 0.0183
+  prom_asymmetry                           0.0152
+  trough_ratio_next                        0.0122
+  te_ratio_to_next                         0.0119
+  ti                                       0.0075
+  total_prominence                         0.0070
+  prom_asymmetry_signed                    0.0064
+  p_noise                                  0.0063
+  Saved feature importance: feature_importance_xgb_model_1_(breath_vs_noise).png
+  Saved confusion matrix: confusion_matrix_xgb_model_1_(breath_vs_noise).png
+
+================================================================================
+Edge Case Analysis - Model 1 (Breath vs Noise)
+================================================================================C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+C:\Users\rphil2\AppData\Local\miniforge3\envs\plethapp\Lib\site-packages\sklearn\utils\validation.py:2742: UserWarning: X has feature names, but DecisionTreeClassifier was fitted without feature names
+  warnings.warn(
+
+
+[Edge Case Statistics]
+  Total test samples: 2629
+  RF errors: 11
+  XGBoost errors: 10
+  Either model error: 12
+  RF-XGBoost disagreements: 3
+
+[Confidence Distribution]
+  High confidence (>0.95): 2580 (98.1%)
+  Medium (0.60-0.95): 47 (1.8%)
+  Low (<0.60): 2 (0.1%)
+
+[Priority Score vs Actual Errors]
+  Question: Do high-priority samples catch misclassifications?
+  Top  1% (  26 samples): Catch 11/12 errors (91.7%)
+  Top  5% ( 131 samples): Catch 12/12 errors (100.0%)
+  Top 10% ( 262 samples): Catch 12/12 errors (100.0%)
+  Top 20% ( 525 samples): Catch 12/12 errors (100.0%)
+
+[Model Disagreement vs Errors]
+  3 disagreements contain 3 errors (100.0%)
+
+  Saved edge case analysis: edge_case_analysis_model_1_(breath_vs_noise).png
+
+================================================================================
+Learning Curves - RF Model 1 (All Data)
+================================================================================
+
+[Learning Curve Results]
+  Training set sizes: [ 1051  2102  3153  4205  5256  6307  7359  8410  9461 10513]
+  Final validation accuracy: 0.990 (+/- 0.014)
+  [ASSESSMENT] Curve has plateaued
+               -> More data may not help much
+  Saved learning curve: learning_curve_rf_model_1_(all_data).png
+
+================================================================================
+Learning Curves - RF Model 1 (Manual Corrections Only only)
+================================================================================
+  Subset size: 101 samples
+
+[Learning Curve Results]
+  Training set sizes: [ 8 16 24 32 40 48 56 64 72 80]
+  Final validation accuracy: 0.980 (+/- 0.024)
+  [ASSESSMENT] Curve has plateaued
+               -> More data may not help much
+  Saved learning curve: learning_curve_rf_model_1_manual_corrections_only.png
+
+================================================================================
+Building Dataset 2 (Model 2: Breath Type)
+================================================================================
+Columns: 58
+Total breaths: 11192
+Feature columns: 48
+
+[WARNING] Missing values detected:
+p_noise                          5362
+p_breath                         5362
+gap_to_prev                        30
+gap_to_next                        30
+gap_to_prev_norm                   30
+gap_to_next_norm                   30
+trough_depth_prev                  30
+trough_ratio_prev                  30
+trough_value_prev                  30
+trough_depth_next                  30
+trough_ratio_next                  30
+trough_value_next                  30
+left_prominence                    30
+right_prominence                   30
+prom_asymmetry                     60
+prom_asymmetry_signed              60
+total_prominence                   60
+trough_asymmetry_signed            60
+expmin_value                       30
+te                                 30
+next_peak_amplitude                30
+prev_peak_amplitude                30
+amplitude_ratio_to_next            30
+amplitude_ratio_to_prev            30
+amplitude_diff_to_next_signed      30
+amplitude_diff_to_prev_signed      30
+next_peak_prominence               60
+prev_peak_prominence               60
+prominence_ratio_to_next           90
+prominence_ratio_to_prev           90
+next_peak_onset_height_ratio       30
+prev_peak_onset_height_ratio       30
+next_peak_ti                       30
+prev_peak_ti                       30
+ti_ratio_to_next                   30
+ti_ratio_to_prev                   30
+next_peak_te                       60
+prev_peak_te                       30
+te_ratio_to_next                   63
+te_ratio_to_prev                   63
+dtype: int64
+
+[Missing Values Histogram]
+  Saved: examples\ML_Training_Data\figures\missing_values_model2.png
+  Features with missing values: 40/48
+  Max missing: 5362 (47.9%)
+  -> Filling missing values with column medians
+
+[Class distribution]
+  Eupnea: 7069 (63.2%)
+  Sniffing: 4097 (36.6%)
+  Sigh: 26 (0.2%)
+
+================================================================================
+Training Random Forest - Model 2 (Breath Type)
+================================================================================
+Train size: 8953, Test size: 2239
+
+Training Random Forest...
+
+[ACCURACY] 0.982
+
+Performing 5-fold cross-validation...
+CV Accuracy: 0.964 (+/- 0.015)
+
+[Classification Report]
+              precision    recall  f1-score   support
+
+      eupnea       0.99      0.99      0.99      1414
+        sigh       1.00      0.40      0.57         5
+    sniffing       0.97      0.98      0.98       820
+
+    accuracy                           0.98      2239
+   macro avg       0.99      0.79      0.84      2239
+weighted avg       0.98      0.98      0.98      2239
+
+Confusion Matrix:
+[[1393    0   21]
+ [   1    2    2]
+ [  17    0  803]]
+
+[Top 10 Most Important Features]
+  ti                                       0.2075
+  gap_to_prev                              0.0982
+  prev_peak_ti                             0.0896
+  next_peak_ti                             0.0797
+  total_prominence                         0.0607
+  gap_to_next                              0.0562
+  prev_peak_te                             0.0483
+  left_prominence                          0.0332
+  trough_depth_next                        0.0318
+  amplitude_absolute                       0.0314
+  Saved feature importance: feature_importance_rf_model_2_(breath_type).png
+  Saved confusion matrix: confusion_matrix_rf_model_2_(breath_type).png
+
+================================================================================
+Training XGBoost - Model 2 (Breath Type)
+================================================================================
+Label mapping: {'sniffing': 0, 'eupnea': 1, 'sigh': 2}
+Train size: 8953, Test size: 2239
+
+Training XGBoost (multi:softmax)...
+
+[ACCURACY] 0.986
+
+Performing 5-fold cross-validation...
+CV Accuracy: 0.974 (+/- 0.008)
+
+[Classification Report]
+              precision    recall  f1-score   support
+
+      eupnea       0.98      1.00      0.99      1414
+        sigh       0.75      0.60      0.67         5
+    sniffing       0.99      0.97      0.98       820
+
+    accuracy                           0.99      2239
+   macro avg       0.91      0.86      0.88      2239
+weighted avg       0.99      0.99      0.99      2239
+
+Confusion Matrix:
+[[1410    0    4]
+ [   1    3    1]
+ [  25    1  794]]
+
+[Top 10 Most Important Features]
+  ti                                       0.5069
+  amplitude_absolute                       0.1147
+  p_breath                                 0.0300
+  left_prominence                          0.0274
+  te                                       0.0202
+  amplitude_normalized                     0.0173
+  total_prominence                         0.0173
+  gap_to_next_norm                         0.0159
+  amplitude_ratio_to_next                  0.0129
+  prominence_ratio_to_prev                 0.0120
+  Saved feature importance: feature_importance_xgb_model_2_(breath_type).png
+  Saved confusion matrix: confusion_matrix_xgb_model_2_(breath_type).png
+
+================================================================================
+Edge Case Analysis - Model 2 (Breath Type)
+================================================================================
+
+[Edge Case Statistics]
+  Total test samples: 2239
+  RF errors: 1063
+  XGBoost errors: 32
+  Either model error: 1073
+  RF-XGBoost disagreements: 1053
+
+[Confidence Distribution]
+  High confidence (>0.95): 2009 (89.7%)
+  Medium (0.60-0.95): 223 (10.0%)
+  Low (<0.60): 7 (0.3%)
+
+[Priority Score vs Actual Errors]
+  Question: Do high-priority samples catch misclassifications?
+  Top  1% (  22 samples): Catch 22/1073 errors (2.1%)
+  Top  5% ( 111 samples): Catch 111/1073 errors (10.3%)
+  Top 10% ( 223 samples): Catch 223/1073 errors (20.8%)
+  Top 20% ( 447 samples): Catch 447/1073 errors (41.7%)
+
+[Model Disagreement vs Errors]
+  1053 disagreements contain 1053 errors (100.0%)
+
+  Saved edge case analysis: edge_case_analysis_model_2_(breath_type).png
+
+================================================================================
+Learning Curves - RF Model 2 (All Breaths)
+================================================================================
+
+[Learning Curve Results]
+  Training set sizes: [ 895 1790 2685 3581 4476 5371 6267 7162 8057 8953]
+  Final validation accuracy: 0.964 (+/- 0.015)
+  [RECOMMENDATION] Curve still improving (+0.013)
+                   -> Consider collecting more data!
+  Saved learning curve: learning_curve_rf_model_2_(all_breaths).png
+
+[INFO] Only 26 sighs - too few for learning curve (need >50)
+
+================================================================================
+Training Complete!
+================================================================================
+
+[SUCCESS] Models trained successfully
+
+[Next steps]
+   1. Review feature importance to understand what drives predictions
+   2. Label more datasets to improve model performance
+   3. Experiment with different model hyperparameters
+   4. Save trained models for deployment in PhysioMetrics

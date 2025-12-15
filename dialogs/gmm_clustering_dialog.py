@@ -2187,7 +2187,7 @@ GMM is an unsupervised machine learning technique that automatically identifies 
         print(f"[gmm-clustering] Frequency threshold: {self.main_window.eupnea_freq_threshold} Hz, Min duration: {self.main_window.eupnea_min_duration} s")
 
         # Store GMM classification directly in all_peaks_by_sweep
-        # Add 'gmm_class' field: 0=eupnea, 1=sniffing, -1=unclassified
+        # Add 'breath_type_class' field: 0=eupnea, 1=sniffing, -1=unclassified
         for i, (sweep_idx, breath_idx) in enumerate(self.breath_cycles):
             # Get peak sample index for this breath
             peaks = self.main_window.state.peaks_by_sweep.get(sweep_idx)
@@ -2200,12 +2200,12 @@ GMM is an unsupervised machine learning technique that automatically identifies 
             if all_peaks is None:
                 continue
 
-            # Initialize arrays if they don't exist
-            if 'gmm_class' not in all_peaks:
-                all_peaks['gmm_class'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
-            if 'gmm_class_ro' not in all_peaks:
+            # Initialize arrays if they don't exist or are None
+            if 'breath_type_class' not in all_peaks or all_peaks['breath_type_class'] is None:
+                all_peaks['breath_type_class'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
+            if 'gmm_class_ro' not in all_peaks or all_peaks['gmm_class_ro'] is None:
                 all_peaks['gmm_class_ro'] = np.full(len(all_peaks['indices']), -1, dtype=np.int8)
-            if 'eupnea_sniff_source' not in all_peaks:
+            if 'eupnea_sniff_source' not in all_peaks or all_peaks['eupnea_sniff_source'] is None:
                 all_peaks['eupnea_sniff_source'] = np.array(['auto'] * len(all_peaks['indices']))
 
             # Find this peak in all_peaks_by_sweep
@@ -2222,7 +2222,7 @@ GMM is an unsupervised machine learning technique that automatically identifies 
             all_peaks['gmm_class_ro'][peak_pos] = gmm_prediction
 
             # Copy to user-editable array (will be used for display/export)
-            all_peaks['gmm_class'][peak_pos] = gmm_prediction
+            all_peaks['breath_type_class'][peak_pos] = gmm_prediction
             all_peaks['eupnea_sniff_source'][peak_pos] = 'gmm'
 
         # Collect all sniffing breaths (just breath indices, not time ranges yet)

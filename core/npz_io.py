@@ -13,6 +13,15 @@ from typing import Dict, Any, Optional, Tuple
 from core.state import AppState
 
 
+class OriginalFileNotFoundError(Exception):
+    """Raised when original data file cannot be found and user input is needed."""
+    def __init__(self, original_path: Path, npz_path: Path, message: str = None):
+        self.original_path = original_path
+        self.npz_path = npz_path
+        self.message = message or f"Original file not found: {original_path}"
+        super().__init__(self.message)
+
+
 def get_npz_path_for_channel(data_path: Path, channel_name: str) -> Path:
     """
     Get .pleth.npz path for a specific channel.
@@ -91,7 +100,7 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
     data = {}
 
     # ===== METADATA =====
-    data['version'] = '1.0.9'  # PhysioMetrics version
+    data['version'] = '1.1.0'  # PhysioMetrics version (1.1.0: renamed gmm_class to breath_type_class)
     data['saved_timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     data['original_file_path'] = str(state.in_path)
 
@@ -163,6 +172,18 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             data[f'all_peaks_indices_sweep_{sweep_idx}'] = all_peaks_dict['indices']
             data[f'all_peaks_labels_sweep_{sweep_idx}'] = all_peaks_dict['labels']
             data[f'all_peaks_label_source_sweep_{sweep_idx}'] = all_peaks_dict['label_source']
+
+            # Save breath type classification (eupnea/sniffing labels from active classifier)
+            if 'breath_type_class' in all_peaks_dict and all_peaks_dict['breath_type_class'] is not None:
+                data[f'all_peaks_breath_type_class_sweep_{sweep_idx}'] = all_peaks_dict['breath_type_class']
+
+            # Save read-only GMM predictions (for classifier switching)
+            if 'gmm_class_ro' in all_peaks_dict and all_peaks_dict['gmm_class_ro'] is not None:
+                data[f'all_peaks_gmm_class_ro_sweep_{sweep_idx}'] = all_peaks_dict['gmm_class_ro']
+
+            # Save eupnea/sniff source (which classifier produced each label)
+            if 'eupnea_sniff_source' in all_peaks_dict and all_peaks_dict['eupnea_sniff_source'] is not None:
+                data[f'all_peaks_eupnea_sniff_source_sweep_{sweep_idx}'] = all_peaks_dict['eupnea_sniff_source']
 
     # ===== PEAK METRICS (for ML export) =====
     # Save peak_metrics_by_sweep as JSON (list of dicts)
@@ -256,7 +277,7 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
     else:
         data['has_gmm_cache'] = False
 
-    # ===== APP SETTINGS (filter order, zscore, notch, apnea threshold) =====
+    # ===== APP SETTINGS (filter order, zscore, notch, apnea threshold, classifiers) =====
     if app_settings is not None:
         data['has_app_settings'] = True
         data['filter_order'] = app_settings.get('filter_order', 4)
@@ -264,6 +285,7 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         data['notch_filter_lower'] = app_settings.get('notch_filter_lower', 0.0) if app_settings.get('notch_filter_lower') is not None else 0.0
         data['notch_filter_upper'] = app_settings.get('notch_filter_upper', 0.0) if app_settings.get('notch_filter_upper') is not None else 0.0
         data['apnea_threshold'] = app_settings.get('apnea_threshold', 0.5)
+        data['active_eupnea_sniff_classifier'] = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
     else:
         data['has_app_settings'] = False
 
@@ -305,7 +327,8 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
     np.savez_compressed(npz_path, **data)
 
 
-def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[AppState, bool, Optional[Dict], Optional[Dict]]:
+def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
+                        alternative_data_path: Path = None) -> Tuple[AppState, bool, Optional[Dict], Optional[Dict]]:
     """
     Load complete analysis state from .pleth.npz file.
 
@@ -313,6 +336,8 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[A
         npz_path: Path to .pleth.npz file
         reload_raw_data: If True, reload raw data from original file
                         If False, only load if embedded in NPZ
+        alternative_data_path: If provided, use this path instead of the original
+                              (useful when original file has moved)
 
     Returns:
         (state, raw_data_loaded, gmm_cache, app_settings)
@@ -348,21 +373,48 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[A
     # ===== LOAD RAW DATA =====
     raw_data_loaded = False
 
-    if reload_raw_data and original_file_path.exists():
+    # Use alternative path if provided, otherwise try to find the original
+    data_path_to_load = alternative_data_path if alternative_data_path else original_file_path
+
+    # If the stored path doesn't exist, try to find the file relative to the NPZ location
+    if reload_raw_data and not data_path_to_load.exists():
+        original_filename = original_file_path.name
+        print(f"[npz_io] Original path not found: {original_file_path}")
+        print(f"[npz_io] Searching for {original_filename} relative to NPZ location...")
+
+        # Common locations to check (relative to NPZ file):
+        # 1. Parent folder of NPZ (if NPZ is in Pleth_App_analysis/)
+        # 2. Grandparent folder (../.. from NPZ)
+        # 3. Same folder as NPZ
+        search_paths = [
+            npz_path.parent.parent / original_filename,  # One folder up from Pleth_App_analysis
+            npz_path.parent.parent.parent / original_filename,  # Two folders up
+            npz_path.parent / original_filename,  # Same folder as NPZ
+        ]
+
+        for candidate in search_paths:
+            if candidate.exists():
+                print(f"[npz_io] Found file at: {candidate}")
+                data_path_to_load = candidate
+                break
+        else:
+            print(f"[npz_io] Could not find {original_filename} in any expected location")
+
+    if reload_raw_data and data_path_to_load.exists():
         # Reload from original file (preferred - ensures latest data)
         from core.abf_io import load_data_file
 
         try:
-            sr, sweeps_by_ch, ch_names, t = load_data_file(original_file_path)
+            sr, sweeps_by_ch, ch_names, t, file_metadata = load_data_file(data_path_to_load)
             state.sr_hz = sr
             state.sweeps = sweeps_by_ch
             state.channel_names = ch_names
             state.t = t
-            state.in_path = original_file_path
+            state.in_path = data_path_to_load  # Use the actual path loaded from
             raw_data_loaded = True
         except Exception as e:
             # Original file couldn't be loaded - try NPZ embedded data
-            print(f"Warning: Could not reload from {original_file_path}: {e}")
+            print(f"Warning: Could not reload from {data_path_to_load}: {e}")
             print("Attempting to use embedded data from NPZ...")
             pass
 
@@ -384,11 +436,16 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[A
         raw_data_loaded = True
 
     if not raw_data_loaded:
-        raise ValueError(
-            f"Could not load raw data:\n"
-            f"- Original file not found: {original_file_path}\n"
-            f"- No embedded data in NPZ file\n"
-            f"Please locate the original data file."
+        # Raise custom exception so caller can prompt user to locate file
+        raise OriginalFileNotFoundError(
+            original_path=original_file_path,
+            npz_path=npz_path,
+            message=(
+                f"Could not load raw data:\n"
+                f"- Original file not found: {original_file_path}\n"
+                f"- No embedded data in NPZ file\n"
+                f"Please locate the original data file."
+            )
         )
 
     # ===== MULTI-FILE INFO =====
@@ -462,11 +519,32 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[A
             label_source = data[f'all_peaks_label_source_sweep_{sweep_idx}']
 
             # Reconstruct the dict
-            state.all_peaks_by_sweep[int(sweep_idx)] = {
+            all_peaks_dict = {
                 'indices': indices,
                 'labels': labels,
                 'label_source': label_source
             }
+
+            # Load breath type classification (with backwards compatibility for old 'gmm_class' field)
+            breath_type_key = f'all_peaks_breath_type_class_sweep_{sweep_idx}'
+            gmm_class_key = f'all_peaks_gmm_class_sweep_{sweep_idx}'  # Old field name (pre-v1.1)
+            if breath_type_key in data:
+                all_peaks_dict['breath_type_class'] = data[breath_type_key]
+            elif gmm_class_key in data:
+                # Backwards compatibility: load old gmm_class as breath_type_class
+                all_peaks_dict['breath_type_class'] = data[gmm_class_key]
+
+            # Load read-only GMM predictions (for classifier switching)
+            gmm_class_ro_key = f'all_peaks_gmm_class_ro_sweep_{sweep_idx}'
+            if gmm_class_ro_key in data:
+                all_peaks_dict['gmm_class_ro'] = data[gmm_class_ro_key]
+
+            # Load eupnea/sniff source
+            eupnea_sniff_source_key = f'all_peaks_eupnea_sniff_source_sweep_{sweep_idx}'
+            if eupnea_sniff_source_key in data:
+                all_peaks_dict['eupnea_sniff_source'] = data[eupnea_sniff_source_key]
+
+            state.all_peaks_by_sweep[int(sweep_idx)] = all_peaks_dict
 
     # ===== PEAK METRICS (for ML export) =====
     if 'peak_metrics_sweep_indices' in data:
@@ -547,7 +625,7 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[A
             'breath_cycles': [tuple(bc) for bc in data['gmm_breath_cycles']]
         }
 
-    # ===== APP SETTINGS (restore filter order, zscore, notch, apnea threshold) =====
+    # ===== APP SETTINGS (restore filter order, zscore, notch, apnea threshold, classifiers) =====
     app_settings = None
     if data.get('has_app_settings', False):
         notch_lower = float(data['notch_filter_lower'])
@@ -557,7 +635,8 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True) -> Tuple[A
             'use_zscore_normalization': bool(data['use_zscore_normalization']),
             'notch_filter_lower': notch_lower if notch_lower != 0.0 else None,
             'notch_filter_upper': notch_upper if notch_upper != 0.0 else None,
-            'apnea_threshold': float(data['apnea_threshold'])
+            'apnea_threshold': float(data['apnea_threshold']),
+            'active_eupnea_sniff_classifier': str(data.get('active_eupnea_sniff_classifier', 'gmm'))
         }
 
     # ===== Y2 METRICS =====

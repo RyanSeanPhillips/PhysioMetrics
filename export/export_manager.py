@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from PyQt6.QtWidgets import QMessageBox, QFileDialog, QDialog, QProgressDialog, QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, Qt as QtCore_Qt
 from core import metrics, telemetry
 from dialogs import SaveMetaDialog
 
@@ -81,9 +81,59 @@ def create_omitted_mask(sweep_idx: int, trace_length: int, omitted_ranges: dict,
 class ExportManager:
     """Manages all data export operations for the main window."""
 
-    # metrics we won't include in CSV exports and PDFs
-    # Note: These metrics are still computed and available for ML export,
-    # but hidden from user-facing CSV/PDF outputs for clarity and performance
+    # =========================================================================
+    # METRIC CATEGORIES FOR EXPORT
+    # =========================================================================
+
+    # TIMESERIES CSV: Core metrics for time-aligned plotting and consolidation
+    # These are the most useful metrics for physiological analysis
+    # Must include all metrics required by consolidation_manager.py
+    _TIMESERIES_METRICS = [
+        "if",           # Instantaneous frequency (Hz) - primary breathing rate
+        "amp_insp",     # Inspiratory amplitude - breath depth
+        "amp_exp",      # Expiratory amplitude - breath depth
+        "area_insp",    # Inspiratory area - volume proxy
+        "area_exp",     # Expiratory area - volume proxy
+        "ti",           # Inspiratory time - required by consolidation
+        "te",           # Expiratory time - required by consolidation
+        "ti_te_ratio",  # Ti/Te ratio (duty cycle)
+        "ibi",          # Inter-breath interval
+        "vent_proxy",   # Ventilation proxy - required by consolidation
+        "regularity",   # Breathing regularity (RMSSD)
+        "sniff_conf",   # Sniffing confidence (GMM)
+        "eupnea_conf",  # Eupnea confidence (GMM)
+    ]
+
+    # ML-ONLY METRICS: Neighbor comparison features for merge detection and classification
+    # These are only useful for ML training, not for physiological analysis
+    _ML_ONLY_METRICS = {
+        # Neighbor comparison features (for merge detection)
+        "gap_to_next_norm", "trough_ratio_next", "onset_height_ratio",
+        "prom_asymmetry", "prom_asymmetry_signed", "amplitude_normalized",
+        "total_prominence", "trough_asymmetry_signed",
+        # Next/prev peak comparisons
+        "next_peak_amplitude", "prev_peak_amplitude",
+        "amplitude_ratio_to_next", "amplitude_ratio_to_prev",
+        "amplitude_diff_to_next_signed", "amplitude_diff_to_prev_signed",
+        "next_peak_prominence", "prev_peak_prominence",
+        "prominence_ratio_to_next", "prominence_ratio_to_prev",
+        "next_peak_onset_height_ratio", "prev_peak_onset_height_ratio",
+        "next_peak_ti", "prev_peak_ti", "ti_ratio_to_next", "ti_ratio_to_prev",
+        "next_peak_te", "prev_peak_te", "te_ratio_to_next", "te_ratio_to_prev",
+        # Probability metrics (for ML classification)
+        "p_noise", "p_breath", "p_edge", "p_edge_all_peaks",
+        # Shape metrics (for sigh detection ML)
+        "n_inflections", "rise_variability", "n_shoulder_peaks",
+        "shoulder_prominence", "rise_autocorr", "peak_sharpness",
+        "trough_sharpness", "skewness", "kurtosis",
+        # Derivatives (rarely needed for analysis)
+        "d1", "d2",
+        # Region detection (binary, not useful as continuous metrics)
+        "eupnic", "apnea",
+    }
+
+    # LEGACY: Old exclusion list - kept for reference during transition
+    # TODO: Remove after confirming new lists work correctly
     _EXCLUDE_FOR_CSV = {
         "d1", "d2", "eupnic", "apnea",
         # Phase 2.2: Sigh detection features (for future ML use)
@@ -254,6 +304,49 @@ class ExportManager:
 
         return history
 
+    def _get_current_file_info(self, abf_stem: str) -> dict:
+        """Get file info from state and Project Builder for the current file.
+
+        Args:
+            abf_stem: The filename stem (without extension) of the current file
+
+        Returns:
+            Dict with keys: protocol, keywords, and any other relevant info
+        """
+        file_info = {
+            'protocol': '',
+            'keywords': ''
+        }
+
+        st = self.window.state
+
+        # Get protocol from state.file_info (populated during file load)
+        if hasattr(st, 'file_info') and st.file_info:
+            # file_info is a list of dicts for multi-file loading
+            for info in st.file_info:
+                if 'protocol' in info:
+                    file_info['protocol'] = info.get('protocol', '')
+                    break  # Use first file's protocol
+
+        # Try to get keywords from Project Builder table model
+        if hasattr(self.window, 'project_builder') and self.window.project_builder:
+            pb = self.window.project_builder
+            # Check if file table model exists and has the file
+            if hasattr(pb, 'file_table_model') and pb.file_table_model:
+                model = pb.file_table_model
+                # Search for this file in the model
+                for row in range(model.rowCount()):
+                    row_data = model._files[row] if row < len(model._files) else {}
+                    file_name = row_data.get('file_name', '')
+                    # Match by filename (without extension)
+                    if file_name and Path(file_name).stem == abf_stem:
+                        file_info['keywords'] = row_data.get('keywords', '')
+                        # Also get protocol from table if not already set
+                        if not file_info['protocol']:
+                            file_info['protocol'] = row_data.get('protocol', '')
+                        break
+
+        return file_info
 
     def _update_save_dialog_history(self, vals: dict):
         """Update autocomplete history with new values from the Save Data dialog."""
@@ -446,46 +539,24 @@ class ExportManager:
                 num_sweeps=len(self.window.state.sweeps)
             )
 
-            # Mark the active master list row as completed (if opened from Project Builder)
-            if hasattr(self.window, 'mark_active_analysis_complete'):
-                channel_used = st.analyze_chan if hasattr(st, 'analyze_chan') else None
-                stim_channel_used = st.stim_chan if hasattr(st, 'stim_chan') else None
-                events_channel_used = st.event_chan if hasattr(st, 'event_chan') else None
-
-                # Get save metadata and export info
-                save_meta = getattr(self.window, '_save_meta', {})
-                save_dir = getattr(self.window, '_save_dir', None)
-                save_base = getattr(self.window, '_save_base', '')
-
-                # Build export info dict
-                export_info = {
-                    'export_path': str(save_dir) if save_dir else '',
-                    'export_date': time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'export_version': self.window.app_version if hasattr(self.window, 'app_version') else '',
-                    'export_base_name': save_base,
-                    'exports': {
-                        'npz': save_meta.get('save_npz', True),
-                        'timeseries_csv': save_meta.get('save_timeseries_csv', True),
-                        'breaths_csv': save_meta.get('save_breaths_csv', True),
-                        'events_csv': save_meta.get('save_events_csv', True),
-                        'pdf': save_meta.get('save_pdf', True),
-                        'session_state': save_meta.get('save_session', True),
-                        'ml_training': save_meta.get('save_ml_training', False),
-                    },
-                    # Metadata from dialog
-                    'strain': save_meta.get('strain', ''),
-                    'stim_type': save_meta.get('stim', ''),
-                    'power': save_meta.get('power', ''),
-                    'sex': save_meta.get('sex', ''),
-                    'animal_id': save_meta.get('animal', ''),
-                }
-
-                self.window.mark_active_analysis_complete(
-                    channel_used=channel_used,
-                    stim_channel_used=stim_channel_used,
-                    events_channel_used=events_channel_used,
-                    export_info=export_info
-                )
+            # Update Project Builder table by re-scanning saved data
+            # This is more reliable than direct table manipulation - the scan finds
+            # what's actually on disk and updates/creates rows accordingly
+            if hasattr(self.window, 'on_project_scan_saved_data') and hasattr(self.window, '_master_file_list'):
+                if self.window._master_file_list:  # Only scan if project is open
+                    # Get the save directory for a focused scan
+                    save_dir = getattr(self.window, '_save_dir', None)
+                    if save_dir:
+                        from pathlib import Path
+                        save_dir = Path(save_dir)
+                        print(f"[Export] Triggering focused rescan of: {save_dir}")
+                        # Use QTimer to defer the scan slightly so the UI can update first
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(100, lambda: self.window.on_project_scan_saved_data(
+                            scan_folder=save_dir, silent=True
+                        ))
+                    else:
+                        print("[Export] No save directory found, skipping rescan")
         except Exception as e:
             t_elapsed = time.time() - t_start
             self.window._log_status_message(f"✗ Data export failed ({t_elapsed:.1f}s)", 3000)
@@ -562,6 +633,17 @@ class ExportManager:
         "prominence_norm", "ibi_norm", "ti_norm", "te_norm",
     }
 
+    # Core metrics for View Summary preview (fast, focused display)
+    # Only these metrics are computed and displayed in preview mode
+    _PREVIEW_CORE_METRICS = [
+        "if",          # Instantaneous frequency
+        "amp_insp",    # Inspiratory amplitude
+        "amp_exp",     # Expiratory amplitude
+        "area_insp",   # Inspiratory area
+        "area_exp",    # Expiratory area
+        "sniff_conf",  # Sniffing confidence (GMM) - interesting for analysis
+    ]
+
 
     def _metric_keys_in_order(self):
         """Return metric keys in the UI order (from metrics.METRIC_SPECS)."""
@@ -599,6 +681,93 @@ class ExportManager:
                 metrics.set_gmm_probabilities(None)
 
         return result
+
+    def _compute_all_metrics_for_sweep(self, sweep_idx: int, keys_to_compute: list,
+                                        ds_idx: np.ndarray, N: int) -> dict:
+        """
+        Compute all metrics for a single sweep (parallelizable helper).
+
+        Args:
+            sweep_idx: Sweep index
+            keys_to_compute: List of metric keys to compute
+            ds_idx: Downsampling indices
+            N: Total trace length
+
+        Returns:
+            Dict with:
+                - 'sweep_idx': The sweep index
+                - 'traces': Dict mapping metric key to downsampled trace
+                - 'y_proc_ds': Downsampled processed signal
+                - 'peaks', 'onsets', 'offsets', 'expmins', 'expoffs': Breath events
+                - 'sighs': Sigh indices
+                - 'omit_mask': Omitted region mask (or None)
+        """
+        st = self.window.state
+
+        # Get processed signal
+        y_proc = self.window._get_processed_for(st.analyze_chan, sweep_idx)
+
+        # Get peaks and breath events
+        pks = np.asarray(st.peaks_by_sweep.get(sweep_idx, np.array([], dtype=int)), dtype=int)
+        br = st.breath_by_sweep.get(sweep_idx, None)
+        if br is None and pks.size:
+            import core.peaks as peakdet
+            br = peakdet.compute_breath_events(y_proc, pks, st.sr_hz)
+        if br is None:
+            br = {
+                "onsets": np.array([], dtype=int),
+                "offsets": np.array([], dtype=int),
+                "expmins": np.array([], dtype=int),
+                "expoffs": np.array([], dtype=int),
+            }
+
+        # Get sighs
+        sighs = np.asarray(st.sigh_by_sweep.get(sweep_idx, np.array([], dtype=int)), dtype=int)
+        sighs = sighs[(sighs >= 0) & (sighs < len(y_proc))]
+
+        # Build omitted mask
+        has_omitted = sweep_idx in st.omitted_sweeps or sweep_idx in st.omitted_ranges
+        if has_omitted:
+            omit_mask = create_omitted_mask(sweep_idx, N, st.omitted_ranges, st.omitted_sweeps)
+        else:
+            omit_mask = None
+
+        # Compute all metrics
+        traces = {}
+        for k in keys_to_compute:
+            # Special handling for probability metrics - use ALL peaks (including noise)
+            if k in ('p_noise', 'p_breath'):
+                all_pks_data = st.all_peaks_by_sweep.get(sweep_idx, None)
+                all_br = st.all_breaths_by_sweep.get(sweep_idx, None)
+                if all_pks_data is not None and all_br is not None:
+                    all_pks = all_pks_data['indices']
+                    y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, all_pks, all_br, sweep=sweep_idx)
+                else:
+                    y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=sweep_idx)
+            else:
+                y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=sweep_idx)
+
+            if y2 is not None and len(y2) == N:
+                # Apply omitted mask
+                if omit_mask is not None:
+                    y2 = y2.copy()  # Don't modify original
+                    y2[~omit_mask] = np.nan
+                traces[k] = y2[ds_idx]
+            else:
+                traces[k] = None
+
+        return {
+            'sweep_idx': sweep_idx,
+            'traces': traces,
+            'y_proc_ds': y_proc[ds_idx],
+            'peaks': pks,
+            'onsets': np.asarray(br.get("onsets", []), dtype=int),
+            'offsets': np.asarray(br.get("offsets", []), dtype=int),
+            'expmins': np.asarray(br.get("expmins", []), dtype=int),
+            'expoffs': np.asarray(br.get("expoffs", []), dtype=int),
+            'sighs': sighs,
+            'omit_mask': omit_mask
+        }
 
 
     def _get_stim_masks(self, s: int):
@@ -689,61 +858,82 @@ class ExportManager:
     def _get_ml_training_folder(self):
         """
         Get or create centralized ML training data folder.
-        Prompts user for location on first use, then remembers it.
+
+        Priority order:
+        1. Check for user-configured custom path in QSettings
+        2. Auto-detect lab default path (Z:/Drivers and Software/PhysioMetrics/ML Training Data)
+        3. Prompt user to select folder on first use
 
         Returns:
             Path to ML training folder, or None if user cancels
         """
         from pathlib import Path
 
-        # Check for saved ML training folder location
+        # 1. Check for saved ML training folder location
         saved_ml_folder = self.window.settings.value("ml_training_folder", None)
+        if saved_ml_folder:
+            path = Path(saved_ml_folder)
+            if path.exists():
+                return path
+            # Path no longer exists - clear it and fall through to detection
+            self.window.settings.remove("ml_training_folder")
+            print(f"[ML training] Saved folder no longer exists, re-detecting: {saved_ml_folder}")
 
-        if saved_ml_folder and Path(saved_ml_folder).exists():
-            return Path(saved_ml_folder)
+        # 2. Try lab default path (check multiple potential drive letters)
+        lab_subpath = "Drivers and Software/PhysioMetrics/ML Training Data"
+        for drive in ['Z:', 'Y:', 'X:', 'W:', 'V:', 'U:']:
+            candidate = Path(f"{drive}/{lab_subpath}")
+            parent_path = candidate.parent  # PhysioMetrics folder
+            if parent_path.exists():
+                try:
+                    candidate.mkdir(exist_ok=True)
+                    self.window.settings.setValue("ml_training_folder", str(candidate))
+                    print(f"[ML training] Auto-detected lab drive: {candidate}")
+                    return candidate
+                except Exception as e:
+                    print(f"[ML training] Could not create folder on {drive}: {e}")
+                    continue
 
-        # Prompt user to choose location
+        # 3. Fallback: Prompt user to select folder
+        return self._prompt_for_ml_folder()
+
+    def _prompt_for_ml_folder(self):
+        """Prompt user to select ML training folder."""
+        from pathlib import Path
         from PyQt6.QtWidgets import QMessageBox
 
-        reply = QMessageBox.question(
+        # Show info message first
+        QMessageBox.information(
             self.window,
-            "ML Training Data Folder",
-            "Where would you like to save ML training data?\n\n"
-            "This creates a centralized 'ML_Training_Data' folder\n"
-            "to collect labeled data from multiple experiments.\n\n"
-            "Choose a parent directory (e.g., your data root folder).",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok
+            "ML Training Folder",
+            "Please select a folder to store ML training data.\n\n"
+            "This folder will be used for all future exports.\n"
+            "You can change it later using the gear icon in the save dialog\n"
+            "or in the ML Settings tab of the Analysis Options dialog."
         )
 
-        if reply == QMessageBox.StandardButton.Cancel:
-            return None
-
-        # Let user choose parent directory
+        # Let user choose directory
         default_root = self.window.settings.value("save_root", str(self.window.state.in_path.parent))
-        chosen = QFileDialog.getExistingDirectory(
+        folder = QFileDialog.getExistingDirectory(
             self.window,
-            "Choose parent folder for ML_Training_Data",
+            "Select ML Training Data Folder",
             str(default_root)
         )
 
-        if not chosen:
-            return None
+        if folder:
+            path = Path(folder)
+            self.window.settings.setValue("ml_training_folder", str(path))
+            print(f"[ML training] User selected folder: {path}")
+            return path
 
-        # Create ML_Training_Data subfolder
-        ml_folder = Path(chosen) / "ML_Training_Data"
+        # User cancelled - use temp fallback in home directory
+        fallback = Path.home() / "PhysioMetrics_ML_Training"
         try:
-            ml_folder.mkdir(parents=True, exist_ok=True)
-            # Remember this location
-            self.window.settings.setValue("ml_training_folder", str(ml_folder))
-            print(f"[ML training] Created folder: {ml_folder}")
-            return ml_folder
+            fallback.mkdir(exist_ok=True)
+            print(f"[ML training] Using fallback folder: {fallback}")
+            return fallback
         except Exception as e:
-            QMessageBox.critical(
-                self.window,
-                "ML Training Folder Error",
-                f"Could not create folder:\n{ml_folder}\n\n{e}"
-            )
+            print(f"[ML training] Could not create fallback folder: {e}")
             return None
 
     @profile
@@ -842,8 +1032,9 @@ class ExportManager:
             metrics = st.peak_metrics_by_sweep.get(sweep_idx, [])
             sigh_indices = set(st.sigh_by_sweep.get(sweep_idx, []))
 
-            # Get GMM classification if available (stored in all_peaks_by_sweep)
-            gmm_class_array = all_peaks.get('gmm_class', None)
+            # Get breath type classification if available (stored in all_peaks_by_sweep)
+            # Note: breath_type_class contains the active classifier's predictions (GMM, XGBoost, RF, or MLP)
+            breath_type_class_array = all_peaks.get('breath_type_class', None)
 
             # Get sigh classification if available
             sigh_class_array = all_peaks.get('sigh_class', None)
@@ -869,21 +1060,21 @@ class ExportManager:
                     # No sigh classification available - use NaN to indicate "no label"
                     is_sigh = float('nan') if sigh_class_array is None else 0
 
-                # Determine eupnea/sniffing classification from GMM labels
+                # Determine eupnea/sniffing classification from breath_type_class
                 # NaN = no label (for ML training to ignore)
                 is_eupnea = float('nan')
                 is_sniffing = float('nan')
 
-                # Only classify if this is a labeled breath (label=1) and gmm_class exists
-                if label == 1 and gmm_class_array is not None and i < len(gmm_class_array):
-                    gmm_class = gmm_class_array[i]
-                    if gmm_class == 0:
+                # Only classify if this is a labeled breath (label=1) and breath_type_class exists
+                if label == 1 and breath_type_class_array is not None and i < len(breath_type_class_array):
+                    breath_type_class = breath_type_class_array[i]
+                    if breath_type_class == 0:
                         is_eupnea = 1
                         is_sniffing = 0
-                    elif gmm_class == 1:
+                    elif breath_type_class == 1:
                         is_eupnea = 0
                         is_sniffing = 1
-                    elif gmm_class == -1:
+                    elif breath_type_class == -1:
                         # Unclassified - use NaN
                         is_eupnea = float('nan')
                         is_sniffing = float('nan')
@@ -979,14 +1170,14 @@ class ExportManager:
 
             sigh_indices = set(st.sigh_by_sweep.get(sweep_idx, []))
 
-            # Get GMM and sigh classifications
+            # Get breath type and sigh classifications
             all_peaks = st.all_peaks_by_sweep.get(sweep_idx)
-            gmm_class_array = all_peaks.get('gmm_class', None) if all_peaks else None
+            breath_type_class_array = all_peaks.get('breath_type_class', None) if all_peaks else None
             sigh_class_array = all_peaks.get('sigh_class', None) if all_peaks else None
 
             # Iterate through ONLY the breath peaks
             for breath_idx, peak_idx in enumerate(breath_peaks):
-                # Find this peak in all_peaks to get GMM class
+                # Find this peak in all_peaks to get breath type class
                 if all_peaks is not None and 'indices' in all_peaks:
                     all_peak_indices = all_peaks['indices']
                     pos_in_all = np.where(all_peak_indices == peak_idx)[0]
@@ -995,18 +1186,18 @@ class ExportManager:
                         label = all_peaks['labels'][i_in_all]
                         label_source = all_peaks['label_source'][i_in_all]
 
-                        # Get GMM class - NaN if not available
+                        # Get breath type class - NaN if not available
                         is_eupnea = float('nan')
                         is_sniffing = float('nan')
-                        if gmm_class_array is not None and i_in_all < len(gmm_class_array):
-                            gmm_class = gmm_class_array[i_in_all]
-                            if gmm_class == 0:
+                        if breath_type_class_array is not None and i_in_all < len(breath_type_class_array):
+                            breath_type_class = breath_type_class_array[i_in_all]
+                            if breath_type_class == 0:
                                 is_eupnea = 1
                                 is_sniffing = 0
-                            elif gmm_class == 1:
+                            elif breath_type_class == 1:
                                 is_eupnea = 0
                                 is_sniffing = 1
-                            # gmm_class == -1 means unclassified, leave as NaN
+                            # breath_type_class == -1 means unclassified, leave as NaN
 
                         # Get sigh class - NaN if not available
                         if sigh_class_array is not None and i_in_all < len(sigh_class_array):
@@ -1089,13 +1280,19 @@ class ExportManager:
             window_samples = int(window_seconds * st.sr_hz)
             waveform_window_samples = 2 * window_samples  # Total length
 
+            # OPTIMIZATION: Cache processed traces per sweep (avoid reprocessing for every peak)
+            # This reduces calls to _get_processed_for from N_peaks to N_sweeps
+            trace_cache = {}
+
             cutouts = []
             for record in peak_data:
                 sweep_idx = record['sweep_idx']
                 peak_idx = record['peak_idx']
 
-                # Get processed trace for this sweep
-                y_proc = self.window._get_processed_for(st.analyze_chan, sweep_idx)
+                # Get processed trace from cache or compute once per sweep
+                if sweep_idx not in trace_cache:
+                    trace_cache[sweep_idx] = self.window._get_processed_for(st.analyze_chan, sweep_idx)
+                y_proc = trace_cache[sweep_idx]
 
                 # Extract window around peak
                 start_idx = max(0, peak_idx - window_samples)
@@ -1120,6 +1317,9 @@ class ExportManager:
                     segment = segment[:waveform_window_samples]
 
                 cutouts.append(segment)
+
+            # Clear cache to free memory
+            del trace_cache
 
             waveform_cutouts = np.array(cutouts, dtype=np.float32)  # [n_peaks, window_samples]
             print(f"[ML training] ✓ Extracted {len(cutouts)} waveform cutouts ({waveform_cutouts.shape})")
@@ -1328,6 +1528,56 @@ class ExportManager:
             self._show_message_box(QMessageBox.Icon.Warning, "View Summary" if preview_only else "Save analyzed data", "No analyzed data available.")
             return
 
+        # -------------------- Preview caching (skip computation if unchanged) --------------------
+        if preview_only:
+            # Generate fingerprint of current state
+            def _compute_preview_fingerprint():
+                """Compute a fingerprint of data that affects preview output."""
+                import hashlib
+                parts = []
+                # File identity
+                parts.append(str(st.in_path))
+                parts.append(st.analyze_chan or "")
+                # Sweep/omission state
+                parts.append(str(sorted(getattr(st, "omitted_sweeps", set()))))
+                # Peak count per sweep (changes indicate edits)
+                for s in range(st.sweeps[st.analyze_chan].shape[1] if st.analyze_chan in st.sweeps else 0):
+                    pks = st.peaks_by_sweep.get(s, [])
+                    parts.append(f"{s}:{len(pks)}")
+                # GMM state (sniff regions affect sniff_conf metric)
+                sniff_count = sum(len(st.sniff_regions_by_sweep.get(s, [])) for s in st.sniff_regions_by_sweep)
+                parts.append(f"sniff:{sniff_count}")
+                # Stim spans (affect time alignment)
+                if st.stim_chan:
+                    stim_count = sum(len(st.stim_spans_by_sweep.get(s, [])) for s in st.stim_spans_by_sweep)
+                    parts.append(f"stim:{stim_count}")
+                return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+            current_fingerprint = _compute_preview_fingerprint()
+
+            # Check if we have valid cached preview data
+            if (hasattr(self, '_preview_cache') and
+                self._preview_cache.get('fingerprint') == current_fingerprint):
+                print("[Preview] Using cached preview data (no changes detected)")
+                cached = self._preview_cache
+
+                # For pulse experiments, show pulse preview first
+                if cached.get('is_pulse_exp') and cached.get('pulse_figures'):
+                    print("[Preview] Showing cached pulse preview...")
+                    fig_cta, fig_3d, fig_3d_stim, fig_prob = cached['pulse_figures']
+                    self._show_pulse_4page_preview(fig_cta, fig_3d, fig_3d_stim, fig_prob)
+
+                # Show standard summary preview
+                self._show_summary_preview_dialog(
+                    t_ds_csv=cached['t_ds_csv'],
+                    y2_ds_by_key=cached['y2_ds_by_key'],
+                    keys_for_csv=cached['keys_for_csv'],
+                    label_by_key=cached['label_by_key'],
+                    stim_zero=cached['stim_zero'],
+                    stim_dur=cached['stim_dur'],
+                )
+                return
+
         # -------------------- Prompt for save location (skip if preview_only) --------------------
         if not preview_only:
             # --- Build an auto stim string from current sweep metrics, if available ---
@@ -1361,8 +1611,25 @@ class ExportManager:
             history = self._load_save_dialog_history()
             last_values = self._load_last_save_values()
 
-            # --- Name builder dialog (with auto stim suggestion) ---
-            dlg = SaveMetaDialog(abf_name=abf_stem, channel=chan, parent=self.window, auto_stim=auto_stim, history=history, last_values=last_values)
+            # --- Build file info from state and project builder ---
+            file_info = self._get_current_file_info(abf_stem)
+
+            # --- Name builder dialog (with auto stim suggestion and file info) ---
+            # Dialog is non-modal so user can click on Project Builder tab
+            dlg = SaveMetaDialog(
+                abf_name=abf_stem,
+                channel=chan,
+                parent=self.window,
+                auto_stim=auto_stim,
+                history=history,
+                last_values=last_values,
+                main_window=self.window,
+                file_info=file_info
+            )
+            # Make dialog non-modal but stay on top
+            dlg.setWindowModality(QtCore_Qt.WindowModality.NonModal)
+            dlg.setWindowFlag(QtCore_Qt.WindowType.WindowStaysOnTopHint, True)
+
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
 
@@ -1535,8 +1802,11 @@ class ExportManager:
 
         # -------------------- containers --------------------
         all_keys     = self._metric_keys_in_order()
+        # Use focused metrics for both preview AND PDF (same panels, much faster)
+        # Full metric set is still available in the timeseries CSV export
+        keys_to_compute = self._PREVIEW_CORE_METRICS
         Y_proc_ds    = np.full((M, S), np.nan, dtype=float)
-        y2_ds_by_key = {k: np.full((M, S), np.nan, dtype=float) for k in all_keys}
+        y2_ds_by_key = {k: np.full((M, S), np.nan, dtype=float) for k in keys_to_compute}
 
         # Eupnea masks cached and stored for interval plotting (NOT used for normalization)
         # Normalization uses GMM sniff regions directly (much faster)
@@ -1549,117 +1819,178 @@ class ExportManager:
         # Cache omitted masks per sweep (computed once, reused for all metrics)
         omitted_masks_cache = {}
 
-        # -------------------- fill per kept sweep --------------------
+        # -------------------- fill per kept sweep (with optional parallel processing) --------------------
+        # Use parallel processing for large exports (10+ sweeps) with automatic fallback
+        use_parallel_export = getattr(self.window, 'use_parallel_export', True) and S >= 10
+        parallel_results = {}
+
+        if use_parallel_export:
+            try:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                import os
+
+                max_workers = min(os.cpu_count() or 4, 8)
+                print(f"[Export] Using parallel metric computation with {max_workers} workers for {S} sweeps...")
+
+                # Worker function for parallel execution
+                def compute_sweep_metrics(sweep_idx):
+                    return self._compute_all_metrics_for_sweep(
+                        sweep_idx, keys_to_compute, ds_idx, N
+                    )
+
+                # Execute in parallel
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(compute_sweep_metrics, s): s for s in kept_sweeps}
+                    completed = 0
+                    for future in as_completed(futures):
+                        sweep_idx = futures[future]
+                        result = future.result()
+                        parallel_results[sweep_idx] = result
+                        completed += 1
+                        if completed % 10 == 0 or completed == S:
+                            print(f"[Export] Computed metrics for {completed}/{S} sweeps...")
+
+                print(f"[Export] Parallel metric computation complete!")
+
+            except Exception as e:
+                print(f"[Export] Parallel export failed: {e}")
+                print(f"[Export] Falling back to sequential export...")
+                import traceback
+                traceback.print_exc()
+                parallel_results = {}  # Clear partial results
+
+        # Process results (from parallel or sequential)
         for col, s in enumerate(kept_sweeps):
-            y_proc = self.window._get_processed_for(st.analyze_chan, s)
-            Y_proc_ds[:, col] = y_proc[ds_idx]
+            if s in parallel_results:
+                # Use pre-computed parallel results
+                result = parallel_results[s]
+                Y_proc_ds[:, col] = result['y_proc_ds']
+                peaks_by_sweep.append(result['peaks'])
+                on_by_sweep.append(result['onsets'])
+                off_by_sweep.append(result['offsets'])
+                exm_by_sweep.append(result['expmins'])
+                exo_by_sweep.append(result['expoffs'])
+                sigh_by_sweep.append(result['sighs'])
+                omitted_masks_cache[s] = result['omit_mask']
 
-            pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
-            br  = st.breath_by_sweep.get(s, None)
-            if br is None and pks.size:
-                # backfill breaths for this sweep so exports are consistent
-                br = peakdet.compute_breath_events(y_proc, pks, st.sr_hz)
-                st.breath_by_sweep[s] = br
-            if br is None:
-                br = {
-                    "onsets":  np.array([], dtype=int),
-                    "offsets": np.array([], dtype=int),
-                    "expmins": np.array([], dtype=int),
-                    "expoffs": np.array([], dtype=int),
-                }
-
-            peaks_by_sweep.append(pks)
-            on_by_sweep.append(np.asarray(br.get("onsets",  []), dtype=int))
-            off_by_sweep.append(np.asarray(br.get("offsets", []), dtype=int))
-            exm_by_sweep.append(np.asarray(br.get("expmins", []), dtype=int))
-            exo_by_sweep.append(np.asarray(br.get("expoffs", []), dtype=int))
-
-            # sighs for this sweep (peak indices)
-            sighs = np.asarray(st.sigh_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
-            # Keep only valid in-range indices
-            sighs = sighs[(sighs >= 0) & (sighs < len(y_proc))]
-            sigh_by_sweep.append(sighs)
-
-            # Build omitted mask once per sweep (only if needed)
-            has_omitted = s in st.omitted_sweeps or s in st.omitted_ranges
-            if has_omitted:
-                omitted_masks_cache[s] = create_omitted_mask(s, N, st.omitted_ranges, st.omitted_sweeps)
+                # Fill metric traces
+                for k in keys_to_compute:
+                    trace = result['traces'].get(k)
+                    if trace is not None:
+                        y2_ds_by_key[k][:, col] = trace
             else:
-                omitted_masks_cache[s] = None  # No masking needed
+                # Sequential computation for this sweep
+                y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                Y_proc_ds[:, col] = y_proc[ds_idx]
 
-            for k in all_keys:
-                # Special handling for probability metrics - use ALL peaks (including noise)
-                if k in ('p_noise', 'p_breath'):
-                    all_pks_data = st.all_peaks_by_sweep.get(s, None)
-                    all_br = st.all_breaths_by_sweep.get(s, None)
-                    if all_pks_data is not None and all_br is not None:
-                        all_pks = all_pks_data['indices']
-                        y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, all_pks, all_br, sweep=s)
-                    else:
-                        # Fallback if all_peaks not available
-                        y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
+                pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+                br  = st.breath_by_sweep.get(s, None)
+                if br is None and pks.size:
+                    # backfill breaths for this sweep so exports are consistent
+                    br = peakdet.compute_breath_events(y_proc, pks, st.sr_hz)
+                    st.breath_by_sweep[s] = br
+                if br is None:
+                    br = {
+                        "onsets":  np.array([], dtype=int),
+                        "offsets": np.array([], dtype=int),
+                        "expmins": np.array([], dtype=int),
+                        "expoffs": np.array([], dtype=int),
+                    }
+
+                peaks_by_sweep.append(pks)
+                on_by_sweep.append(np.asarray(br.get("onsets",  []), dtype=int))
+                off_by_sweep.append(np.asarray(br.get("offsets", []), dtype=int))
+                exm_by_sweep.append(np.asarray(br.get("expmins", []), dtype=int))
+                exo_by_sweep.append(np.asarray(br.get("expoffs", []), dtype=int))
+
+                # sighs for this sweep (peak indices)
+                sighs = np.asarray(st.sigh_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+                # Keep only valid in-range indices
+                sighs = sighs[(sighs >= 0) & (sighs < len(y_proc))]
+                sigh_by_sweep.append(sighs)
+
+                # Build omitted mask once per sweep (only if needed)
+                has_omitted = s in st.omitted_sweeps or s in st.omitted_ranges
+                if has_omitted:
+                    omitted_masks_cache[s] = create_omitted_mask(s, N, st.omitted_ranges, st.omitted_sweeps)
                 else:
-                    y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
+                    omitted_masks_cache[s] = None  # No masking needed
 
-                if y2 is not None and len(y2) == N:
-                    # Apply cached omitted mask if it exists
-                    omit_mask = omitted_masks_cache[s]
-                    if omit_mask is not None:
-                        y2[~omit_mask] = np.nan
+                for k in keys_to_compute:
+                    # Special handling for probability metrics - use ALL peaks (including noise)
+                    if k in ('p_noise', 'p_breath'):
+                        all_pks_data = st.all_peaks_by_sweep.get(s, None)
+                        all_br = st.all_breaths_by_sweep.get(s, None)
+                        if all_pks_data is not None and all_br is not None:
+                            all_pks = all_pks_data['indices']
+                            y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, all_pks, all_br, sweep=s)
+                        else:
+                            # Fallback if all_peaks not available
+                            y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
+                    else:
+                        y2 = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
 
-                    y2_ds_by_key[k][:, col] = y2[ds_idx]
+                    if y2 is not None and len(y2) == N:
+                        # Apply cached omitted mask if it exists
+                        omit_mask = omitted_masks_cache[s]
+                        if omit_mask is not None:
+                            y2[~omit_mask] = np.nan
+
+                        y2_ds_by_key[k][:, col] = y2[ds_idx]
 
         if progress_dialog:
             progress_dialog.setLabelText("Computing metrics...")
             progress_dialog.setValue(15)
             QApplication.processEvents()
 
-        # -------------------- Build cached traces (needed for preview and save) --------------------
-        # For event-aligned CTA, we need metric traces. Build them here if needed.
-        # Use the same filtered keys that will be used for plots/CSV
+        # -------------------- Build cached traces (needed for event CTA, not basic preview) --------------------
+        # For event-aligned CTA, we need full metric traces. Skip this for basic preview mode.
         keys_for_cta = [k for k in all_keys if k not in self._EXCLUDE_FOR_CSV]
+        cached_traces_by_sweep = {}
 
-        def _build_cached_traces_if_needed():
-            """Build cached metric traces for CTA preview/export if not already cached."""
-            cached = {}
+        # Only build cached traces if not in preview mode (for full export/CTA)
+        if not preview_only:
+            def _build_cached_traces_if_needed():
+                """Build cached metric traces for CTA preview/export if not already cached."""
+                cached = {}
 
-            for s in kept_sweeps:
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
-                pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
-                br = st.breath_by_sweep.get(s, None)
-                if br is None and pks.size:
-                    br = peakdet.compute_breath_events(y_proc, pks, st.sr_hz)
-                    st.breath_by_sweep[s] = br
-                if br is None:
-                    continue
+                for s in kept_sweeps:
+                    y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                    pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+                    br = st.breath_by_sweep.get(s, None)
+                    if br is None and pks.size:
+                        br = peakdet.compute_breath_events(y_proc, pks, st.sr_hz)
+                        st.breath_by_sweep[s] = br
+                    if br is None:
+                        continue
 
-                traces_for_sweep = {}
-                for k in keys_for_cta:
-                    if k in metrics.METRICS:
-                        # Special handling for probability metrics - use ALL peaks (including noise)
-                        if k in ('p_noise', 'p_breath'):
-                            all_pks_data = st.all_peaks_by_sweep.get(s, None)
-                            all_br = st.all_breaths_by_sweep.get(s, None)
-                            if all_pks_data is not None and all_br is not None:
-                                all_pks = all_pks_data['indices']
-                                trace = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, all_pks, all_br, sweep=s)
+                    traces_for_sweep = {}
+                    for k in keys_for_cta:
+                        if k in metrics.METRICS:
+                            # Special handling for probability metrics - use ALL peaks (including noise)
+                            if k in ('p_noise', 'p_breath'):
+                                all_pks_data = st.all_peaks_by_sweep.get(s, None)
+                                all_br = st.all_breaths_by_sweep.get(s, None)
+                                if all_pks_data is not None and all_br is not None:
+                                    all_pks = all_pks_data['indices']
+                                    trace = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, all_pks, all_br, sweep=s)
+                                else:
+                                    trace = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
                             else:
                                 trace = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
-                        else:
-                            trace = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
 
-                        # Apply cached omitted mask if it exists (reuse from main loop)
-                        if trace is not None:
-                            omit_mask = omitted_masks_cache.get(s)
-                            if omit_mask is not None:
-                                trace[~omit_mask] = np.nan
-                        traces_for_sweep[k] = trace
-                cached[s] = traces_for_sweep
+                            # Apply cached omitted mask if it exists (reuse from main loop)
+                            if trace is not None:
+                                omit_mask = omitted_masks_cache.get(s)
+                                if omit_mask is not None:
+                                    trace[~omit_mask] = np.nan
+                            traces_for_sweep[k] = trace
+                    cached[s] = traces_for_sweep
 
-            return cached
+                return cached
 
-        # Build cached traces for CTA (used by both preview and save)
-        cached_traces_by_sweep = _build_cached_traces_if_needed()
+            # Build cached traces for CTA (only for full export, not preview)
+            cached_traces_by_sweep = _build_cached_traces_if_needed()
 
         # -------------------- Save files (skip if preview_only) --------------------
         if not preview_only:
@@ -1700,7 +2031,8 @@ class ExportManager:
                 else:
                     bout_obj[col] = np.array([], dtype=[('start_time', float), ('end_time', float), ('id', int)])
 
-            y2_kwargs_ds = {f"y2_{k}_ds": y2_ds_by_key[k] for k in all_keys}
+            # Only save metrics that were computed (keys_to_compute, not all_keys)
+            y2_kwargs_ds = {f"y2_{k}_ds": y2_ds_by_key[k] for k in y2_ds_by_key}
     
             meta = {
                 "analyze_channel": st.analyze_chan,
@@ -1788,7 +2120,9 @@ class ExportManager:
     
             # -------------------- (2) Per-time CSV (raw + normalized appended) --------------------
             csv_time_path = base.with_name(base.name + "_timeseries.csv")
-            keys_for_csv  = [k for k in all_keys if k not in self._EXCLUDE_FOR_CSV]
+            # Use curated list of core metrics for timeseries (13 metrics)
+            # These are the most useful for analysis and include all metrics needed by consolidation
+            keys_for_csv = [k for k in self._TIMESERIES_METRICS if k in y2_ds_by_key]
     
             if progress_dialog:
                 progress_dialog.setLabelText("Computing time-based normalization...")
@@ -1814,16 +2148,25 @@ class ExportManager:
             eupnea_baseline_by_key = {}
 
             # Pre-populate eupnea masks cache for all kept sweeps
-            print(f"[CSV-time] Pre-computing eupnea masks for {len(kept_sweeps)} sweeps...")
+            # Use active classifier (GMM, XGBoost, RF, MLP) for eupnea detection
+            active_classifier = getattr(st, 'active_eupnea_sniff_classifier', 'gmm')
+            print(f"[CSV-time] Pre-computing eupnea masks for {len(kept_sweeps)} sweeps using {active_classifier} classifier...")
             for s in kept_sweeps:
                 if s not in self._eupnea_masks_cache:
                     y_proc = self.window._get_processed_for(st.analyze_chan, s)
-                    # Use GMM-based eupnea detection if available, otherwise use traditional method
-                    if hasattr(st, 'gmm_sniff_probabilities') and s in st.gmm_sniff_probabilities:
-                        eupnea_mask = self.window._compute_eupnea_from_gmm(s, len(y_proc))
-                    else:
+                    # Use active classifier for eupnea detection (works with GMM, XGBoost, RF, MLP)
+                    eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
+                    # Fallback to traditional method if no classifier data available
+                    if eupnea_mask.sum() == 0:
+                        pks = st.peaks_by_sweep.get(s, np.array([]))
+                        br = st.breath_by_sweep.get(s, {})
                         eupnea_mask = metrics.detect_eupnic_regions(
-                            y_proc, st.sr_hz, freq_hz_thresh=5.0, duration_s_thresh=2.0
+                            st.t, y_proc, st.sr_hz, pks,
+                            br.get('onsets', np.array([])),
+                            br.get('offsets', np.array([])),
+                            br.get('expmins', np.array([])),
+                            br.get('expoffs', np.array([])),
+                            freq_threshold_hz=5.0, min_duration_sec=2.0
                         )
                     self._eupnea_masks_cache[s] = eupnea_mask
 
@@ -2499,10 +2842,10 @@ class ExportManager:
                     # Retrieve eupnea mask from cache (computed earlier)
                     eupnea_mask = self._eupnea_masks_cache.get(s, None)
                     if eupnea_mask is None:
-                        # Fallback: compute if not cached
-                        if self.window.eupnea_detection_mode == "gmm":
-                            eupnea_mask = self.window._compute_eupnea_from_gmm(s, len(y_proc))
-                        else:
+                        # Fallback: compute if not cached - use active classifier
+                        eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
+                        # Fallback to traditional method if no classifier data available
+                        if eupnea_mask.sum() == 0:
                             eupnea_mask = metrics.detect_eupnic_regions(
                                 st.t, y_proc, st.sr_hz, pks, on, off, expmins, expoffs,
                                 freq_threshold_hz=eupnea_thresh
@@ -2615,6 +2958,30 @@ class ExportManager:
                         f"{duration:.9g}"
                     ])
 
+                # Add bout annotations (user-marked event channel markers)
+                bout_list = st.bout_annotations.get(s, [])
+                for bout in bout_list:
+                    start_time = bout['start_time']
+                    end_time = bout['end_time']
+
+                    # Convert to relative time if global stim available
+                    if have_global_stim:
+                        start_time_rel = start_time - global_s0
+                        end_time_rel = end_time - global_s0
+                    else:
+                        start_time_rel = start_time
+                        end_time_rel = end_time
+
+                    duration = end_time - start_time
+
+                    events_rows.append([
+                        str(s + 1),
+                        "bout",
+                        f"{start_time_rel:.9g}",
+                        f"{end_time_rel:.9g}",
+                        f"{duration:.9g}"
+                    ])
+
             # Optionally write events CSV using pandas
             import pandas as pd
             df_events = pd.DataFrame(
@@ -2647,7 +3014,9 @@ class ExportManager:
             progress_dialog.setValue(80)
             QApplication.processEvents()
 
-        keys_for_timeplots = [k for k in all_keys if k not in self._EXCLUDE_FOR_CSV]
+        # Use same core metrics for both preview AND PDF (matching y2_ds_by_key computed at line 1798)
+        # Full metric set is still available in the timeseries CSV export
+        keys_for_timeplots = self._PREVIEW_CORE_METRICS
         label_by_key = {key: label for (label, key) in metrics.METRIC_SPECS if key in keys_for_timeplots}
 
         if preview_only:
@@ -2655,7 +3024,7 @@ class ExportManager:
             # Check experiment type to determine which preview to show
 
             print("=" * 60)
-            print("PREVIEW MODE - CHECKING EXPERIMENT TYPE")
+            print(f"PREVIEW MODE - showing {len(keys_for_timeplots)} core metrics")
             print("=" * 60)
 
             # First check for pulse experiments (Phase 1 testing)
@@ -2713,6 +3082,20 @@ class ExportManager:
                         traceback.print_exc()
                         raise
 
+                    # Cache the computed preview data for pulse experiments
+                    self._preview_cache = {
+                        'fingerprint': current_fingerprint,
+                        'is_pulse_exp': True,
+                        'pulse_figures': (fig_cta, fig_3d, fig_3d_stim, fig_prob),
+                        't_ds_csv': t_ds_csv,
+                        'y2_ds_by_key': y2_ds_by_key,
+                        'keys_for_csv': keys_for_timeplots,
+                        'label_by_key': label_by_key,
+                        'stim_zero': global_s0 if have_global_stim else None,
+                        'stim_dur': global_dur if have_global_stim else None,
+                    }
+                    print(f"[Preview] Cached pulse preview data (fingerprint: {current_fingerprint[:8]}...)")
+
                     # Show 4-page pulse preview
                     print("[Preview] Showing 4-page pulse preview dialog...")
                     self._show_pulse_4page_preview(fig_cta, fig_3d, fig_3d_stim, fig_prob)
@@ -2737,6 +3120,20 @@ class ExportManager:
                         label_by_key=label_by_key,
                     )
                 else:
+                    # Cache the computed preview data for repeated views
+                    self._preview_cache = {
+                        'fingerprint': current_fingerprint,
+                        'is_pulse_exp': False,
+                        'pulse_figures': None,
+                        't_ds_csv': t_ds_csv,
+                        'y2_ds_by_key': y2_ds_by_key,
+                        'keys_for_csv': keys_for_timeplots,
+                        'label_by_key': label_by_key,
+                        'stim_zero': global_s0 if have_global_stim else None,
+                        'stim_dur': global_dur if have_global_stim else None,
+                    }
+                    print(f"[Preview] Cached preview data (fingerprint: {current_fingerprint[:8]}...)")
+
                     # Show standard summary preview
                     self._show_summary_preview_dialog(
                         t_ds_csv=t_ds_csv,
@@ -2838,7 +3235,8 @@ class ExportManager:
                         'use_zscore_normalization': self.window.use_zscore_normalization,
                         'notch_filter_lower': self.window.notch_filter_lower,
                         'notch_filter_upper': self.window.notch_filter_upper,
-                        'apnea_threshold': self.window._parse_float(self.window.ApneaThresh) or 0.5
+                        'apnea_threshold': self.window._parse_float(self.window.ApneaThresh) or 0.5,
+                        'active_eupnea_sniff_classifier': self.window.state.active_eupnea_sniff_classifier
                     }
 
                     save_state_to_npz(st, session_path, include_raw_data=False, gmm_cache=gmm_cache, app_settings=app_settings)
@@ -2852,49 +3250,39 @@ class ExportManager:
             ml_counts = None
             if save_ml_training:
                 try:
-                    # Prompt for metadata (quality score, user name, experimental conditions)
-                    from dialogs.ml_metadata_dialog import MLMetadataDialog
+                    # Build metadata from main dialog values (no second popup needed!)
+                    import os
+                    import socket
+                    from datetime import datetime
 
-                    # Get last user name from state for consistency
-                    # NOTE: Experimental conditions are NOT auto-filled to prevent mislabeling
-                    st = self.window.state
-                    last_user_name = getattr(st, 'ml_last_user_name', None)
+                    metadata = {
+                        'system_username': os.getenv('USERNAME') or os.getenv('USER') or 'unknown',
+                        'computer_name': socket.gethostname(),
+                        'timestamp': datetime.now().isoformat(),
+                        'animal_state': dialog_vals.get('ml_animal_state', 'awake'),
+                        'gas': dialog_vals.get('ml_gas', 'room_air'),
+                        'quality_score': dialog_vals.get('ml_quality_score', 7),
+                    }
 
-                    metadata_dialog = MLMetadataDialog(
-                        self.window,
-                        last_user_name=last_user_name
-                    )
+                    # Get centralized ML training folder (user can choose where)
+                    ml_folder = self._get_ml_training_folder()
+                    if ml_folder:
+                        # Create filename with timestamp to avoid collisions
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        ml_filename = f"{suggested}_{timestamp}_ml_training.npz"
+                        ml_training_path = ml_folder / ml_filename
 
-                    if metadata_dialog.exec() != QDialog.DialogCode.Accepted:
-                        print(f"[ML training] ⚠ ML training export cancelled by user (metadata dialog)")
+                        # Check if waveforms should be included
+                        include_waveforms = dialog_vals.get("ml_include_waveforms", False)
+
+                        ml_counts = self._export_ml_training_data(
+                            ml_training_path, suggested,
+                            include_waveforms=include_waveforms,
+                            metadata=metadata
+                        )
+                        print(f"[ML training] ✓ ML training data exported to {ml_training_path}")
                     else:
-                        # Get metadata from dialog
-                        metadata = metadata_dialog.get_metadata()
-
-                        # Save ONLY user name to state for next time
-                        # Experimental conditions are NOT saved to prevent accidental mislabeling
-                        st.ml_last_user_name = metadata['user_name']
-
-                        # Get centralized ML training folder (user can choose where)
-                        ml_folder = self._get_ml_training_folder()
-                        if ml_folder:
-                            # Create filename with timestamp to avoid collisions
-                            import datetime
-                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                            ml_filename = f"{suggested}_{timestamp}_ml_training.npz"
-                            ml_training_path = ml_folder / ml_filename
-
-                            # Check if waveforms should be included
-                            include_waveforms = dialog_vals.get("ml_include_waveforms", False)
-
-                            ml_counts = self._export_ml_training_data(
-                                ml_training_path, suggested,
-                                include_waveforms=include_waveforms,
-                                metadata=metadata
-                            )
-                            print(f"[ML training] ✓ ML training data exported to {ml_training_path}")
-                        else:
-                            print(f"[ML training] ⚠ ML training export cancelled by user")
+                        print(f"[ML training] ⚠ ML training export cancelled by user")
                 except Exception as e:
                     print(f"[ML training] ✗ ML training export failed: {e}")
                     import traceback
@@ -4411,43 +4799,44 @@ class ExportManager:
                             # time for time-series star (use breath midpoint)
                             sigh_times_rel.append(float(st.t[int(mids[j])] - t0))
 
-                # Build metric traces - use global cache if available
-                traces = None
-                if hasattr(self.window, '_export_metric_cache'):
-                    traces = self.window._export_metric_cache.get(s, None)
+                # OPTIMIZATION: Use downsampled data instead of computing full-resolution traces
+                # This avoids allocating huge arrays (can be 300M+ elements for long recordings)
+                col_idx = kept.index(s)  # Column in y2_ds_by_key for this sweep
 
-                if traces is None:
-                    # Compute if not cached
-                    traces = {}
-                    for k in keys_for_csv:
-                        try:
-                            traces[k] = self._compute_metric_trace(k, st.t, y_proc, st.sr_hz, pks, br, sweep=s)
-                        except TypeError:
-                            traces[k] = None
-
-                # Per-sweep baselines for normalization (breath-based)
+                # Per-sweep baselines for normalization (breath-based) - use downsampled data
                 mask_pre_b  = (t_rel_all >= -NORM_BASELINE_WINDOW_S) & (t_rel_all < 0.0)
                 mask_post_b = (t_rel_all >=  0.0) & (t_rel_all <= NORM_BASELINE_WINDOW_S)
                 b_by_k = {}
                 for k in keys_for_csv:
-                    arr = traces.get(k, None)
-                    if arr is None or len(arr) != len(st.t):
+                    Y_ds = y2_ds_by_key.get(k, None)
+                    if Y_ds is None or Y_ds.size == 0:
                         b_by_k[k] = np.nan
                         continue
-                    vals = arr[mids[mask_pre_b]]
-                    vals = vals[np.isfinite(vals)]
-                    if vals.size == 0:
-                        vals = arr[mids[mask_post_b]]
+                    # Extract baseline values from downsampled timeseries
+                    baseline_t_rel = t_rel_all[mask_pre_b]
+                    if baseline_t_rel.size == 0:
+                        baseline_t_rel = t_rel_all[mask_post_b]
+                    if baseline_t_rel.size > 0:
+                        # Find closest downsampled indices for baseline breaths
+                        ds_indices = np.array([np.argmin(np.abs(t_ds_csv - t)) for t in baseline_t_rel])
+                        ds_indices = np.clip(ds_indices, 0, Y_ds.shape[0] - 1)
+                        vals = Y_ds[ds_indices, col_idx]
                         vals = vals[np.isfinite(vals)]
-                    b_by_k[k] = float(np.mean(vals)) if vals.size else np.nan
+                        b_by_k[k] = float(np.mean(vals)) if vals.size else np.nan
+                    else:
+                        b_by_k[k] = np.nan
 
-                # Fill histogram pools & record sigh metric values
+                # Fill histogram pools & record sigh metric values - use downsampled data
                 for j, (idx_mid, t_rel) in enumerate(zip(mids, t_rel_all)):
+                    # Find closest downsampled index for this breath
+                    ds_idx_j = np.argmin(np.abs(t_ds_csv - t_rel))
+                    ds_idx_j = min(ds_idx_j, M - 1)  # Clip to valid range
+
                     for k in keys_for_csv:
-                        arr = traces.get(k, None)
-                        if arr is None or len(arr) != len(st.t):
+                        Y_ds = y2_ds_by_key.get(k, None)
+                        if Y_ds is None or Y_ds.size == 0:
                             continue
-                        v = float(arr[int(idx_mid)])
+                        v = float(Y_ds[ds_idx_j, col_idx])
                         if not np.isfinite(v):
                             continue
 
@@ -4700,10 +5089,10 @@ class ExportManager:
                     # Retrieve eupnea mask from cache (computed earlier)
                     eupnea_mask = self._eupnea_masks_cache.get(s, None)
                     if eupnea_mask is None:
-                        # Fallback: compute if not cached
-                        if self.window.eupnea_detection_mode == "gmm":
-                            eupnea_mask = self.window._compute_eupnea_from_gmm(s, len(y_proc))
-                        else:
+                        # Fallback: compute if not cached - use active classifier
+                        eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
+                        # Fallback to traditional method if no classifier data available
+                        if eupnea_mask.sum() == 0:
                             eupnea_mask = metrics.detect_eupnic_regions(
                                 st.t, y_proc, st.sr_hz, pks, on, off, expmins, expoffs,
                                 freq_threshold_hz=eupnea_thresh,

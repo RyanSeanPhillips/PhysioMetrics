@@ -79,13 +79,6 @@ class EditingModes:
         self.window.movePointButton.setCheckable(True)
         self.window.markSniffButton.setCheckable(True)
 
-        # HIDDEN: Mark Sniff button is disabled until we implement proper per-peak
-        # eupnea/sniffing editing that syncs with breath_type_class for ML export.
-        # Currently, manual region edits only update sniff_regions_by_sweep (display)
-        # but NOT breath_type_class (used for ML training export).
-        # TODO: Implement proper breath type editing in a future version.
-        self.window.markSniffButton.setVisible(False)
-
         # Connect signals
         self.window.addPeaksButton.toggled.connect(self.on_add_peaks_toggled)
         if hasattr(self.window, 'MergeBreathsButton'):
@@ -339,40 +332,9 @@ class EditingModes:
             self._sniff_edge_mode = None
             self._sniff_region_index = None
 
-        # Turn off Merge Breaths mode
-        if getattr(self, "_merge_peaks_mode", False):
-            self._merge_peaks_mode = False
-            if hasattr(self.window, 'MergeBreathsButton'):
-                self.window.MergeBreathsButton.blockSignals(True)
-                self.window.MergeBreathsButton.setChecked(False)
-                self.window.MergeBreathsButton.blockSignals(False)
-                self.window.MergeBreathsButton.setText("Merge Breaths")
-            # Disconnect matplotlib events
-            if getattr(self, '_merge_motion_cid', None) is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
-                self._merge_motion_cid = None
-            if getattr(self, '_merge_release_cid', None) is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
-                self._merge_release_cid = None
-            if getattr(self, '_merge_key_cid', None) is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
-                self._merge_key_cid = None
-            # Clear selection
-            self._cancel_merge_selection()
-
-        # Turn off Omit Region mode
-        if getattr(self, "_omit_region_mode", False):
-            self._exit_omit_region_mode()
-
         # Clear click callback and reset cursor
         self.window.plot_host.clear_click_callback()
         self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-
-        # Clear editing instructions from status bar
-        try:
-            self.window._clear_editing_instructions()
-        except Exception:
-            pass
 
     # Alias for backward compatibility
     _turn_off_all_edit_modes = turn_off_all_edit_modes
@@ -390,10 +352,18 @@ class EditingModes:
             # turn OFF delete mode
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
+                self.window.deletePeaksButton.blockSignals(True)
+                self.window.deletePeaksButton.setChecked(False)
+                self.window.deletePeaksButton.blockSignals(False)
+                self.window.deletePeaksButton.setText("Delete Peaks")
 
             # turn OFF sigh mode + reset its label
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
+                self.window.addSighButton.blockSignals(True)
+                self.window.addSighButton.setChecked(False)
+                self.window.addSighButton.blockSignals(False)
+                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
@@ -420,28 +390,14 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            # turn OFF omit region mode
-            if getattr(self, "_omit_region_mode", False):
-                self._exit_omit_region_mode()
-
-            self.window.addPeaksButton.setText("Toggle Breath (ON)")
+            self.window.addPeaksButton.setText("Toggle Breath (ON) [Right-click=Sigh]")
             self.window.plot_host.set_click_callback(self._on_plot_click_add_peak)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
-            # Show rich text instructions in status bar
-            html = ('<b>LEFT CLICK:</b> '
-                    '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
-                    'Breath <span style="color:#F44336">●</span>'
-                    '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>RIGHT CLICK:</b> '
-                    '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
-                    'Sigh <span style="color:#FFD700">★</span>')
-            self.window._show_editing_instructions(html)
         else:
             self.window.addPeaksButton.setText("Toggle Breath")
             if not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
 
     def _compute_single_breath_events(self, y, peak_idx, prev_peak_idx, next_peak_idx, sr_hz):
         """
@@ -669,6 +625,10 @@ class EditingModes:
             # turn OFF sigh mode + reset its label
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
+                self.window.addSighButton.blockSignals(True)
+                self.window.addSighButton.setChecked(False)
+                self.window.addSighButton.blockSignals(False)
+                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
@@ -695,18 +655,14 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
+            self.window.deletePeaksButton.setText("Delete Peaks (ON) [Shift=Add, Ctrl=Sigh]")
             self.window.plot_host.set_click_callback(self._on_plot_click_delete_peak)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
-            # Show instructions in status bar
-            msg = "DELETE PEAK: Click to delete nearest peak | Shift+click to add peak | Ctrl+click to toggle sigh"
-            self.window._log_status_message(msg, 0)
-            self.window._persistent_status_message = msg
         else:
+            self.window.deletePeaksButton.setText("Delete Peaks")
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window.statusBar().clearMessage()
-                self.window._persistent_status_message = None
 
     def _on_plot_click_delete_peak(self, xdata, ydata, event, _force_mode=None):
         """Handle plot click to delete a peak."""
@@ -869,6 +825,10 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
+                self.window.deletePeaksButton.blockSignals(True)
+                self.window.deletePeaksButton.setChecked(False)
+                self.window.deletePeaksButton.blockSignals(False)
+                self.window.deletePeaksButton.setText("Delete Peaks")
 
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
@@ -895,19 +855,15 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
+            self.window.addSighButton.setText("Add Sigh (ON)")
             self.window.plot_host.set_click_callback(self._on_plot_click_add_sigh)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
-            # Show instructions in status bar
-            msg = "TOGGLE SIGH: Click on a breath peak to mark/unmark as sigh"
-            self.window._log_status_message(msg, 0)
-            self.window._persistent_status_message = msg
         else:
+            self.window.addSighButton.setText("Add Sigh")
             # only clear if no other edit mode is active
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window.statusBar().clearMessage()
-                self.window._persistent_status_message = None
 
     def _on_plot_click_add_sigh(self, xdata, ydata, event, _force_mode=None):
         """Handle plot click to add or remove a sigh marker."""
@@ -969,18 +925,11 @@ class EditingModes:
                     else:
                         all_peaks['sigh_class'][peak_mask] = 1  # Add sigh label
 
-                    # Only update sigh_manual_ro if we're in Manual mode
-                    # This prevents ML predictions from being saved as "manual" edits
-                    if st.active_sigh_classifier == 'manual':
-                        if 'sigh_manual_ro' not in all_peaks:
-                            # Initialize empty sigh_manual_ro (only manual edits will be saved)
-                            all_peaks['sigh_manual_ro'] = np.zeros(len(all_peaks['indices']), dtype=np.int8)
-                            if 'labels' in all_peaks:
-                                all_peaks['sigh_manual_ro'][all_peaks['labels'] == 0] = -1
+                    # Also update sigh_manual_ro to preserve this manual annotation
+                    if 'sigh_manual_ro' in all_peaks:
                         all_peaks['sigh_manual_ro'][peak_mask] = all_peaks['sigh_class'][peak_mask]
-                        print(f"[sigh] Updated sigh_class and sigh_manual_ro for peak {i_nearest_peak}")
-                    else:
-                        print(f"[sigh] Updated sigh_class for peak {i_nearest_peak} (ML mode, sigh_manual_ro unchanged)")
+
+                    print(f"[sigh] Updated sigh_class and sigh_manual_ro for peak {i_nearest_peak}")
 
         # Redraw to see star(s)
         self.window.redraw_main_plot()
@@ -1005,9 +954,17 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
+                self.window.deletePeaksButton.blockSignals(True)
+                self.window.deletePeaksButton.setChecked(False)
+                self.window.deletePeaksButton.blockSignals(False)
+                self.window.deletePeaksButton.setText("Delete Peaks")
 
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
+                self.window.addSighButton.blockSignals(True)
+                self.window.addSighButton.setChecked(False)
+                self.window.addSighButton.blockSignals(False)
+                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -1026,18 +983,9 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            # turn OFF omit region mode
-            if getattr(self, "_omit_region_mode", False):
-                self._exit_omit_region_mode()
-
-            self.window.movePointButton.setText("Move Point (ON)")
+            self.window.movePointButton.setText("Move Point (ON) [Shift=Snap]")
             self.window.plot_host.set_click_callback(self._on_plot_click_move_point)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
-            # Show rich text instructions in status bar
-            html = ('<b>CLICK+DRAG:</b> Move point'
-                    '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>SHIFT+DRAG:</b> Snap to critical points')
-            self.window._show_editing_instructions(html)
 
             # Connect matplotlib events
             self._key_press_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
@@ -1079,7 +1027,6 @@ class EditingModes:
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
 
     def _on_plot_click_move_point(self, xdata, ydata, event):
         """Select a point (peak/onset/offset/exp) to move."""
@@ -1487,9 +1434,17 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
+                self.window.deletePeaksButton.blockSignals(True)
+                self.window.deletePeaksButton.setChecked(False)
+                self.window.deletePeaksButton.blockSignals(False)
+                self.window.deletePeaksButton.setText("Delete Peaks")
 
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
+                self.window.addSighButton.blockSignals(True)
+                self.window.addSighButton.setChecked(False)
+                self.window.addSighButton.blockSignals(False)
+                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
@@ -1507,20 +1462,9 @@ class EditingModes:
                     self.window.MergeBreathsButton.blockSignals(False)
                     self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            # turn OFF omit region mode
-            if getattr(self, "_omit_region_mode", False):
-                self._exit_omit_region_mode()
-
-            self.window.markSniffButton.setText("Mark Sniff (ON)")
+            self.window.markSniffButton.setText("Mark Sniff (ON) [Shift=Delete]")
             self.window.plot_host.set_click_callback(self._on_plot_click_mark_sniff)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
-            # Show rich text instructions in status bar
-            html = ('<b>CLICK+DRAG:</b> Create region'
-                    '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>CLICK+DRAG EDGE:</b> Adjust'
-                    '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>SHIFT+CLICK:</b> <span style="color:#F44336">Delete</span>')
-            self.window._show_editing_instructions(html)
 
             # Connect matplotlib events for drag functionality
             self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_sniff_drag)
@@ -1549,7 +1493,6 @@ class EditingModes:
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False) and not getattr(self, "_move_point_mode", False):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
 
     def _on_plot_click_mark_sniff(self, xdata, ydata, event):
         """Start marking a sniffing region (click-and-drag) or grab an edge to adjust.
@@ -1882,9 +1825,17 @@ class EditingModes:
 
         if getattr(self, "_delete_peaks_mode", False):
             self._delete_peaks_mode = False
+            self.window.deletePeaksButton.blockSignals(True)
+            self.window.deletePeaksButton.setChecked(False)
+            self.window.deletePeaksButton.blockSignals(False)
+            self.window.deletePeaksButton.setText("Delete Peaks")
 
         if getattr(self, "_add_sigh_mode", False):
             self._add_sigh_mode = False
+            self.window.addSighButton.blockSignals(True)
+            self.window.addSighButton.setChecked(False)
+            self.window.addSighButton.blockSignals(False)
+            self.window.addSighButton.setText("ADD/DEL Sigh")
 
         if getattr(self, "_move_point_mode", False):
             self._move_point_mode = False
@@ -1900,28 +1851,13 @@ class EditingModes:
             self.window.markSniffButton.blockSignals(False)
             self.window.markSniffButton.setText("Mark Sniff")
 
-        # turn OFF merge peaks mode
-        if getattr(self, "_merge_peaks_mode", False):
-            self._merge_peaks_mode = False
-            if hasattr(self.window, 'MergeBreathsButton'):
-                self.window.MergeBreathsButton.blockSignals(True)
-                self.window.MergeBreathsButton.setChecked(False)
-                self.window.MergeBreathsButton.blockSignals(False)
-                self.window.MergeBreathsButton.setText("Merge Breaths")
-
         # Update omit button appearance
         self.window.OmitSweepButton.setChecked(True)
         self.window.OmitSweepButton.setText("Omit (ON)")
-        # Show rich text instructions in status bar
-        html = ('<b>CLICK+DRAG:</b> Create/Adjust'
-                '&nbsp;&nbsp;&nbsp;&nbsp;'
-                '<b>CTRL+CLICK:</b> <span style="color:#F44336">Delete</span>'
-                '&nbsp;&nbsp;&nbsp;&nbsp;'
-                '<b>CTRL+SHIFT+CLICK:</b> Full Sweep'
-                '&nbsp;&nbsp;&nbsp;&nbsp;'
-                '<b>R:</b> <span style="color:#64B5F6">Snap to breaths</span>')
+        msg = "OMIT REGION MODE: Click-drag to create/adjust | Ctrl+click to delete | Ctrl+Shift+click full sweep | Press 'R' to snap to breaths"
         try:
-            self.window._show_editing_instructions(html)
+            self.window._log_status_message(msg, 0)  # 0 = persistent message
+            self.window._persistent_status_message = msg  # Store for refresh
         except Exception: pass
 
         # Set up event handlers
@@ -1970,9 +1906,10 @@ class EditingModes:
         self.window.plot_host.clear_click_callback()
         self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
 
-        # Clear editing instructions
+        # Clear persistent status message
         try:
-            self.window._clear_editing_instructions()
+            self.window._persistent_status_message = None
+            self.window._log_status_message("Exited omit region mode", 3000)
         except Exception: pass
 
     def _on_plot_click_omit_region(self, xdata, ydata, event):
@@ -2024,8 +1961,9 @@ class EditingModes:
             # Refresh and restore persistent message
             self.window._refresh_omit_button_label()
             self.window.redraw_main_plot()
-            try: self.window._restore_editing_instructions()
-            except Exception: pass
+            if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+                try: self.window._log_status_message(self.window._persistent_status_message, 0)
+                except Exception: pass
             return
 
         # Get current sweep
@@ -2059,9 +1997,10 @@ class EditingModes:
                     print(f"[omit-region] Deleted region {i}: {t_start:.3f} - {t_end:.3f} s")
 
                     self.window.redraw_main_plot()
-                    # Restore editing instructions
-                    try: self.window._restore_editing_instructions()
-                    except Exception: pass
+                    # Restore persistent message
+                    if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+                        try: self.window._log_status_message(self.window._persistent_status_message, 0)
+                        except Exception: pass
                     return
 
         # Edge detection threshold (in plot time units)
@@ -2257,9 +2196,10 @@ class EditingModes:
         print(f"[omit-region] Calling redraw_main_plot()...")
         self.window.redraw_main_plot()
 
-        # Restore editing instructions after redraw
-        try: self.window._restore_editing_instructions()
-        except Exception: pass
+        # Restore persistent status message after redraw
+        if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+            try: self.window._log_status_message(self.window._persistent_status_message, 0)
+            except Exception: pass
 
     def _reset_omit_region_state(self):
         """Reset omit region drag state."""
@@ -2322,10 +2262,11 @@ class EditingModes:
         # Merge any overlapping regions after snapping
         self._merge_omit_regions(s)
 
-        # Redraw and restore editing instructions
+        # Redraw and restore message
         self.window.redraw_main_plot()
-        try: self.window._restore_editing_instructions()
-        except Exception: pass
+        if hasattr(self.window, '_persistent_status_message') and self.window._persistent_status_message:
+            try: self.window._log_status_message(self.window._persistent_status_message, 0)
+            except Exception: pass
 
         print(f"[omit-region] Snapped {len(regions)} region(s) to breath onsets")
 
@@ -2437,9 +2378,17 @@ class EditingModes:
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
+                self.window.deletePeaksButton.blockSignals(True)
+                self.window.deletePeaksButton.setChecked(False)
+                self.window.deletePeaksButton.blockSignals(False)
+                self.window.deletePeaksButton.setText("Delete Peaks")
 
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
+                self.window.addSighButton.blockSignals(True)
+                self.window.addSighButton.setChecked(False)
+                self.window.addSighButton.blockSignals(False)
+                self.window.addSighButton.setText("ADD/DEL Sigh")
 
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
@@ -2455,20 +2404,9 @@ class EditingModes:
                 self.window.markSniffButton.blockSignals(False)
                 self.window.markSniffButton.setText("Mark Sniff")
 
-            # turn OFF omit region mode
-            if getattr(self, "_omit_region_mode", False):
-                self._exit_omit_region_mode()
-
-            self.window.MergeBreathsButton.setText("Merge Breaths (ON)")
+            self.window.MergeBreathsButton.setText("Merge Breaths (ON) [Drag to select, click on peak to merge]")
             self.window.plot_host.set_click_callback(self._on_plot_click_merge_peaks)
             self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
-            # Show rich text instructions in status bar
-            html = ('<b>CLICK+DRAG:</b> Select breaths'
-                    '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>CLICK/ENTER:</b> <span style="color:#4CAF50">Merge</span>'
-                    '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>ESC:</b> <span style="color:#F44336">Cancel</span>')
-            self.window._show_editing_instructions(html)
 
             # Connect matplotlib events for drag functionality
             self._merge_motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_merge_drag)
@@ -2499,7 +2437,6 @@ class EditingModes:
                        getattr(self, "_mark_sniff_mode", False)]):
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
 
     def _on_plot_click_merge_peaks(self, xdata, ydata, event):
         """Handle clicks for merge mode: drag to select, double-click to merge, click away to deselect."""

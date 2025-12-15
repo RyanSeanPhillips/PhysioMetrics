@@ -28,15 +28,24 @@ class PlotManager:
     def redraw_main_plot(self):
         """
         Main plot orchestration method.
-        Determines whether to show single-panel or multi-channel grid mode.
+        Determines whether to show single-panel, multi-channel, or grid mode.
         """
         st = self.state
         if st.t is None:
             return
 
-        if self.window.single_panel_mode:
+        # Always check channel manager first
+        channel_config = self._get_channel_manager_config()
+        visible_channels = channel_config['visible_channels']
+
+        # If channel manager has any visible channels, use multi-channel plot
+        # This ensures we use the channel manager's selections, not the old dropdown
+        if len(visible_channels) >= 1:
+            self._draw_multi_channel_plot(channel_config)
+            self._restore_editing_mode_connections()
+        elif self.window.single_panel_mode:
+            # No channel manager config, use single panel mode
             self._draw_single_panel_plot()
-            # Restore editing mode connections after redraw
             self._restore_editing_mode_connections()
         else:
             # Multi-channel grid mode - show all channels for current sweep
@@ -933,6 +942,343 @@ class PlotManager:
             title=title,
             max_points_per_trace=max_pts
         )
+
+    def _get_channel_manager_config(self):
+        """Get visible channels and their types from the channel manager.
+
+        Returns:
+            dict: {
+                'pleth_channels': [(name, config), ...],  # Channels marked as Pleth
+                'opto_stim_channels': [(name, config), ...],  # All Opto Stim channels (for blue spans)
+                'visible_opto_channels': [(name, config), ...],  # Visible Opto Stim channels (for panels)
+                'raw_channels': [(name, config), ...],  # Channels marked as Raw Signal
+                'visible_channels': [(name, config), ...],  # All visible channels in order
+            }
+        """
+        result = {
+            'pleth_channels': [],
+            'opto_stim_channels': [],  # All opto channels (for blue spans even if hidden)
+            'visible_opto_channels': [],  # Visible opto channels (for panels)
+            'raw_channels': [],
+            'visible_channels': []
+        }
+
+        # Check if channel manager exists
+        if not hasattr(self.window, 'channel_manager'):
+            return result
+
+        channels = self.window.channel_manager.get_channels()
+
+        # Collect all opto stim channels (even hidden ones) for blue spans
+        for name, config in channels.items():
+            if config.channel_type == "Opto Stim":
+                result['opto_stim_channels'].append((name, config))
+
+        # Collect visible channels sorted by order
+        visible_list = []
+        for name, config in channels.items():
+            if config.visible:
+                visible_list.append((name, config))
+
+        # Sort by order attribute to preserve channel manager order
+        visible_list.sort(key=lambda x: x[1].order)
+
+        for name, config in visible_list:
+            result['visible_channels'].append((name, config))
+
+            if config.channel_type == "Pleth":
+                result['pleth_channels'].append((name, config))
+            elif config.channel_type == "Opto Stim":
+                result['visible_opto_channels'].append((name, config))
+            else:  # "Raw Signal"
+                result['raw_channels'].append((name, config))
+
+        return result
+
+    def _draw_multi_channel_plot(self, channel_config):
+        """Draw multi-channel plot based on channel manager configuration.
+
+        Args:
+            channel_config: Dict from _get_channel_manager_config()
+        """
+        from matplotlib.gridspec import GridSpec
+        st = self.state
+
+        # Use visible_channels which preserves channel manager order
+        # This includes all visible channels: Pleth, Raw Signal, and Opto Stim
+        plot_channels = channel_config['visible_channels']
+
+        # Get Pleth channels for overlay drawing
+        pleth_channels = channel_config['pleth_channels']
+
+        # Get all opto channels (even hidden) for blue span extraction
+        opto_channels = channel_config['opto_stim_channels']
+
+        if not plot_channels:
+            return
+
+        n_panels = len(plot_channels)
+
+        # Calculate height ratios - Pleth gets more space, others get less
+        height_ratios = []
+        for name, config in plot_channels:
+            if config.channel_type == "Pleth":
+                height_ratios.append(0.6)  # Pleth gets 60%
+            elif config.channel_type == "Opto Stim":
+                height_ratios.append(0.15)  # Opto Stim panels are small (TTL signal)
+            else:
+                height_ratios.append(0.25)  # Raw channels get 25% each
+
+        # Normalize ratios
+        total = sum(height_ratios)
+        height_ratios = [h/total for h in height_ratios]
+
+        # Get current sweep info
+        s = max(0, min(st.sweep_idx, next(iter(st.sweeps.values())).shape[1] - 1))
+
+        # Get time normalization (stim offset)
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        if st.stim_chan and spans:
+            t0 = spans[0][0]
+            t_plot = st.t - t0
+            spans_plot = [(a - t0, b - t0) for (a, b) in spans]
+        else:
+            t0 = 0.0
+            t_plot = st.t
+            spans_plot = spans
+
+        # Check for Opto Stim channel - extract stimulus spans from it
+        opto_spans_plot = []
+        if opto_channels:
+            opto_name, opto_config = opto_channels[0]  # Use first Opto Stim channel
+            if opto_name in st.sweeps:
+                opto_data = st.sweeps[opto_name][:, s]
+                opto_spans_plot = self._extract_stim_spans_from_channel(st.t, opto_data, t0)
+
+        # Save previous view if needed
+        prev_xlim = self.plot_host._last_single["xlim"] if self.plot_host._preserve_x else None
+        prev_ylim = self.plot_host._last_single["ylim"] if self.plot_host._preserve_y else None
+
+        # Clear figure and create GridSpec layout
+        self.plot_host.fig.clear()
+        gs = GridSpec(n_panels, 1, height_ratios=height_ratios, hspace=0.05, figure=self.plot_host.fig)
+
+        # Create subplots
+        axes = []
+        ax_main = None
+
+        for i, (ch_name, config) in enumerate(plot_channels):
+            if i == 0:
+                ax = self.plot_host.fig.add_subplot(gs[i])
+            else:
+                ax = self.plot_host.fig.add_subplot(gs[i], sharex=axes[0])
+            axes.append(ax)
+
+            # First Pleth channel becomes ax_main for overlays
+            if config.channel_type == "Pleth" and ax_main is None:
+                ax_main = ax
+                self.plot_host.ax_main = ax
+
+            # Hide x-axis labels except on bottom
+            if i < n_panels - 1:
+                ax.tick_params(labelbottom=False)
+
+            # Apply theme
+            self.plot_host.theme_manager.apply_theme(ax, self.plot_host.fig, self.plot_host._current_theme)
+
+        # Get theme colors
+        trace_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['trace_color']
+        text_color = self.plot_host.theme_manager.themes[self.plot_host._current_theme]['text_color']
+
+        # Clear old scatter references
+        self.plot_host.scatter_peaks = None
+        self.plot_host.scatter_onsets = None
+        self.plot_host.scatter_offsets = None
+        self.plot_host.scatter_expmins = None
+        self.plot_host.scatter_expoffs = None
+        self.plot_host._sigh_artist = None
+        self.plot_host.ax_y2 = None
+        self.plot_host.line_y2 = None
+        self.plot_host.line_y2_secondary = None
+        self.plot_host.ax_event = None
+
+        # Plot each channel
+        for i, ((ch_name, config), ax) in enumerate(zip(plot_channels, axes)):
+            # Get channel data
+            if ch_name not in st.sweeps:
+                continue
+
+            y_data = st.sweeps[ch_name][:, s]
+
+            # Apply filtering only to Pleth channels
+            if config.channel_type == "Pleth":
+                # Use filtered data via _current_trace if this is the analyze channel
+                if ch_name == st.analyze_chan:
+                    _, y_filtered = self.window._current_trace()
+                    y_data = y_filtered
+
+            # Plot trace
+            ax.plot(t_plot, y_data, linewidth=0.9, color=trace_color)
+            ax.axhline(0.0, linestyle="--", linewidth=0.8, color="#666666", alpha=0.9, zorder=0)
+
+            # Add stim spans (blue background) to Pleth channels
+            if config.channel_type == "Pleth":
+                # Prefer Opto Stim channel spans from channel manager over old stim spans
+                # This avoids duplication when both are available
+                if opto_spans_plot:
+                    all_spans = opto_spans_plot
+                else:
+                    all_spans = list(spans_plot)
+                for (t0_span, t1_span) in all_spans:
+                    if t1_span > t0_span:
+                        ax.axvspan(t0_span, t1_span, color="#2E5090", alpha=0.25)
+
+            # Set ylabel
+            ax.set_ylabel(ch_name, fontsize=10)
+            ax.grid(False)
+
+            # Apply Y-axis autoscaling
+            self._autoscale_axis(ax, y_data)
+
+        # Set title on first axis
+        title = self._build_plot_title(s)
+        if axes:
+            axes[0].set_title(title, color=text_color)
+
+        # Set xlabel on bottom axis
+        if axes:
+            axes[-1].set_xlabel('Time (s)', fontsize=10)
+
+        # Now draw overlays on the Pleth channel (ax_main)
+        if ax_main is not None and pleth_channels:
+            pleth_name, pleth_config = pleth_channels[0]
+
+            # Get filtered Pleth data
+            if pleth_name == st.analyze_chan:
+                _, y_pleth = self.window._current_trace()
+            else:
+                y_pleth = st.sweeps[pleth_name][:, s]
+
+            # Clear region overlays (will be redrawn)
+            self.plot_host.clear_region_overlays()
+
+            # Draw peak markers
+            self._draw_peak_markers(s, t_plot, y_pleth)
+
+            # Draw sigh markers
+            self._draw_sigh_markers(s, t_plot, y_pleth)
+
+            # Draw breath markers
+            self._draw_breath_markers(s, t_plot, y_pleth)
+
+            # Draw Y2 metric if selected
+            self._draw_y2_metric(s, st.t, t_plot)
+
+            # Draw omitted region overlays
+            self._draw_omitted_regions(s, t_plot)
+
+            # Refresh threshold lines
+            self.refresh_threshold_lines()
+
+            # Set y-limits excluding omitted
+            self._set_ylim_excluding_omitted(s, y_pleth, t_plot)
+
+            # Draw region overlays (eupnea, apnea, etc.)
+            self._draw_region_overlays(s, st.t, y_pleth, t_plot, t0)
+
+        # Restore preserved view or set default xlim to full data range
+        if axes:
+            if prev_xlim is not None:
+                axes[0].set_xlim(prev_xlim)
+            else:
+                # Set default xlim to full time range
+                axes[0].set_xlim(t_plot[0], t_plot[-1])
+        if prev_ylim is not None and ax_main is not None:
+            ax_main.set_ylim(prev_ylim)
+
+        # Set up limit listeners
+        self.plot_host._attach_limit_listeners(axes, mode="single")
+        self.plot_host._store_from_axes(mode="single")
+
+        # Layout adjustments
+        self.plot_host.fig.tight_layout(pad=0.5, h_pad=0.1, w_pad=0.1)
+        self.plot_host.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
+        self.plot_host.canvas.draw_idle()
+
+    def _extract_stim_spans_from_channel(self, t, data, t0=0.0, threshold=0.5):
+        """Extract stimulus spans from an Opto Stim channel.
+
+        Args:
+            t: Time array
+            data: Channel data array
+            t0: Time offset for normalization
+            threshold: Threshold for detecting stimulus on/off (default 0.5)
+
+        Returns:
+            List of (start, end) tuples in normalized time
+        """
+        # Simple threshold-based detection
+        above = data > threshold
+
+        # Find transitions
+        spans = []
+        in_stim = False
+        start_time = None
+
+        for i, val in enumerate(above):
+            if val and not in_stim:
+                # Start of stim
+                in_stim = True
+                start_time = t[i] - t0
+            elif not val and in_stim:
+                # End of stim
+                in_stim = False
+                end_time = t[i] - t0
+                spans.append((start_time, end_time))
+
+        # Handle case where stim continues to end
+        if in_stim and start_time is not None:
+            spans.append((start_time, t[-1] - t0))
+
+        return spans
+
+    def _autoscale_axis(self, ax, y_data):
+        """Apply Y-axis autoscaling to an axis."""
+        st = self.state
+
+        if len(y_data) == 0:
+            return
+
+        # Remove NaN values
+        y_valid = y_data[~np.isnan(y_data)]
+
+        if len(y_valid) == 0:
+            return
+
+        if st.use_percentile_autoscale:
+            y_min = np.percentile(y_valid, 1)
+            y_max = np.percentile(y_valid, 99)
+            y_range = y_max - y_min
+
+            if y_range == 0 or np.isnan(y_range):
+                y_range = abs(y_min) if y_min != 0 else 1.0
+
+            padding = st.autoscale_padding * y_range
+        else:
+            y_min = np.min(y_valid)
+            y_max = np.max(y_valid)
+            y_range = y_max - y_min
+
+            if y_range == 0 or np.isnan(y_range):
+                y_range = abs(y_min) if y_min != 0 else 1.0
+
+            padding = 0.05 * y_range
+
+        y_lower = y_min - padding
+        y_upper = y_max + padding
+
+        if np.isfinite(y_lower) and np.isfinite(y_upper):
+            ax.set_ylim(y_lower, y_upper)
 
     def refresh_threshold_lines(self):
         """

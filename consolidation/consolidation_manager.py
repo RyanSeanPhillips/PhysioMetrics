@@ -119,6 +119,325 @@ class ConsolidationManager:
         else:
             return "consolidated_data.xlsx", warnings
 
+    def consolidate_csv_files(self, means_files: list, breaths_files: list, events_files: list):
+        """
+        Consolidate CSV files directly (used by Project Builder Consolidation tab).
+
+        Args:
+            means_files: List of (root_name, Path) tuples for timeseries/means CSVs
+            breaths_files: List of (root_name, Path) tuples for breaths CSVs
+            events_files: List of (root_name, Path) tuples for events CSVs
+        """
+        if not means_files and not breaths_files and not events_files:
+            QMessageBox.warning(self.window, "Consolidate", "No CSV files to consolidate.")
+            return
+
+        # Choose save location with intelligent default name
+        files_for_naming = means_files or breaths_files
+        proposed_filename, warnings = self._propose_consolidated_filename(files_for_naming)
+
+        # Show warnings if any
+        if warnings:
+            warning_msg = "Warning about files being consolidated:\n\n" + "\n".join(f"• {w}" for w in warnings)
+            warning_msg += "\n\nDo you want to continue?"
+            reply = QMessageBox.question(
+                self.window, "Consolidation Warning",
+                warning_msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
+        # Determine default save location
+        if means_files:
+            default_name = str(means_files[0][1].parent / proposed_filename)
+        elif breaths_files:
+            default_name = str(breaths_files[0][1].parent / proposed_filename)
+        else:
+            default_name = proposed_filename
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self.window, "Save consolidated data as...",
+            default_name,
+            "Excel Files (*.xlsx)"
+        )
+
+        if not save_path:
+            return
+
+        # Create progress dialog
+        progress = QProgressDialog("Consolidating data...", "Cancel", 0, 100, self.window)
+        progress.setWindowTitle("PhysioMetrics")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        try:
+            consolidated_data = {}
+
+            if means_files:
+                progress.setLabelText(f"Processing time series data ({len(means_files)} files)...")
+                progress.setValue(10)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    return
+                consolidated_data.update(self._consolidate_means_files(means_files))
+                progress.setValue(40)
+
+            if breaths_files:
+                if progress.wasCanceled():
+                    return
+                progress.setLabelText(f"Processing breath histograms ({len(breaths_files)} files)...")
+                progress.setValue(50)
+                QApplication.processEvents()
+                histogram_data = self._consolidate_breaths_histograms(breaths_files)
+                consolidated_data.update(histogram_data)
+                progress.setValue(70)
+
+                # Extract sigh data
+                progress.setLabelText("Extracting sigh data...")
+                sighs_df = self._consolidate_breaths_sighs(breaths_files)
+                consolidated_data['sighs'] = {
+                    'time_series': sighs_df,
+                    'raw_summary': {},
+                    'norm_summary': {},
+                    'windows': []
+                }
+                progress.setValue(80)
+
+            if events_files:
+                if progress.wasCanceled():
+                    return
+                progress.setLabelText(f"Processing events data ({len(events_files)} files)...")
+                progress.setValue(82)
+                QApplication.processEvents()
+                events_df = self._consolidate_events(events_files)
+                consolidated_data['events'] = {
+                    'time_series': events_df,
+                    'raw_summary': {},
+                    'norm_summary': {},
+                    'eupnea_summary': {},
+                    'windows': []
+                }
+
+                # Process stimulus events
+                progress.setLabelText("Processing stimulus data...")
+                progress.setValue(83)
+                QApplication.processEvents()
+                stimulus_df, stim_warnings = self._consolidate_stimulus(events_files)
+                consolidated_data['stimulus'] = {
+                    'time_series': stimulus_df,
+                    'raw_summary': {},
+                    'norm_summary': {},
+                    'windows': []
+                }
+
+            progress.setLabelText("Writing Excel file...")
+            progress.setValue(90)
+            QApplication.processEvents()
+
+            # Write to Excel
+            self._write_consolidated_excel(save_path, consolidated_data)
+
+            progress.setValue(100)
+            progress.close()
+
+            QMessageBox.information(
+                self.window, "Success",
+                f"Consolidated data saved to:\n{save_path}"
+            )
+
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(
+                self.window, "Error",
+                f"Failed to consolidate data:\n{str(e)}"
+            )
+            import traceback
+            traceback.print_exc()
+
+    def consolidate_files(self, files: list):
+        """
+        Consolidate NPZ files from the Project Builder Consolidation tab.
+
+        Args:
+            files: List of (display_name, npz_path) tuples
+        """
+        if not files:
+            QMessageBox.warning(self.window, "Consolidate", "No files selected to consolidate.")
+            return
+
+        # Find associated CSV files for each NPZ
+        means_files = []
+        breaths_files = []
+        events_files = []
+
+        for display_name, npz_path in files:
+            npz_path = Path(npz_path)
+            if not npz_path.exists():
+                continue
+
+            # Look for associated CSV files in the same directory
+            base_dir = npz_path.parent
+            base_name = npz_path.stem
+
+            # Try common naming patterns for CSV files
+            means_candidates = [
+                base_dir / f"{base_name}_means.csv",
+                base_dir / f"{base_name}.csv",
+            ]
+            breaths_candidates = [
+                base_dir / f"{base_name}_breaths.csv",
+            ]
+            events_candidates = [
+                base_dir / f"{base_name}_events.csv",
+            ]
+
+            for means_path in means_candidates:
+                if means_path.exists():
+                    means_files.append((display_name, means_path))
+                    break
+
+            for breaths_path in breaths_candidates:
+                if breaths_path.exists():
+                    breaths_files.append((display_name, breaths_path))
+                    break
+
+            for events_path in events_candidates:
+                if events_path.exists():
+                    events_files.append((display_name, events_path))
+                    break
+
+        if not means_files and not breaths_files and not events_files:
+            QMessageBox.warning(
+                self.window, "Consolidate",
+                "No CSV files found for selected NPZ files.\n\n"
+                "Please ensure the analysis data has been exported to CSV format first."
+            )
+            return
+
+        # Now use the same consolidation logic
+        files_for_naming = means_files or breaths_files
+        proposed_filename, warnings = self._propose_consolidated_filename(files_for_naming)
+
+        if warnings:
+            warning_msg = "Warning about files being consolidated:\n\n" + "\n".join(f"• {w}" for w in warnings)
+            warning_msg += "\n\nDo you want to continue?"
+            reply = QMessageBox.question(
+                self.window, "Consolidation Warning",
+                warning_msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
+        if means_files:
+            default_name = str(means_files[0][1].parent / proposed_filename)
+        elif breaths_files:
+            default_name = str(breaths_files[0][1].parent / proposed_filename)
+        else:
+            default_name = proposed_filename
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self.window, "Save consolidated data as...",
+            default_name,
+            "Excel Files (*.xlsx)"
+        )
+
+        if not save_path:
+            return
+
+        # Create progress dialog
+        n_total_files = len(means_files) + len(breaths_files)
+        progress = QProgressDialog("Consolidating data...", "Cancel", 0, 100, self.window)
+        progress.setWindowTitle("PhysioMetrics")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        try:
+            consolidated_data = {}
+
+            if means_files:
+                progress.setLabelText(f"Processing time series data ({len(means_files)} files)...")
+                progress.setValue(10)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    return
+                consolidated_data.update(self._consolidate_means_files(means_files))
+                progress.setValue(40)
+
+            if breaths_files:
+                if progress.wasCanceled():
+                    return
+                progress.setLabelText(f"Processing breath histograms ({len(breaths_files)} files)...")
+                progress.setValue(50)
+                QApplication.processEvents()
+                histogram_data = self._consolidate_breaths_histograms(breaths_files)
+                consolidated_data.update(histogram_data)
+                progress.setValue(70)
+
+                # Extract sigh data
+                progress.setLabelText("Extracting sigh data...")
+                sighs_df = self._consolidate_breaths_sighs(breaths_files)
+                consolidated_data['sighs'] = {
+                    'time_series': sighs_df,
+                    'raw_summary': {},
+                    'norm_summary': {},
+                    'windows': []
+                }
+                progress.setValue(80)
+
+            if events_files:
+                if progress.wasCanceled():
+                    return
+                progress.setLabelText(f"Processing events data ({len(events_files)} files)...")
+                progress.setValue(82)
+                QApplication.processEvents()
+                events_df = self._consolidate_events(events_files)
+                consolidated_data['events'] = {
+                    'time_series': events_df,
+                    'raw_summary': {},
+                    'norm_summary': {},
+                    'eupnea_summary': {},
+                    'windows': []
+                }
+
+                # Process stimulus events
+                progress.setLabelText(f"Processing stimulus data...")
+                progress.setValue(83)
+                QApplication.processEvents()
+                stimulus_df, stim_warnings = self._consolidate_stimulus(events_files)
+                consolidated_data['stimulus'] = {
+                    'time_series': stimulus_df,
+                    'raw_summary': {},
+                    'norm_summary': {},
+                    'windows': []
+                }
+
+            progress.setLabelText("Writing Excel file...")
+            progress.setValue(90)
+            QApplication.processEvents()
+
+            # Write to Excel
+            self._write_consolidated_excel(save_path, consolidated_data)
+
+            progress.setValue(100)
+            progress.close()
+
+            QMessageBox.information(
+                self.window, "Success",
+                f"Consolidated data saved to:\n{save_path}"
+            )
+
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(
+                self.window, "Error",
+                f"Failed to consolidate data:\n{str(e)}"
+            )
+            import traceback
+            traceback.print_exc()
 
     def on_consolidate_save_data_clicked(self):
         """Consolidate data from selected files into a single Excel file."""

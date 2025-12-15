@@ -79,11 +79,17 @@ class ProminenceThresholdDialog(QDialog):
         self._setup_ui()
 
         # Detect peaks and calculate threshold (unless skip_detection=True for embedded display-only mode)
-        # Also skip detection if cached peak data was provided
-        if not skip_detection and y_data is not None and len(y_data) > 0:
+        # Run if we have y_data (for detection) OR cached_peak_heights (skip detection, just plot)
+        has_data_to_plot = (y_data is not None and len(y_data) > 0) or (self.all_peak_heights is not None and len(self.all_peak_heights) > 0)
+
+        if not skip_detection and has_data_to_plot:
             if self.all_peak_heights is None:
-                # No cached data - need to detect peaks
-                self._detect_all_peaks()
+                # No cached data - need to detect peaks (requires y_data)
+                if y_data is not None and len(y_data) > 0:
+                    self._detect_all_peaks()
+                else:
+                    print("[Prominence Dialog] WARNING: No y_data and no cached peaks - cannot plot histogram")
+                    return
             else:
                 # Cached data provided - calculate percentile for histogram filtering
                 import time

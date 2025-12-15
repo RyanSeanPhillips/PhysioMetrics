@@ -15,6 +15,8 @@ matplotlib>=3.6.0
 # neo>=0.12.0  # Uncomment if using neo for ABF files
 pyabf>=2.3.0  # For ABF file support
 pyedflib>=0.1.30  # For EDF/EDF+ file support (requires numpy<2.0)
+python-docx>=1.0.0  # For scanning Word .docx files in notes
+openpyxl>=3.0.0  # For scanning Excel .xlsx files in notes
 
 # Telemetry and analytics (optional)
 requests>=2.28.0  # For Google Analytics 4 integration

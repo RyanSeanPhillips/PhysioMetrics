@@ -1,8 +1,10 @@
 from PyQt6 import uic
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QMessageBox, QListWidgetItem, QAbstractItemView, QTableWidgetItem, QTreeWidgetItem
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QMessageBox, QListWidgetItem, QAbstractItemView, QTreeWidgetItem, QTableView
 from PyQt6.QtCore import QSettings, QTimer, Qt
 from PyQt6.QtGui import QIcon
 from consolidation import ConsolidationManager
+from core.file_table_model import FileTableModel, ColumnDef, DEFAULT_COLUMNS
+from core.file_table_delegates import ButtonDelegate, StatusDelegate, AutoCompleteDelegate
 
 import re
 from PyQt6.QtWidgets import (
@@ -46,6 +48,9 @@ from editing import EditingModes
 # Import dialogs
 from dialogs import SpectralAnalysisDialog, SaveMetaDialog, PeakNavigatorDialog
 from dialogs.advanced_peak_editor_dialog import AdvancedPeakEditorDialog
+from dialogs.photometry_import_dialog import PhotometryImportDialog
+from core import photometry
+from core.channel_manager import ChannelManagerWidget
 
 # Import version
 from version_info import VERSION_STRING
@@ -63,7 +68,7 @@ class MainWindow(QMainWindow):
         from core.project_manager import ProjectManager
         self.project_manager = ProjectManager()
 
-        ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_04_horizontal.ui"
+        ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_05_horizontal.ui"
         uic.loadUi(ui_file, self)
 
         # icon_path = Path(__file__).parent / "assets" / "plethapp_thumbnail_light_02.ico"
@@ -79,6 +84,9 @@ class MainWindow(QMainWindow):
 
         # Enable dark title bar on Windows 11
         self._enable_dark_title_bar()
+
+        # Tab order is now set in the UI file:
+        # 0: Notes Files, 1: Project Files, 2: Consolidation, 3: Code Notebook
 
         # Style status bar to match dark theme
         self.statusBar().setStyleSheet("""
@@ -100,6 +108,9 @@ class MainWindow(QMainWindow):
 
         # Add filename display to status bar (right side, before history button)
         self._setup_filename_display()
+
+        # Add editing instructions label to status bar (left side, supports rich text)
+        self._setup_editing_instructions_label()
 
         self.settings = QSettings(ORG, APP)
         self.state = AppState()
@@ -147,6 +158,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plot_host)
 
+        # --- Setup Channel Manager Widget ---
+        self._setup_channel_manager()
+
         saved_geom = self.settings.value("geometry")
         if saved_geom:
             self.restoreGeometry(saved_geom)
@@ -162,6 +176,16 @@ class MainWindow(QMainWindow):
         # Add F1 shortcut for Help
         f1_shortcut = QShortcut(QKeySequence("F1"), self)
         f1_shortcut.activated.connect(self.on_help_clicked)
+
+        # Add Z/X shortcuts for navigation with ApplicationShortcut context
+        from PyQt6.QtCore import Qt
+        z_shortcut = QShortcut(QKeySequence("Z"), self)
+        z_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        z_shortcut.activated.connect(self._on_z_pressed)
+
+        x_shortcut = QShortcut(QKeySequence("X"), self)
+        x_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        x_shortcut.activated.connect(self._on_x_pressed)
 
         # --- Wire channel selection (immediate application) ---
         self.AnalyzeChanSelect.currentIndexChanged.connect(self.on_analyze_channel_changed)
@@ -191,10 +215,10 @@ class MainWindow(QMainWindow):
         self.eup_sniff_combo.currentTextChanged.connect(self.on_eupnea_sniff_classifier_changed)
         self.digh_combo.currentTextChanged.connect(self.on_sigh_classifier_changed)
 
-        # Set defaults to XGBoost (matches state.py default) - this will now trigger signals
+        # Set defaults - XGBoost for peak detection and sigh, GMM for eupnea/sniff
         # If models not loaded, _update_classifier_dropdowns() already fell back to Threshold/GMM/Manual
         self.peak_detec_combo.setCurrentText("XGBoost")
-        self.eup_sniff_combo.setCurrentText("XGBoost")
+        self.eup_sniff_combo.setCurrentText("GMM")  # GMM is the default for eupnea/sniff classification
         self.digh_combo.setCurrentText("XGBoost")
 
         # --- Wire filter controls ---
@@ -442,6 +466,26 @@ class MainWindow(QMainWindow):
         # Wire consolidate button
         self.ConsolidateSaveDataButton.clicked.connect(self.on_consolidate_save_data_clicked)
 
+        # Wire new consolidation tab in Project Builder
+        self.consolidationSourceList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.consolidationFilesList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.consolidationSaveButton.clicked.connect(self._on_consolidation_save_clicked)
+        # Connect move buttons
+        self.consolidationMoveAllRight.clicked.connect(self._consolidation_move_all_right)
+        self.consolidationMoveSingleRight.clicked.connect(self._consolidation_move_selected_right)
+        self.consolidationMoveSingleLeft.clicked.connect(self._consolidation_move_selected_left)
+        self.consolidationMoveAllLeft.clicked.connect(self._consolidation_move_all_left)
+        # Connect search filter
+        self.consolidationSearchBox.textChanged.connect(self._filter_consolidation_source_list)
+        # Connect browse button
+        self.consolidationBrowseButton.clicked.connect(self._on_consolidation_browse_clicked)
+        # Connect reset button (returns to project files)
+        self.consolidationResetButton.clicked.connect(self._on_consolidation_reset_clicked)
+        self.consolidationResetButton.hide()  # Hidden initially, shown when browsing custom folder
+        # Track consolidation source mode (None = project files, path = custom folder)
+        self._consolidation_custom_folder = None
+        # Auto-refresh consolidation source when switching to the tab
+        self.leftColumnTabs.currentChanged.connect(self._on_left_column_tab_changed)
 
         # ========================================
         # TESTING MODE: Auto-load file and set channels
@@ -477,96 +521,42 @@ class MainWindow(QMainWindow):
         # === Project Builder Connections ===
         self.browseDirectoryButton.clicked.connect(self.on_project_browse_directory)
         self.scanFilesButton.clicked.connect(self.on_project_scan_files)
-        # NOTE: addToProjectButton, addExperimentButton, removeExperimentButton, exportExperimentButton
-        # are hidden - no longer using experiment-based workflow (see _setup_master_file_list)
+        # NOTE: experiment-based workflow buttons were removed from .ui file
         self.clearFilesButton.clicked.connect(self.on_project_clear_files)
         self.newProjectButton.clicked.connect(self.on_project_new)
         self.saveProjectButton.clicked.connect(self.on_project_save)
-        self.loadProjectCombo.currentIndexChanged.connect(self.on_project_load)
 
-        # Add "Scan Saved Data" button programmatically
-        self._add_scan_saved_data_button()
+        # Set up the new unified project name combo (replaces loadProjectCombo + projectNameEdit)
+        self._setup_project_name_combo()
+
+        # Notes Files tab connections
+        if hasattr(self, 'searchNotesButton'):
+            self.searchNotesButton.clicked.connect(self.on_notes_search)
+        if hasattr(self, 'browseNotesButton'):
+            self.browseNotesButton.clicked.connect(self.on_notes_browse)
+        if hasattr(self, 'openNoteButton'):
+            self.openNoteButton.clicked.connect(self.on_notes_open)
+        if hasattr(self, 'previewNoteButton'):
+            self.previewNoteButton.clicked.connect(self.on_notes_preview)
+        if hasattr(self, 'linkNoteButton'):
+            self.linkNoteButton.clicked.connect(self.on_notes_link)
+        if hasattr(self, 'notesFilterEdit'):
+            self.notesFilterEdit.textChanged.connect(self._on_notes_filter_changed)
+
+        # Initialize notes files model
+        self._init_notes_files_model()
+
+        # Add extra notes action buttons (programmatically added)
+        self._add_notes_action_buttons()
+
+        # Connect Project Builder buttons (defined in .ui file)
+        self._connect_project_builder_buttons()
 
         # Project Builder state
         self._project_directory = None
+        self._notes_directory = None  # Separate folder for notes files
         self._discovered_files_data = []  # Store file metadata from scan
-
-        # Hide Browse Directory button (New Project handles this now)
-        self.browseDirectoryButton.hide()
-
-        # Make project name read-only and add edit button
-        self.projectNameEdit.setReadOnly(True)
-        self.projectNameEdit.setStyleSheet("""
-            QLineEdit {
-                background-color: #2b2b2b;
-                color: #d4d4d4;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                padding: 5px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-        """)
-
-        # Add edit button next to project name
-        from PyQt6.QtWidgets import QPushButton
-        self.editProjectNameButton = QPushButton("✏")
-        self.editProjectNameButton.setMaximumWidth(30)
-        self.editProjectNameButton.setMaximumHeight(30)
-        self.editProjectNameButton.setToolTip("Edit project name")
-        self.editProjectNameButton.setStyleSheet("""
-            QPushButton {
-                background-color: #3e3e42;
-                color: #d4d4d4;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 2px;
-            }
-            QPushButton:hover {
-                background-color: #505050;
-            }
-        """)
-        self.editProjectNameButton.clicked.connect(self.on_edit_project_name)
-
-        # Find the correct layout containing projectNameEdit (may be nested)
-        def find_widget_in_layout(layout, widget):
-            """Recursively find widget in layout and return (layout, index)."""
-            if not layout:
-                return None, -1
-
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                if item:
-                    # Check if this item is the widget
-                    if item.widget() == widget:
-                        return layout, i
-                    # Check if this item is a nested layout
-                    if item.layout():
-                        result_layout, result_index = find_widget_in_layout(item.layout(), widget)
-                        if result_layout:
-                            return result_layout, result_index
-            return None, -1
-
-        # Search for the layout containing projectNameEdit
-        parent_widget = self.projectNameEdit.parent()
-        parent_layout = parent_widget.layout()
-
-        target_layout, widget_index = find_widget_in_layout(parent_layout, self.projectNameEdit)
-
-        if target_layout and widget_index >= 0:
-            # Insert edit button right after the name edit
-            target_layout.insertWidget(widget_index + 1, self.editProjectNameButton)
-            print(f"[project-builder] OK Inserted edit button next to project name")
-        else:
-            # Fallback: try adding to parent layout
-            if parent_layout:
-                parent_layout.addWidget(self.editProjectNameButton)
-                print(f"[project-builder] WARNING Added edit button to parent layout (fallback)")
-            else:
-                print(f"[project-builder] ERROR: Could not find layout for edit button")
-
-        # Populate recent projects dropdown
-        self._populate_load_project_combo()
+        self._notes_files_data = []  # Store notes file metadata
 
         # === Master File List Setup ===
         # Hide the Project Organization section (right column) - we're using a flat master list instead
@@ -730,6 +720,157 @@ class MainWindow(QMainWindow):
         # Add to status bar (right side, before history button)
         self.statusBar().addPermanentWidget(self.filename_label)
 
+    def _setup_editing_instructions_label(self):
+        """Add a label to the status bar for rich text editing instructions."""
+        from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtCore import Qt
+
+        # Create label for editing mode instructions (supports HTML)
+        self.editing_instructions_label = QLabel("", self)
+        self.editing_instructions_label.setStyleSheet("""
+            QLabel {
+                color: #d4d4d4;
+                padding: 2px 8px;
+                font-size: 11px;
+            }
+        """)
+        self.editing_instructions_label.setTextFormat(Qt.TextFormat.RichText)
+        self.editing_instructions_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        # Add to status bar (left side - use addWidget, not addPermanentWidget)
+        self.statusBar().addWidget(self.editing_instructions_label, 1)  # stretch=1 to take available space
+
+    def _setup_channel_manager(self):
+        """Setup the Channel Manager using UI elements from the .ui file."""
+        # Create the ChannelManagerWidget, passing it the UI elements to use
+        self.channel_manager = ChannelManagerWidget(
+            parent=self,
+            summary_label=self.channelManagerSummaryLabel,
+            expand_btn=self.channelManagerExpandBtn,
+            preview_label=self.channelManagerPreviewLabel
+        )
+
+        # Connect signals
+        self.channel_manager.apply_requested.connect(self._on_channel_manager_apply)
+        self.channel_manager.settings_requested.connect(self._on_channel_settings_requested)
+
+    def _on_channel_manager_apply(self):
+        """Called when channel manager requests to apply changes."""
+        st = self.state
+
+        # Get the Pleth channel from channel manager
+        pleth_channel = self.channel_manager.get_pleth_channel()
+
+        # Check if Pleth channel changed - if so, clear analysis data
+        channel_changed = (pleth_channel != st.analyze_chan)
+
+        if pleth_channel:
+            if channel_changed:
+
+                # Clear peaks and breath data (same as on_analyze_channel_changed)
+                st.peaks_by_sweep.clear()
+                st.sigh_by_sweep.clear()
+                if hasattr(st, 'breath_by_sweep'):
+                    st.breath_by_sweep.clear()
+
+                # Clear omitted sweeps and regions
+                st.omitted_sweeps.clear()
+                st.omitted_ranges.clear()
+                self._refresh_omit_button_label()
+
+                # Clear sniffing regions
+                if hasattr(st, 'sniff_regions_by_sweep'):
+                    st.sniff_regions_by_sweep.clear()
+
+                # Clear event markers (bout annotations)
+                if hasattr(st, 'bout_annotations'):
+                    st.bout_annotations.clear()
+
+                # Clear z-score global statistics cache
+                self.zscore_global_mean = None
+                self.zscore_global_std = None
+
+            st.analyze_chan = pleth_channel
+
+            # Clear processing cache so filters are re-applied
+            st.proc_cache.clear()
+
+            # Also update the old dropdown to stay in sync (until we remove it)
+            idx = self.AnalyzeChanSelect.findText(pleth_channel)
+            if idx >= 0:
+                self.AnalyzeChanSelect.blockSignals(True)
+                self.AnalyzeChanSelect.setCurrentIndex(idx)
+                self.AnalyzeChanSelect.blockSignals(False)
+
+            # Switch to single panel mode (required for proper navigation)
+            if not self.single_panel_mode:
+                self.single_panel_mode = True
+
+            # Clear saved view to force fresh autoscale
+            self.plot_host.clear_saved_view("single")
+            self.plot_host.clear_saved_view("grid")
+
+            # Auto-detect prominence threshold (required for peak detection)
+            self._auto_detect_prominence_silent()
+
+            # Enable peak detection button (always enable when channel changes or is set)
+            self.ApplyPeakFindPushButton.setEnabled(True)
+        else:
+            # No Pleth channel - still clear saved view to show full data range
+            self.plot_host.clear_saved_view("single")
+            self.plot_host.clear_saved_view("grid")
+
+        # Redraw the plot with new channel configuration
+        self.redraw_main_plot()
+
+    def _on_channel_settings_requested(self, channel_name: str):
+        """Called when user clicks settings (gear) icon for a channel."""
+        # TODO: Open settings dialog for computed channels (e.g., ΔF/F parameters)
+        pass
+
+    def _populate_channel_manager(self, ch_names: list):
+        """Populate the channel manager widget with available channels."""
+        from core.channel_manager import ChannelConfig
+
+        # Get the currently selected analyze channel (from old dropdown)
+        analyze_chan = self.state.analyze_chan
+
+        configs = []
+        for i, name in enumerate(ch_names):
+            # Auto-detect channel type from name
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in ['pleth', 'resp', 'breath', 'flow', 'airway']):
+                channel_type = "Pleth"
+            elif any(kw in name_lower for kw in ['opto', 'stim', 'laser', 'led', 'light']):
+                channel_type = "Opto Stim"
+            else:
+                channel_type = "Raw Signal"
+
+            configs.append(ChannelConfig(
+                name=name,
+                visible=True,  # All channels visible by default as preview
+                channel_type=channel_type,
+                source="file",
+                order=i
+            ))
+
+        self.channel_manager.set_channels(configs)
+
+    def _show_editing_instructions(self, html: str):
+        """Show rich text editing instructions in the status bar."""
+        self.editing_instructions_label.setText(html)
+        self._editing_instructions_html = html  # Track for restoration (separate from plain text messages)
+
+    def _clear_editing_instructions(self):
+        """Clear the editing instructions from status bar."""
+        self.editing_instructions_label.setText("")
+        self._editing_instructions_html = None
+
+    def _restore_editing_instructions(self):
+        """Restore the editing instructions if any are active."""
+        if getattr(self, '_editing_instructions_html', None):
+            self.editing_instructions_label.setText(self._editing_instructions_html)
+
     def _update_filename_display(self):
         """Update the filename display in status bar with file metadata."""
         st = self.state
@@ -758,8 +899,12 @@ class MainWindow(QMainWindow):
             else:
                 self.filename_label.setText(f"Files: {len(st.file_info)} files ({filename}, ...)")
 
-    def _enable_dark_title_bar(self):
-        """Enable dark title bar on Windows 10/11."""
+    def _enable_dark_title_bar(self, widget=None):
+        """Enable dark title bar on Windows 10/11.
+
+        Args:
+            widget: QWidget to apply dark title bar to. If None, applies to self.
+        """
         if sys.platform == "win32":
             try:
                 from ctypes import windll, byref, sizeof, c_int
@@ -768,7 +913,8 @@ class MainWindow(QMainWindow):
                 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 
                 # Get window handle
-                hwnd = int(self.winId())
+                target = widget if widget else self
+                hwnd = int(target.winId())
 
                 # Set dark mode (1 = dark, 0 = light)
                 value = c_int(1)
@@ -852,6 +998,8 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         """Handle keyboard events - delegate to editing modes first."""
+        from PyQt6.QtCore import Qt
+
         # Try editing modes handler first
         if self.editing_modes.handle_key_press_event(event):
             event.accept()
@@ -868,15 +1016,58 @@ class MainWindow(QMainWindow):
         elif current_tab == 1:  # Curation tab
             self.on_curation_choose_dir_clicked()
 
+    def _is_focus_in_text_widget(self) -> bool:
+        """Check if focus is in a text input widget (to avoid shortcuts while typing)."""
+        from PyQt6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None:
+            return False
+        # Check if it's a text input type
+        if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+            return True
+        # Check if it's an editable combobox
+        if isinstance(focus_widget, QComboBox) and focus_widget.isEditable():
+            return True
+        return False
+
+    def _on_z_pressed(self):
+        """Handle Z key - navigate to previous sweep/window."""
+        if self._is_focus_in_text_widget():
+            return  # Don't navigate while typing
+        # Analysis tab is at index 1 (Project Builder=0, Analysis=1, Curation=2)
+        if self.Tabs.currentIndex() == 1:
+            self.navigation_manager.on_unified_prev()
+
+    def _on_x_pressed(self):
+        """Handle X key - navigate to next sweep/window."""
+        if self._is_focus_in_text_widget():
+            return  # Don't navigate while typing
+        # Analysis tab is at index 1 (Project Builder=0, Analysis=1, Curation=2)
+        if self.Tabs.currentIndex() == 1:
+            self.navigation_manager.on_unified_next()
+
     def on_browse_clicked(self):
         last_dir = self.settings.value("last_dir", str(Path.home()))
-        if not Path(str(last_dir)).exists():
-            last_dir = str(Path.home())
+        # Skip exists() check - it's slow on network drives and the dialog handles it gracefully
+        if last_dir and not (last_dir.startswith('\\\\') or (len(last_dir) > 1 and last_dir[1] == ':')):
+            # Only check exists() for non-network, non-drive paths
+            if not Path(str(last_dir)).exists():
+                last_dir = str(Path.home())
 
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select File(s)", last_dir,
-            "All Supported (*.abf *.smrx *.edf *.pleth.npz);;Data Files (*.abf *.smrx *.edf);;PhysioMetrics Sessions (*.pleth.npz);;ABF Files (*.abf);;SMRX Files (*.smrx);;EDF Files (*.edf);;All Files (*.*)"
-        )
+        # Show wait cursor while file dialog loads (can be slow on network drives)
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Opening file browser...")
+        QApplication.processEvents()
+
+        try:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "Select File(s)", last_dir,
+                "All Supported (*.abf *.smrx *.edf *.pleth.npz *.csv);;Data Files (*.abf *.smrx *.edf);;PhysioMetrics Sessions (*.pleth.npz);;Photometry/CSV (*.csv);;ABF Files (*.abf);;SMRX Files (*.smrx);;EDF Files (*.edf);;All Files (*.*)"
+            )
+        finally:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.statusBar().clearMessage()
+
         if not paths:
             return
 
@@ -908,12 +1099,46 @@ class MainWindow(QMainWindow):
 
             # Load the NPZ session
             self.load_npz_state(file_paths[0])
+
+        # Check if this is a photometry file (CSV with FP_data pattern)
+        elif len(file_paths) == 1 and photometry.detect_photometry_file(file_paths[0]):
+            # Show photometry import dialog
+            self._show_photometry_import_dialog(file_paths[0])
+
         else:
             # Load data files (ABF, SMRX, EDF)
             if len(file_paths) == 1:
                 self.load_file(file_paths[0])
             else:
                 self.load_multiple_files(file_paths)
+
+    def _show_photometry_import_dialog(self, initial_path: Path):
+        """
+        Show the photometry import wizard dialog.
+
+        Args:
+            initial_path: Path to the detected photometry file (FP_data*.csv)
+        """
+        dialog = PhotometryImportDialog(self, initial_path)
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted:
+            # Get the selected files
+            files = dialog.get_selected_files()
+            print(f"[Photometry] Files selected: {files}")
+
+            # TODO: In later phases, this will:
+            # 1. Process the photometry data
+            # 2. Load processed signals into the app
+            # For now, just log the selection
+
+            self._show_info(
+                "Photometry Import",
+                f"Selected files:\n\n"
+                f"• FP Data: {files.get('fp_data', 'None')}\n"
+                f"• AI Data: {files.get('ai_data', 'None')}\n\n"
+                "Full processing will be available in the next update."
+            )
 
     def load_file(self, path: Path):
         import time
@@ -1060,6 +1285,9 @@ class MainWindow(QMainWindow):
             self.EventsChanSelect.setCurrentIndex(0)  # select "None"
         self.EventsChanSelect.blockSignals(False)
 
+        # Populate Channel Manager widget
+        self._populate_channel_manager(ch_names)
+
         #Clear peaks
         self.state.peaks_by_sweep.clear()
         self.state.sigh_by_sweep.clear()
@@ -1079,6 +1307,9 @@ class MainWindow(QMainWindow):
             stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
             self.StimChanSelect.setCurrentIndex(stim_idx)
             st.stim_chan = auto_stim
+
+            # Update channel manager to show this as Opto Stim
+            self.channel_manager.set_channel_type(auto_stim, "Opto Stim")
 
             # Trigger stim detection
             self.on_stim_channel_changed(stim_idx)
@@ -1307,6 +1538,9 @@ class MainWindow(QMainWindow):
             self.EventsChanSelect.setCurrentIndex(0)  # select "None"
         self.EventsChanSelect.blockSignals(False)
 
+        # Populate Channel Manager widget
+        self._populate_channel_manager(ch_names)
+
         #Clear peaks
         self.state.peaks_by_sweep.clear()
         self.state.sigh_by_sweep.clear()
@@ -1330,6 +1564,9 @@ class MainWindow(QMainWindow):
             stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
             self.StimChanSelect.setCurrentIndex(stim_idx)
             st.stim_chan = auto_stim
+
+            # Update channel manager to show this as Opto Stim
+            self.channel_manager.set_channel_type(auto_stim, "Opto Stim")
 
             # Trigger stim detection
             self.on_stim_channel_changed(stim_idx)
@@ -1495,7 +1732,8 @@ class MainWindow(QMainWindow):
                 'use_zscore_normalization': self.use_zscore_normalization,
                 'notch_filter_lower': self.notch_filter_lower,
                 'notch_filter_upper': self.notch_filter_upper,
-                'apnea_threshold': self._parse_float(self.ApneaThresh) or 0.5
+                'apnea_threshold': self._parse_float(self.ApneaThresh) or 0.5,
+                'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
             }
 
             save_state_to_npz(self.state, save_path, include_raw_data=include_raw, gmm_cache=gmm_cache, app_settings=app_settings)
@@ -1551,9 +1789,9 @@ class MainWindow(QMainWindow):
                 f"Failed to save session state:\n\n{str(e)}"
             )
 
-    def load_npz_state(self, npz_path: Path):
+    def load_npz_state(self, npz_path: Path, alternative_data_path: Path = None):
         """Load complete analysis state from .pleth.npz file."""
-        from core.npz_io import load_state_from_npz, get_npz_metadata
+        from core.npz_io import load_state_from_npz, get_npz_metadata, OriginalFileNotFoundError
         import time
 
         t_start = time.time()
@@ -1567,8 +1805,47 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # If no alternative path provided, check if stored path exists - if not, try project file list
+        if alternative_data_path is None and hasattr(self, '_master_file_list') and self._master_file_list:
+            # Get the original filename from metadata
+            original_path_str = metadata.get('original_file', '')
+            if original_path_str:
+                stored_path = Path(original_path_str)
+
+                # Only search project file list if the stored path doesn't exist
+                if not stored_path.exists():
+                    original_filename = stored_path.name
+                    print(f"\n[Path Resolution] NPZ stored path not found: {stored_path}")
+                    print(f"  Searching project file list for: {original_filename}")
+
+                    # Search project's master file list for a matching filename
+                    for task in self._master_file_list:
+                        task_path = task.get('file_path', '')
+                        if task_path and Path(task_path).name == original_filename:
+                            candidate = Path(task_path)
+                            if candidate.exists():
+                                # Show detailed comparison of paths
+                                print(f"  Found in project: {candidate}")
+
+                                # Analyze the difference
+                                stored_parts = stored_path.parts
+                                project_parts = candidate.parts
+                                if stored_parts != project_parts:
+                                    # Find where they diverge
+                                    for i, (s, p) in enumerate(zip(stored_parts, project_parts)):
+                                        if s != p:
+                                            print(f"  Path diverges at part {i}: '{s}' vs '{p}'")
+                                            break
+                                    if len(stored_parts) != len(project_parts):
+                                        print(f"  Path depth differs: {len(stored_parts)} vs {len(project_parts)} parts")
+
+                                alternative_data_path = candidate
+                                break
+                    else:
+                        print(f"  Not found in project file list")
+
         # Show loading dialog
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        from PyQt6.QtWidgets import QProgressDialog, QApplication, QFileDialog, QMessageBox
         from PyQt6.QtCore import Qt
 
         progress = QProgressDialog(f"Loading session...\n{npz_path.name}", None, 0, 100, self)
@@ -1586,8 +1863,57 @@ class MainWindow(QMainWindow):
             progress.setValue(30)
             QApplication.processEvents()
 
-            new_state, raw_data_loaded, gmm_cache, app_settings = load_state_from_npz(npz_path, reload_raw_data=True)
+            new_state, raw_data_loaded, gmm_cache, app_settings = load_state_from_npz(
+                npz_path, reload_raw_data=True, alternative_data_path=alternative_data_path
+            )
+        except OriginalFileNotFoundError as e:
+            progress.close()
 
+            # Prompt user to locate the file
+            reply = QMessageBox.question(
+                self,
+                "Original File Not Found",
+                f"The original data file could not be found:\n\n"
+                f"{e.original_path}\n\n"
+                f"Would you like to locate the file manually?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                # Get file extension from original path
+                orig_ext = e.original_path.suffix.lower()
+                filter_map = {
+                    '.abf': "ABF Files (*.abf)",
+                    '.smrx': "Spike2 Files (*.smrx)",
+                    '.edf': "EDF Files (*.edf)",
+                }
+                file_filter = filter_map.get(orig_ext, "All Data Files (*.abf *.smrx *.edf)")
+
+                new_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    f"Locate {e.original_path.name}",
+                    str(Path.home()),
+                    file_filter
+                )
+
+                if new_path:
+                    # Retry with the new path
+                    self.load_npz_state(npz_path, alternative_data_path=Path(new_path))
+                    return
+
+            return  # User cancelled or said No
+
+        except Exception as e:
+            progress.close()
+            import traceback
+            self._show_error("Load Error",
+                f"Failed to load session state:\n\n{str(e)}\n\n{traceback.format_exc()}"
+            )
+            return
+
+        # Continue with successful load
+        try:
             if not raw_data_loaded:
                 progress.close()
                 self._show_error("Load Error",
@@ -1689,9 +2015,27 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'ApneaThresh'):
                     self.ApneaThresh.setText(str(apnea_thresh))
 
+                # Restore eupnea/sniff classifier
+                saved_classifier = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
+                self.state.active_eupnea_sniff_classifier = saved_classifier
+
+                # Update dropdown to match saved classifier
+                classifier_to_dropdown = {
+                    'gmm': 'GMM',
+                    'xgboost': 'XGBoost',
+                    'rf': 'Random Forest',
+                    'mlp': 'MLP',
+                    'all_eupnea': 'All Eupnea',
+                    'none': 'None (Clear)'
+                }
+                dropdown_text = classifier_to_dropdown.get(saved_classifier, 'GMM')
+                self.eup_sniff_combo.blockSignals(True)
+                self.eup_sniff_combo.setCurrentText(dropdown_text)
+                self.eup_sniff_combo.blockSignals(False)
+
                 print(f"[npz-load] Restored app settings: filter_order={self.filter_order}, "
                       f"zscore={self.use_zscore_normalization}, notch={self.notch_filter_lower}-{self.notch_filter_upper}, "
-                      f"apnea_thresh={apnea_thresh}")
+                      f"apnea_thresh={apnea_thresh}, eupnea_sniff_classifier={saved_classifier}")
 
             progress.setValue(80)
             QApplication.processEvents()
@@ -2096,12 +2440,14 @@ class MainWindow(QMainWindow):
         model.item(3).setEnabled(has_model1_mlp)
 
         # Update Model 3 (Eupnea/Sniff) dropdown
-        # Index 0=GMM (always enabled), 1=XGBoost, 2=RF, 3=MLP
+        # Index 0=None, 1=All Eupnea, 2=GMM (always enabled), 3=XGBoost, 4=RF, 5=MLP
         model = self.eup_sniff_combo.model()
-        model.item(0).setEnabled(True)  # GMM always available
-        model.item(1).setEnabled(has_model3_xgboost)
-        model.item(2).setEnabled(has_model3_rf)
-        model.item(3).setEnabled(has_model3_mlp)
+        model.item(0).setEnabled(True)   # "None (Clear)" always available
+        model.item(1).setEnabled(True)   # "All Eupnea" always available
+        model.item(2).setEnabled(True)   # "GMM" always available
+        model.item(3).setEnabled(has_model3_xgboost)  # XGBoost
+        model.item(4).setEnabled(has_model3_rf)       # Random Forest
+        model.item(5).setEnabled(has_model3_mlp)      # MLP
 
         # Update Model 2 (Sigh) dropdown
         # Index 0=Manual (always enabled), 1=XGBoost, 2=RF, 3=MLP
@@ -2370,7 +2716,7 @@ class MainWindow(QMainWindow):
                 self._run_automatic_gmm_clustering()
                 print(f"[Eupnea/Sniff Classifier] GMM clustering complete")
 
-            # Update gmm_class from GMM predictions
+            # Update breath_type_class from GMM predictions
             self._update_eupnea_sniff_from_classifier()
         else:
             # ML model selected - check if loaded
@@ -2387,7 +2733,7 @@ class MainWindow(QMainWindow):
                 self.state.active_eupnea_sniff_classifier = "gmm"
                 return
 
-            # Update gmm_class from ML model predictions
+            # Update breath_type_class from ML model predictions
             self._update_eupnea_sniff_from_classifier()
 
         # Rebuild sniff/eupnea regions for display
@@ -2405,7 +2751,7 @@ class MainWindow(QMainWindow):
             self.redraw_main_plot()
 
     def _update_eupnea_sniff_from_classifier(self):
-        """Copy selected classifier's predictions to gmm_class array."""
+        """Copy selected classifier's predictions to breath_type_class array."""
         st = self.state
 
         for s in st.all_peaks_by_sweep.keys():
@@ -2425,19 +2771,19 @@ class MainWindow(QMainWindow):
 
             if source_key in all_peaks and all_peaks[source_key] is not None:
                 # Copy to user-editable array
-                old_gmm_class = all_peaks['gmm_class'].copy() if 'gmm_class' in all_peaks else None
-                all_peaks['gmm_class'] = all_peaks[source_key].copy()
+                old_breath_type_class = all_peaks['breath_type_class'].copy() if ('breath_type_class' in all_peaks and all_peaks['breath_type_class'] is not None) else None
+                all_peaks['breath_type_class'] = all_peaks[source_key].copy()
                 all_peaks['eupnea_sniff_source'] = np.array([st.active_eupnea_sniff_classifier] * len(all_peaks['indices']))
 
                 # Debug: Show what changed
                 if s == 0:
-                    n_eupnea = np.sum(all_peaks['gmm_class'] == 0)
-                    n_sniff = np.sum(all_peaks['gmm_class'] == 1)
-                    n_unclass = np.sum(all_peaks['gmm_class'] == -1)
-                    print(f"[Eupnea/Sniff Update] Sweep {s}: Copied {source_key} to gmm_class")
+                    n_eupnea = np.sum(all_peaks['breath_type_class'] == 0)
+                    n_sniff = np.sum(all_peaks['breath_type_class'] == 1)
+                    n_unclass = np.sum(all_peaks['breath_type_class'] == -1)
+                    print(f"[Eupnea/Sniff Update] Sweep {s}: Copied {source_key} to breath_type_class")
                     print(f"[Eupnea/Sniff Update] Sweep {s}: Eupnea: {n_eupnea}, Sniffing: {n_sniff}, Unclassified: {n_unclass}")
-                    if old_gmm_class is not None:
-                        n_changed = np.sum(old_gmm_class != all_peaks['gmm_class'])
+                    if old_breath_type_class is not None:
+                        n_changed = np.sum(old_breath_type_class != all_peaks['breath_type_class'])
                         print(f"[Eupnea/Sniff Update] Sweep {s}: Changed {n_changed} classifications")
             else:
                 print(f"[Eupnea/Sniff Update] Sweep {s}: WARNING - No predictions available for {st.active_eupnea_sniff_classifier}!")
@@ -2463,7 +2809,7 @@ class MainWindow(QMainWindow):
             if 'indices' in all_peaks and all_peaks['indices'] is not None:
                 n_breaths = len(all_peaks['indices'])
                 # Set all to the specified class
-                all_peaks['gmm_class'] = np.full(n_breaths, class_value, dtype=int)
+                all_peaks['breath_type_class'] = np.full(n_breaths, class_value, dtype=int)
                 all_peaks['eupnea_sniff_source'] = np.array([st.active_eupnea_sniff_classifier] * n_breaths)
 
                 if s == 0:
@@ -2473,7 +2819,7 @@ class MainWindow(QMainWindow):
         """
         Clear all eupnea/sniff labels - used when user selects 'None (Clear)'.
 
-        This removes the gmm_class array entirely so labels won't be saved.
+        This removes the breath_type_class array entirely so labels won't be saved.
         Also clears the sniff and eupnea regions from the display.
         """
         st = self.state
@@ -2481,9 +2827,9 @@ class MainWindow(QMainWindow):
         for s in st.all_peaks_by_sweep.keys():
             all_peaks = st.all_peaks_by_sweep[s]
 
-            # Remove gmm_class array - labels won't be saved
-            if 'gmm_class' in all_peaks:
-                del all_peaks['gmm_class']
+            # Remove breath_type_class array - labels won't be saved
+            if 'breath_type_class' in all_peaks:
+                del all_peaks['breath_type_class']
             if 'eupnea_sniff_source' in all_peaks:
                 del all_peaks['eupnea_sniff_source']
 
@@ -2492,7 +2838,6 @@ class MainWindow(QMainWindow):
 
         # Clear the region dictionaries for display
         st.sniff_regions_by_sweep.clear()
-        st.eupnea_regions_by_sweep.clear()
 
     def _clear_all_sigh_labels(self):
         """
@@ -2594,7 +2939,7 @@ class MainWindow(QMainWindow):
                     if n_breaths > 0:
                         all_peaks['sigh_class'] = np.zeros(n_breaths, dtype=np.int8)
                         # Mark deleted peaks as unclassified
-                        if 'labels' in all_peaks:
+                        if 'labels' in all_peaks and all_peaks['labels'] is not None:
                             all_peaks['sigh_class'][all_peaks['labels'] == 0] = -1
                         all_peaks['sigh_source'] = np.array(['manual'] * n_breaths)
                     if s == 0:
@@ -2620,7 +2965,7 @@ class MainWindow(QMainWindow):
 
             if st.active_sigh_classifier != 'manual' and source_key in all_peaks and all_peaks[source_key] is not None:
                 # Copy to user-editable array
-                old_sigh_class = all_peaks['sigh_class'].copy() if 'sigh_class' in all_peaks else None
+                old_sigh_class = all_peaks['sigh_class'].copy() if ('sigh_class' in all_peaks and all_peaks['sigh_class'] is not None) else None
                 all_peaks['sigh_class'] = all_peaks[source_key].copy()
                 all_peaks['sigh_source'] = np.array([st.active_sigh_classifier] * len(all_peaks['indices']))
 
@@ -2638,7 +2983,7 @@ class MainWindow(QMainWindow):
                 print(f"[Sigh Update] Sweep {s}: WARNING - No predictions available for {st.active_sigh_classifier}!")
 
             # Update sigh_by_sweep from sigh_class for display (backward compatibility)
-            if 'sigh_class' in all_peaks:
+            if 'sigh_class' in all_peaks and all_peaks['sigh_class'] is not None:
                 sigh_mask = all_peaks['sigh_class'] == 1
                 st.sigh_by_sweep[s] = all_peaks['indices'][sigh_mask]
 
@@ -2969,12 +3314,37 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
 
         # Switch to requested tab if specified
-        if tab:
+        if tab and self._analysis_options_dialog is not None:
             self._analysis_options_dialog.set_active_tab(tab)
 
     def _on_analysis_options_closed(self):
-        """Clear analysis options dialog reference when closed so it can be reopened."""
-        self._analysis_options_dialog = None
+        """Hide dialog when closed but keep it alive for fast re-opening."""
+        # Don't destroy the dialog - keep it alive for instant re-opening
+        # The dialog will be reused in _open_analysis_options()
+        pass
+
+    def _prebuild_analysis_options_dialog(self):
+        """Pre-build the Analysis Options dialog in background for instant opening later."""
+        # Only pre-build if dialog doesn't already exist
+        if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog is not None:
+            return
+
+        # Only pre-build if we have the required data
+        if not hasattr(self, 'all_peak_heights') or self.all_peak_heights is None:
+            return
+
+        try:
+            from dialogs.analysis_options_dialog import AnalysisOptionsDialog
+            print("[Pre-build] Creating Analysis Options dialog in background...")
+
+            # Create dialog but don't show it
+            self._analysis_options_dialog = AnalysisOptionsDialog(self.state, parent=self)
+            self._analysis_options_dialog.finished.connect(self._on_analysis_options_closed)
+
+            print("[Pre-build] Dialog ready - will open instantly when requested")
+        except Exception as e:
+            print(f"[Pre-build] Error creating dialog: {e}")
+            self._analysis_options_dialog = None
 
     def _open_prominence_histogram(self):
         """
@@ -3214,6 +3584,10 @@ class MainWindow(QMainWindow):
             # Status message already printed above with valley/Otsu choice
             self._log_status_message(f"Auto-detected threshold: {chosen_threshold:.4f}", 3000)
 
+            # Pre-build the Analysis Options dialog in background (deferred)
+            # This makes opening the dialog instant since it's already created
+            QTimer.singleShot(500, self._prebuild_analysis_options_dialog)
+
             # Refresh Peak Detection tab if it's the one that needs updating after channel change
             if (hasattr(self, '_channel_change_needs_dialog_refresh') and
                 self._channel_change_needs_dialog_refresh and
@@ -3396,10 +3770,127 @@ class MainWindow(QMainWindow):
         # Schedule background computation with 100ms delay (let UI settle first)
         QTimer.singleShot(100, compute_remaining)
 
+    def _detect_single_sweep_core(self, sweep_idx: int, y_proc: np.ndarray,
+                                   thresh: float, min_dist_samples: int,
+                                   direction: str = "up") -> dict:
+        """
+        Core peak detection logic for a single sweep (parallelizable).
+
+        This method extracts the computationally expensive parts of peak detection
+        that can be safely run in parallel. It does NOT modify shared state.
+
+        Args:
+            sweep_idx: Sweep index being processed
+            y_proc: Pre-processed signal array
+            thresh: Height threshold for labeling
+            min_dist_samples: Minimum distance between peaks in samples
+            direction: Peak direction ("up" or "down")
+
+        Returns:
+            Dict with detection results (to be merged into state later)
+        """
+        st = self.state
+
+        # Step 1: Detect ALL peaks (no threshold filtering)
+        all_peak_indices = peakdet.detect_peaks(
+            y=y_proc, sr_hz=st.sr_hz,
+            thresh=None,
+            prominence=None,
+            min_dist_samples=min_dist_samples,
+            direction=direction,
+            return_all=True
+        )
+
+        # Step 2: Compute breath features for ALL peaks
+        all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+
+        # Step 3: Label peaks using threshold
+        all_peaks_data = peakdet.label_peaks_by_threshold(
+            y=y_proc,
+            peak_indices=all_peak_indices,
+            thresh=thresh,
+            direction=direction
+        )
+        all_peaks_data['labels_threshold_ro'] = all_peaks_data['labels'].copy()
+
+        # Initialize ML prediction arrays as None (will be filled later if models loaded)
+        all_peaks_data['labels_xgboost_ro'] = None
+        all_peaks_data['labels_rf_ro'] = None
+        all_peaks_data['labels_mlp_ro'] = None
+
+        # Step 4: Compute p_noise if threshold model available
+        try:
+            import core.metrics as metrics_mod
+            on = all_breaths.get('onsets', np.array([]))
+            off = all_breaths.get('offsets', np.array([]))
+            exm = all_breaths.get('expmins', np.array([]))
+            exo = all_breaths.get('expoffs', np.array([]))
+            p_noise_all = metrics_mod.compute_p_noise(st.t, y_proc, st.sr_hz, all_peak_indices, on, off, exm, exo)
+            p_breath_all = 1.0 - p_noise_all if p_noise_all is not None else None
+        except Exception:
+            p_noise_all = None
+            p_breath_all = None
+
+        # Step 5: Compute peak candidate metrics
+        peak_metrics = peakdet.compute_peak_candidate_metrics(
+            y=y_proc,
+            all_peak_indices=all_peak_indices,
+            breath_events=all_breaths,
+            sr_hz=st.sr_hz,
+            p_noise=p_noise_all,
+            p_breath=p_breath_all
+        )
+
+        # Step 6: Extract labeled peaks for display
+        labeled_mask = all_peaks_data['labels'] == 1
+        labeled_indices = all_peak_indices[labeled_mask]
+
+        # Step 7: Compute breath events for labeled peaks
+        labeled_breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+
+        # Step 8: Recalculate current metrics using labeled peaks as neighbors
+        try:
+            import core.metrics as metrics_mod
+            p_noise_labeled = metrics_mod.compute_p_noise(
+                st.t, y_proc, st.sr_hz, labeled_indices,
+                labeled_breaths.get('onsets', np.array([])),
+                labeled_breaths.get('offsets', np.array([])),
+                labeled_breaths.get('expmins', np.array([])),
+                labeled_breaths.get('expoffs', np.array([]))
+            )
+            p_breath_labeled = 1.0 - p_noise_labeled if p_noise_labeled is not None else None
+
+            current_metrics = peakdet.compute_peak_candidate_metrics(
+                y=y_proc,
+                all_peak_indices=labeled_indices,
+                breath_events=labeled_breaths,
+                sr_hz=st.sr_hz,
+                p_noise=p_noise_labeled,
+                p_breath=p_breath_labeled
+            )
+        except Exception:
+            current_metrics = peak_metrics
+
+        return {
+            'sweep_idx': sweep_idx,
+            'all_peak_indices': all_peak_indices,
+            'all_breaths': all_breaths,
+            'all_peaks_data': all_peaks_data,
+            'peak_metrics': peak_metrics,
+            'current_metrics': current_metrics,
+            'labeled_indices': labeled_indices,
+            'labeled_breaths': labeled_breaths,
+            'p_noise_all': p_noise_all,
+            'p_breath_all': p_breath_all
+        }
+
     def _apply_peak_detection(self):
         """
         Run peak detection on the ANALYZE channel for ALL sweeps,
         store indices per sweep, and redraw current sweep with peaks + breath markers.
+
+        Supports parallel processing for large files (10+ sweeps) with automatic fallback
+        to sequential processing if parallel execution fails.
         """
         import time
         t_start = time.time()
@@ -3436,84 +3927,158 @@ class MainWindow(QMainWindow):
         st.peak_metrics_by_sweep.clear()  # ML training data: comprehensive peak metrics
         # st.sigh_by_sweep.clear()
 
+        # === PARALLEL CORE DETECTION ===
+        # For files with many sweeps, parallelize the core detection
+        # ML predictions and state updates happen sequentially afterwards
+        use_parallel = getattr(self, 'use_parallel_detection', True) and n_sweeps >= 10
+        core_results = {}
 
-        for s in range(n_sweeps):
-            y_proc = self._get_processed_for(st.analyze_chan, s)
-
-            # Step 1: Detect ALL peaks (no threshold filtering)
-            # Note: User found that thresh=0 + min_distance works best (no prominence)
-            all_peak_indices = peakdet.detect_peaks(
-                y=y_proc, sr_hz=st.sr_hz,
-                thresh=None,  # Don't filter by threshold yet
-                prominence=None,  # Don't use prominence for initial detection
-                min_dist_samples=min_dist_samples,
-                direction=direction,
-                return_all=True  # Return ALL detected peaks
-            )
-
-            # Step 2: Compute breath features for ALL peaks (including noise)
-            # This is needed for ML training - noise peaks need features too
-            all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-            st.all_breaths_by_sweep[s] = all_breaths  # Store for ML metric computation
-
-            # Step 3: Label peaks using auto-detected threshold
-            all_peaks_data = peakdet.label_peaks_by_threshold(
-                y=y_proc,
-                peak_indices=all_peak_indices,
-                thresh=thresh,
-                direction=direction
-            )
-            # Store threshold predictions as read-only (for classifier switching)
-            all_peaks_data['labels_threshold_ro'] = all_peaks_data['labels'].copy()
-
-            # Step 3.1: Initialize ML prediction arrays as None (will be filled after metrics)
-            if st.loaded_ml_models:
-                # We need peak_metrics first, so we'll come back to this after metrics computation
-                # For now, initialize ML label arrays as None
-                all_peaks_data['labels_xgboost_ro'] = None
-                all_peaks_data['labels_rf_ro'] = None
-                all_peaks_data['labels_mlp_ro'] = None
-
-            # NOTE: 'labels' remains as the user-editable array (backward compatible)
-            # It will be initialized from the active classifier after ML predictions run
-
-            st.all_peaks_by_sweep[s] = all_peaks_data
-
-            # Step 3.5: Compute comprehensive metrics for ML (merge detection, noise classification)
-            # Get P(noise) and P(breath) if available from metrics module
+        if use_parallel:
             try:
-                import core.metrics as metrics_mod
-                # Extract breath events for p_noise computation
-                on = all_breaths.get('onsets', np.array([]))
-                off = all_breaths.get('offsets', np.array([]))
-                exm = all_breaths.get('expmins', np.array([]))
-                exo = all_breaths.get('expoffs', np.array([]))
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                import os
 
-                # Check if threshold model is available
-                if s == 0:
-                    print(f"[peak-detection] Threshold model params: {metrics_mod._threshold_model_params}")
+                max_workers = min(os.cpu_count() or 4, 8)
+                print(f"[peak-detection] Using parallel detection with {max_workers} workers for {n_sweeps} sweeps...")
 
-                p_noise_all = metrics_mod.compute_p_noise(st.t, y_proc, st.sr_hz, all_peak_indices, on, off, exm, exo)
-                p_breath_all = 1.0 - p_noise_all if p_noise_all is not None else None
-                if s == 0:
-                    print(f"[peak-detection] Computed p_noise for {len(all_peak_indices)} peaks, sample values: {p_noise_all[:5] if p_noise_all is not None and len(p_noise_all) > 0 else 'None'}")
+                # Pre-compute all processed signals (uses cache, must be done in main thread)
+                processed_signals = {}
+                for s in range(n_sweeps):
+                    processed_signals[s] = self._get_processed_for(st.analyze_chan, s)
+
+                # Worker function for parallel execution
+                def detect_sweep(sweep_idx):
+                    y_proc = processed_signals[sweep_idx]
+                    return self._detect_single_sweep_core(
+                        sweep_idx, y_proc, thresh, min_dist_samples, direction
+                    )
+
+                # Execute in parallel
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(detect_sweep, s): s for s in range(n_sweeps)}
+                    completed = 0
+                    for future in as_completed(futures):
+                        sweep_idx = futures[future]
+                        result = future.result()
+                        core_results[sweep_idx] = result
+                        completed += 1
+                        if completed % 10 == 0 or completed == n_sweeps:
+                            print(f"[peak-detection] Completed {completed}/{n_sweeps} sweeps...")
+
+                print(f"[peak-detection] Parallel core detection complete!")
+
             except Exception as e:
-                print(f"[peak-detection] Warning: Could not compute P(noise): {e}")
+                print(f"[peak-detection] Parallel detection failed: {e}")
+                print(f"[peak-detection] Falling back to sequential detection...")
                 import traceback
                 traceback.print_exc()
-                p_noise_all = None
-                p_breath_all = None
+                core_results = {}  # Clear partial results, fall through to sequential
 
-            peak_metrics = peakdet.compute_peak_candidate_metrics(
-                y=y_proc,
-                all_peak_indices=all_peak_indices,
-                breath_events=all_breaths,
-                sr_hz=st.sr_hz,
-                p_noise=p_noise_all,
-                p_breath=p_breath_all
-            )
-            st.peak_metrics_by_sweep[s] = peak_metrics  # Original metrics (never modified, for ML)
-            st.current_peak_metrics_by_sweep[s] = peak_metrics  # Current metrics (updated after edits, for Y2 plotting)
+        # === SEQUENTIAL PROCESSING (fallback or for small files) ===
+        for s in range(n_sweeps):
+            # Use parallel results if available, otherwise compute sequentially
+            if s in core_results:
+                result = core_results[s]
+                all_peak_indices = result['all_peak_indices']
+                all_breaths = result['all_breaths']
+                all_peaks_data = result['all_peaks_data']
+                peak_metrics = result['peak_metrics']
+                labeled_indices = result['labeled_indices']
+                labeled_breaths = result['labeled_breaths']
+                y_proc = self._get_processed_for(st.analyze_chan, s)
+
+                # Store results in state
+                st.all_breaths_by_sweep[s] = all_breaths
+                st.all_peaks_by_sweep[s] = all_peaks_data
+                st.peak_metrics_by_sweep[s] = peak_metrics
+                st.current_peak_metrics_by_sweep[s] = result['current_metrics']
+
+            else:
+                # Sequential detection for this sweep (fallback or parallel not used)
+                y_proc = self._get_processed_for(st.analyze_chan, s)
+
+                # Step 1: Detect ALL peaks (no threshold filtering)
+                # Note: User found that thresh=0 + min_distance works best (no prominence)
+                all_peak_indices = peakdet.detect_peaks(
+                    y=y_proc, sr_hz=st.sr_hz,
+                    thresh=None,  # Don't filter by threshold yet
+                    prominence=None,  # Don't use prominence for initial detection
+                    min_dist_samples=min_dist_samples,
+                    direction=direction,
+                    return_all=True  # Return ALL detected peaks
+                )
+
+                # Step 2: Compute breath features for ALL peaks (including noise)
+                # This is needed for ML training - noise peaks need features too
+                all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
+                st.all_breaths_by_sweep[s] = all_breaths  # Store for ML metric computation
+
+                # Step 3: Label peaks using auto-detected threshold
+                all_peaks_data = peakdet.label_peaks_by_threshold(
+                    y=y_proc,
+                    peak_indices=all_peak_indices,
+                    thresh=thresh,
+                    direction=direction
+                )
+                # Store threshold predictions as read-only (for classifier switching)
+                all_peaks_data['labels_threshold_ro'] = all_peaks_data['labels'].copy()
+
+                # Step 3.1: Initialize ML prediction arrays as None (will be filled after metrics)
+                if st.loaded_ml_models:
+                    # We need peak_metrics first, so we'll come back to this after metrics computation
+                    # For now, initialize ML label arrays as None
+                    all_peaks_data['labels_xgboost_ro'] = None
+                    all_peaks_data['labels_rf_ro'] = None
+                    all_peaks_data['labels_mlp_ro'] = None
+
+                # NOTE: 'labels' remains as the user-editable array (backward compatible)
+                # It will be initialized from the active classifier after ML predictions run
+
+                st.all_peaks_by_sweep[s] = all_peaks_data
+
+                # Step 3.5: Compute comprehensive metrics for ML (merge detection, noise classification)
+                # Get P(noise) and P(breath) if available from metrics module
+                try:
+                    import core.metrics as metrics_mod
+                    # Extract breath events for p_noise computation
+                    on = all_breaths.get('onsets', np.array([]))
+                    off = all_breaths.get('offsets', np.array([]))
+                    exm = all_breaths.get('expmins', np.array([]))
+                    exo = all_breaths.get('expoffs', np.array([]))
+
+                    # Check if threshold model is available
+                    if s == 0:
+                        print(f"[peak-detection] Threshold model params: {metrics_mod._threshold_model_params}")
+
+                    p_noise_all = metrics_mod.compute_p_noise(st.t, y_proc, st.sr_hz, all_peak_indices, on, off, exm, exo)
+                    p_breath_all = 1.0 - p_noise_all if p_noise_all is not None else None
+                    if s == 0:
+                        print(f"[peak-detection] Computed p_noise for {len(all_peak_indices)} peaks, sample values: {p_noise_all[:5] if p_noise_all is not None and len(p_noise_all) > 0 else 'None'}")
+                except Exception as e:
+                    print(f"[peak-detection] Warning: Could not compute P(noise): {e}")
+                    import traceback
+                    traceback.print_exc()
+                    p_noise_all = None
+                    p_breath_all = None
+
+                peak_metrics = peakdet.compute_peak_candidate_metrics(
+                    y=y_proc,
+                    all_peak_indices=all_peak_indices,
+                    breath_events=all_breaths,
+                    sr_hz=st.sr_hz,
+                    p_noise=p_noise_all,
+                    p_breath=p_breath_all
+                )
+                st.peak_metrics_by_sweep[s] = peak_metrics  # Original metrics (never modified, for ML)
+                st.current_peak_metrics_by_sweep[s] = peak_metrics  # Current metrics (updated after edits, for Y2 plotting)
+
+            # === From here on, use results from either parallel or sequential detection ===
+            # Get the data for this sweep (either from parallel results or just computed)
+            all_peaks_data = st.all_peaks_by_sweep[s]
+            all_breaths = st.all_breaths_by_sweep[s]
+            peak_metrics = st.peak_metrics_by_sweep[s]
+            all_peak_indices = all_peaks_data['indices']
+            y_proc = self._get_processed_for(st.analyze_chan, s)
 
             # Step 3.7: Run ML predictions if models are loaded (now that we have peak_metrics)
             if st.loaded_ml_models and peak_metrics:
@@ -3548,10 +4113,12 @@ class MainWindow(QMainWindow):
                 # Run predictions for selected algorithms only
                 for algorithm in algorithms_to_run:
                     try:
+                        # Enable debug output on first sweep to diagnose issues
                         predictions = ml_prediction.predict_with_cascade(
                             peak_metrics=peak_metrics,
                             models=st.loaded_ml_models,
-                            algorithm=algorithm
+                            algorithm=algorithm,
+                            debug=(s == 0)  # Debug on first sweep only
                         )
                         # Store predictions as read-only (for classifier switching)
                         all_peaks_data[f'labels_{algorithm}_ro'] = predictions['final_labels']
@@ -3612,35 +4179,50 @@ class MainWindow(QMainWindow):
             # Step 4: Initialize user-editable 'labels' array from active classifier
             # This is the array that gets displayed AND edited (backward compatible!)
             active_labels_key_ro = f'labels_{st.active_classifier}_ro'
+
+            # Debug: Show what's available
+            if s == 0:
+                available_labels = [k for k in all_peaks_data.keys() if k.startswith('labels_') and k.endswith('_ro')]
+                print(f"[peak-detection] Available label arrays: {available_labels}")
+                for lbl_key in available_labels:
+                    lbl_val = all_peaks_data.get(lbl_key)
+                    if lbl_val is not None:
+                        n_breaths = np.sum(lbl_val == 1)
+                        print(f"[peak-detection]   {lbl_key}: {n_breaths} breaths out of {len(lbl_val)} peaks")
+                    else:
+                        print(f"[peak-detection]   {lbl_key}: None")
+
             if active_labels_key_ro in all_peaks_data and all_peaks_data[active_labels_key_ro] is not None:
                 # Copy from selected classifier's read-only predictions
                 all_peaks_data['labels'] = all_peaks_data[active_labels_key_ro].copy()
                 if s == 0:
-                    print(f"[peak-detection] Initialized 'labels' from {active_labels_key_ro}")
+                    n_breaths = np.sum(all_peaks_data['labels'] == 1)
+                    print(f"[peak-detection] Initialized 'labels' from {active_labels_key_ro} ({n_breaths} breaths)")
             else:
                 # Fallback to threshold if active classifier not available
                 # (labels already contains threshold predictions from step 3)
                 if s == 0:
-                    print(f"[peak-detection] Using threshold labels (active classifier {st.active_classifier} not available)")
+                    n_breaths = np.sum(all_peaks_data['labels'] == 1)
+                    print(f"[peak-detection] FALLBACK: Using threshold labels ({n_breaths} breaths) - {active_labels_key_ro} was None or missing")
 
-            # Step 4b: Initialize user-editable 'gmm_class' array from active eupnea/sniff classifier
+            # Step 4b: Initialize user-editable 'breath_type_class' array from active eupnea/sniff classifier
             if st.active_eupnea_sniff_classifier == 'gmm':
                 # GMM will be computed on-demand later, initialize as None for now
-                all_peaks_data['gmm_class'] = None
+                all_peaks_data['breath_type_class'] = None
                 if s == 0:
-                    print(f"[peak-detection] Initialized 'gmm_class' as None (GMM will run on-demand)")
+                    print(f"[peak-detection] Initialized 'breath_type_class' as None (GMM will run on-demand)")
             else:
                 # Copy from selected ML classifier's read-only predictions
                 active_eup_sniff_key_ro = f'eupnea_sniff_{st.active_eupnea_sniff_classifier}_ro'
                 if active_eup_sniff_key_ro in all_peaks_data and all_peaks_data[active_eup_sniff_key_ro] is not None:
-                    all_peaks_data['gmm_class'] = all_peaks_data[active_eup_sniff_key_ro].copy()
+                    all_peaks_data['breath_type_class'] = all_peaks_data[active_eup_sniff_key_ro].copy()
                     if s == 0:
-                        print(f"[peak-detection] Initialized 'gmm_class' from {active_eup_sniff_key_ro}")
+                        print(f"[peak-detection] Initialized 'breath_type_class' from {active_eup_sniff_key_ro}")
                 else:
                     # Fallback to None
-                    all_peaks_data['gmm_class'] = None
+                    all_peaks_data['breath_type_class'] = None
                     if s == 0:
-                        print(f"[peak-detection] 'gmm_class' initialized as None (classifier {st.active_eupnea_sniff_classifier} not available)")
+                        print(f"[peak-detection] 'breath_type_class' initialized as None (classifier {st.active_eupnea_sniff_classifier} not available)")
 
             # Step 4c: Initialize user-editable 'sigh_class' array from active sigh classifier
             # First, create sigh_manual_ro from existing sigh_by_sweep (preserves manual annotations)
@@ -3755,7 +4337,7 @@ class MainWindow(QMainWindow):
             # GMM already ran above, regions already built
             print("[peak-detection] Using GMM classifier for display")
         else:
-            # Use ML classifier predictions (already initialized in gmm_class array)
+            # Use ML classifier predictions (already initialized in breath_type_class array)
             print(f"[peak-detection] Building eupnea/sniff regions from {st.active_eupnea_sniff_classifier} predictions...")
             import core.gmm_clustering as gmm_clustering
             try:
@@ -3776,6 +4358,20 @@ class MainWindow(QMainWindow):
                 total_sighs += n_sighs
                 if s == 0:
                     print(f"[peak-detection] Sweep {s}: {n_sighs} sighs synced to display")
+
+        # Verify and sync: Ensure peaks_by_sweep matches active classifier
+        # This fixes an issue where XGBoost results weren't showing on first detection
+        active_key = f'labels_{st.active_classifier}_ro'
+        first_sweep = next(iter(st.all_peaks_by_sweep.keys()), None)
+        if first_sweep is not None:
+            first_all_peaks = st.all_peaks_by_sweep[first_sweep]
+            if active_key in first_all_peaks and first_all_peaks[active_key] is not None:
+                # Active classifier predictions are available - make sure they're being used
+                current_labels = first_all_peaks.get('labels')
+                active_labels = first_all_peaks[active_key]
+                if current_labels is not None and not np.array_equal(current_labels, active_labels):
+                    print(f"[peak-detection] SYNC FIX: 'labels' doesn't match {active_key}, updating display...")
+                    self._update_displayed_peaks_from_classifier()
 
         # SINGLE REDRAW: Show peaks, eupnea/sniff regions, and sigh markers all at once
         print(f"[peak-detection] Redrawing plot (peaks + eupnea/sniff + {total_sighs} sighs)...")
@@ -3834,7 +4430,7 @@ class MainWindow(QMainWindow):
         self.ApplyPeakFindPushButton.setEnabled(False)
 
         # Refresh Analysis Options dialog GMM tab if open (peaks are now detected)
-        if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog.isVisible():
+        if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog is not None and self._analysis_options_dialog.isVisible():
             self._analysis_options_dialog._refresh_breath_classification_tab()
 
     def _compute_and_store_normalization_stats(self):
@@ -4024,6 +4620,98 @@ class MainWindow(QMainWindow):
 
             # Eupnea if sniffing probability < 0.5 (i.e., more likely eupnea)
             if sniff_prob < 0.5:
+                # Get time range for this breath
+                start_idx = int(onsets[breath_idx])
+
+                # Get offset time
+                if breath_idx < len(offsets):
+                    end_idx = int(offsets[breath_idx])
+                else:
+                    # Fallback: use next onset or end of trace
+                    if breath_idx + 1 < len(onsets):
+                        end_idx = int(onsets[breath_idx + 1])
+                    else:
+                        end_idx = signal_length
+
+                # Check if this is consecutive with the last eupnic breath
+                if last_eupnic_idx is None or breath_idx != last_eupnic_idx + 1:
+                    # Not consecutive - save current group and start new one
+                    if current_group_start is not None:
+                        eupnic_groups.append((current_group_start, current_group_end))
+                    current_group_start = start_idx
+                    current_group_end = end_idx
+                else:
+                    # Consecutive breath - extend the current group
+                    current_group_end = end_idx
+
+                last_eupnic_idx = breath_idx
+            else:
+                # Non-eupnic breath - close current group if exists
+                if current_group_start is not None:
+                    eupnic_groups.append((current_group_start, current_group_end))
+                    current_group_start = None
+                    current_group_end = None
+                    last_eupnic_idx = None
+
+        # Save final group if exists
+        if current_group_start is not None:
+            eupnic_groups.append((current_group_start, current_group_end))
+
+        # Mark all continuous eupnic regions
+        for start_idx, end_idx in eupnic_groups:
+            eupnea_mask[start_idx:end_idx] = True
+
+        return eupnea_mask.astype(float)
+
+    def _compute_eupnea_from_active_classifier(self, sweep_idx: int, signal_length: int) -> np.ndarray:
+        """
+        Compute eupnea mask using the active eupnea/sniff classifier.
+
+        This is a generalized method that works with any classifier (GMM, XGBoost, RF, MLP)
+        by reading from the breath_type_class array in all_peaks_by_sweep, which always contains
+        the currently active classifier's predictions.
+
+        Args:
+            sweep_idx: Index of the current sweep
+            signal_length: Length of the signal array
+
+        Returns:
+            Boolean array (as float 0/1) marking eupneic regions
+        """
+        import numpy as np
+
+        eupnea_mask = np.zeros(signal_length, dtype=bool)
+
+        # Get breath data and peak data for this sweep
+        all_peaks = self.state.all_peaks_by_sweep.get(sweep_idx)
+        breath_data = self.state.breath_by_sweep.get(sweep_idx)
+
+        if all_peaks is None or breath_data is None:
+            return eupnea_mask.astype(float)
+
+        # Get breath_type_class array (contains active classifier's predictions: 0=eupnea, 1=sniffing, -1=unclassified)
+        breath_type_class = all_peaks.get('breath_type_class')
+        if breath_type_class is None:
+            # Fall back to old GMM probability method if breath_type_class not available
+            return self._compute_eupnea_from_gmm(sweep_idx, signal_length)
+
+        onsets = breath_data.get('onsets', np.array([]))
+        offsets = breath_data.get('offsets', np.array([]))
+
+        if len(onsets) == 0 or len(breath_type_class) != len(onsets):
+            return eupnea_mask.astype(float)
+
+        # Group consecutive eupnic breaths into continuous regions
+        eupnic_groups = []
+        current_group_start = None
+        current_group_end = None
+        last_eupnic_idx = None
+
+        for breath_idx in range(len(onsets)):
+            # Eupnea = breath_type_class == 0
+            is_eupnic = (breath_type_class[breath_idx] == 0)
+
+            if is_eupnic:
                 # Get time range for this breath
                 start_idx = int(onsets[breath_idx])
 
@@ -4361,7 +5049,7 @@ class MainWindow(QMainWindow):
 
         # Store classifications in all_peaks_by_sweep
         # - Always store to gmm_class_ro (for switching classifiers later)
-        # - Only update gmm_class (editable) if GMM is the active classifier
+        # - Only update breath_type_class (editable) if GMM is the active classifier
         n_classified = gmm_clustering.store_gmm_classifications_in_peaks(
             self.state, breath_cycles, cluster_labels, sniffing_cluster_id,
             cluster_probabilities, confidence_threshold=0.5,
@@ -4369,7 +5057,7 @@ class MainWindow(QMainWindow):
         )
 
         # Only build regions if GMM is the active classifier
-        # (otherwise, the active classifier's predictions are already in gmm_class)
+        # (otherwise, the active classifier's predictions are already in breath_type_class)
         if is_gmm_active:
             # Build BOTH eupnea AND sniffing regions from stored classifications
             results = gmm_clustering.build_eupnea_sniffing_regions(
@@ -4665,8 +5353,8 @@ class MainWindow(QMainWindow):
         if not br:
             return
 
-        # Compute ONLY eupnea mask from GMM (fast, no metrics recomputation)
-        eupnea_mask = self._compute_eupnea_from_gmm(s, len(y))
+        # Compute ONLY eupnea mask from active classifier (fast, no metrics recomputation)
+        eupnea_mask = self._compute_eupnea_from_active_classifier(s, len(y))
 
         # Get existing apnea threshold
         apnea_thresh = self._parse_float(self.ApneaThresh) or 0.5
@@ -4839,6 +5527,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_omit_button_label(self):
         """Update Omit button text based on whether current sweep is omitted."""
+        # If in omit mode, always show "Omit (ON)" regardless of sweep state
+        if getattr(self.editing_modes, "_omit_region_mode", False):
+            self.OmitSweepButton.setText("Omit (ON)")
+            self.OmitSweepButton.setToolTip("Click to exit omit region mode")
+            return
+
         s = max(0, min(self.state.sweep_idx, self.navigation_manager._sweep_count() - 1))
         if s in self.state.omitted_sweeps:
             self.OmitSweepButton.setText("Un-omit")
@@ -5181,6 +5875,253 @@ class MainWindow(QMainWindow):
         return False
 
 
+    # ========================================
+    # Consolidation Tab (Project Builder) Methods
+    # ========================================
+
+    def _populate_consolidation_source_list(self):
+        """
+        Populate the consolidation source list by scanning for analyzed CSV files.
+        Uses the same logic as the Curation tab - looks for _breaths.csv, _timeseries.csv, _events.csv
+        """
+        self.consolidationSourceList.clear()
+
+        # Determine which folder to scan
+        if self._consolidation_custom_folder:
+            scan_folder = self._consolidation_custom_folder
+            self.consolidationSourceLabel.setText("Custom Folder")
+            folder_str = str(scan_folder)
+            if len(folder_str) > 30:
+                folder_str = "..." + folder_str[-27:]
+            self.consolidationFolderLabel.setText(folder_str)
+            self.consolidationFolderLabel.setToolTip(str(scan_folder))
+        elif self._project_directory:
+            scan_folder = Path(self._project_directory)
+            self.consolidationSourceLabel.setText("Project Files")
+            self.consolidationFolderLabel.setText("")
+        else:
+            # No folder to scan
+            self.consolidationSourceLabel.setText("No Folder")
+            self.consolidationFolderLabel.setText("Use Browse or load a project")
+            return
+
+        # Scan for CSV groups (same as Curation tab)
+        groups = self._scan_csv_groups(scan_folder)
+
+        if not groups:
+            self._log_status_message("No analyzed files found (looking for *_breaths.csv, *_timeseries.csv, *_events.csv)", 4000)
+            return
+
+        # Populate the list
+        for g in groups:
+            root = g["root"]
+            has_b = bool(g["breaths"])
+            has_m = bool(g["means"])
+            has_e = bool(g["events"])
+
+            # Build suffix showing what files are present
+            parts = []
+            if has_b:
+                parts.append("breaths")
+            if has_m:
+                parts.append("timeseries")
+            if has_e:
+                parts.append("events")
+
+            if not parts:
+                continue
+
+            suffix = f"[{' + '.join(parts)}]"
+            display_name = f"{root}  {suffix}"
+
+            # Build tooltip
+            tt_lines = [f"Root: {root}", f"Dir:  {g['dir']}"]
+            if g["breaths"]:
+                tt_lines.append(f"breaths:    {g['breaths']}")
+            if g["means"]:
+                tt_lines.append(f"timeseries: {g['means']}")
+            if g["events"]:
+                tt_lines.append(f"events:     {g['events']}")
+
+            item = QListWidgetItem(display_name)
+            item.setToolTip("\n".join(tt_lines))
+
+            # Store the same metadata format as Curation tab for compatibility
+            item.setData(Qt.ItemDataRole.UserRole, g)  # {'key', 'root', 'dir', 'breaths', 'means', 'events'}
+
+            self.consolidationSourceList.addItem(item)
+
+        self._log_status_message(f"Found {len(groups)} analyzed file(s) ready for consolidation", 3000)
+
+    def _on_consolidation_browse_clicked(self):
+        """Handle browse button click - select a custom folder for consolidation."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder with Analyzed Files",
+            str(self._project_directory) if self._project_directory else ""
+        )
+
+        if folder:
+            self._consolidation_custom_folder = Path(folder)
+            self.consolidationResetButton.show()  # Show reset button when using custom folder
+            self._populate_consolidation_source_list()
+
+    def _on_consolidation_reset_clicked(self):
+        """Handle reset button click - return to project files."""
+        self._consolidation_custom_folder = None
+        self.consolidationResetButton.hide()  # Hide reset button when back to project files
+        self._populate_consolidation_source_list()
+
+    def _on_left_column_tab_changed(self, index: int):
+        """Handle tab changes in the left column (Project Builder sub-tabs).
+        Refreshes the Consolidation source list when switching to that tab.
+        """
+        # Get the widget at this index to check if it's the consolidation tab
+        widget = self.leftColumnTabs.widget(index)
+        if widget and widget.objectName() == 'consolidationContainer':
+            # Only refresh from project files if not using a custom folder
+            if not self._consolidation_custom_folder:
+                self._populate_consolidation_source_list()
+
+    def _filter_consolidation_source_list(self, text: str):
+        """Filter the consolidation source list based on search text.
+        Searches the root name, directory path, and display text.
+        """
+        search_terms = text.lower().strip().split()
+
+        for i in range(self.consolidationSourceList.count()):
+            item = self.consolidationSourceList.item(i)
+            if not item:
+                continue
+
+            # Get metadata for comprehensive search
+            metadata = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(metadata, dict):
+                # Build searchable text from CSV group metadata
+                searchable = " ".join([
+                    str(metadata.get('root', '')),
+                    str(metadata.get('dir', '')),
+                    item.text(),
+                ]).lower()
+            else:
+                # Fallback to display text
+                searchable = item.text().lower()
+
+            # All search terms must match (AND logic)
+            matches = all(term in searchable for term in search_terms) if search_terms else True
+            item.setHidden(not matches)
+
+    def _consolidation_move_all_right(self):
+        """Move all visible items from source to consolidation list."""
+        moved = 0
+        skipped = 0
+        for i in range(self.consolidationSourceList.count()):
+            item = self.consolidationSourceList.item(i)
+            if item and not item.isHidden():
+                # Check if already in destination
+                if not self._item_in_list(self.consolidationFilesList, item.data(Qt.ItemDataRole.UserRole)):
+                    new_item = QListWidgetItem(item.text())
+                    new_item.setData(Qt.ItemDataRole.UserRole, item.data(Qt.ItemDataRole.UserRole))
+                    self.consolidationFilesList.addItem(new_item)
+                    moved += 1
+                else:
+                    skipped += 1
+        if moved or skipped:
+            self.statusbar.showMessage(f"Added {moved} file(s) to consolidation. Skipped {skipped} duplicate(s).", 3000)
+
+    def _consolidation_move_selected_right(self):
+        """Move selected items from source to consolidation list."""
+        moved = 0
+        skipped = 0
+        for item in self.consolidationSourceList.selectedItems():
+            if not self._item_in_list(self.consolidationFilesList, item.data(Qt.ItemDataRole.UserRole)):
+                new_item = QListWidgetItem(item.text())
+                new_item.setData(Qt.ItemDataRole.UserRole, item.data(Qt.ItemDataRole.UserRole))
+                self.consolidationFilesList.addItem(new_item)
+                moved += 1
+            else:
+                skipped += 1
+        if moved or skipped:
+            self.statusbar.showMessage(f"Added {moved} file(s) to consolidation. Skipped {skipped} duplicate(s).", 3000)
+
+    def _consolidation_move_selected_left(self):
+        """Remove selected items from consolidation list."""
+        items = self.consolidationFilesList.selectedItems()
+        for item in items:
+            row = self.consolidationFilesList.row(item)
+            self.consolidationFilesList.takeItem(row)
+        if items:
+            self.statusbar.showMessage(f"Removed {len(items)} file(s) from consolidation.", 3000)
+
+    def _consolidation_move_all_left(self):
+        """Remove all items from consolidation list."""
+        count = self.consolidationFilesList.count()
+        self.consolidationFilesList.clear()
+        if count:
+            self.statusbar.showMessage(f"Removed all {count} file(s) from consolidation.", 3000)
+
+    def _item_in_list(self, list_widget, user_data) -> bool:
+        """Check if an item with given user data exists in the list.
+        Uses the 'key' field from CSV group metadata for comparison.
+        """
+        # Get the key for comparison (unique identifier for CSV group)
+        if isinstance(user_data, dict):
+            check_key = user_data.get('key', '')
+        else:
+            check_key = str(user_data) if user_data else ''
+
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            if not item:
+                continue
+            item_data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(item_data, dict):
+                item_key = item_data.get('key', '')
+            else:
+                item_key = str(item_data) if item_data else ''
+
+            if item_key and item_key == check_key:
+                return True
+        return False
+
+    def _on_consolidation_save_clicked(self):
+        """Handle consolidation save from Project Builder tab.
+        Uses the same data format as the Curation tab for compatibility.
+        """
+        from PyQt6.QtCore import Qt
+
+        # Get all items from the consolidation list
+        items = []
+        for i in range(self.consolidationFilesList.count()):
+            item = self.consolidationFilesList.item(i)
+            if item:
+                items.append(item)
+
+        if not items:
+            QMessageBox.warning(self, "No Files", "No files selected for consolidation.")
+            return
+
+        # Extract file paths in the same format as Curation tab
+        means_files = []
+        breaths_files = []
+        events_files = []
+
+        for item in items:
+            meta = item.data(Qt.ItemDataRole.UserRole) or {}
+            root = meta.get("root", item.text())
+            if meta.get("means"):
+                means_files.append((root, Path(meta["means"])))
+            if meta.get("breaths"):
+                breaths_files.append((root, Path(meta["breaths"])))
+            if meta.get("events"):
+                events_files.append((root, Path(meta["events"])))
+
+        if not means_files and not breaths_files and not events_files:
+            QMessageBox.warning(self, "No CSV Files", "No CSV files found in the selected items.")
+            return
+
+        # Use the consolidation manager directly with the file lists
+        self.consolidation_manager.consolidate_csv_files(means_files, breaths_files, events_files)
+
     def _propose_consolidated_filename(self, files: list) -> tuple[str, list[str]]:
         """Delegate to ConsolidationManager."""
         return self.consolidation_manager._propose_consolidated_filename(files)
@@ -5236,163 +6177,1030 @@ class MainWindow(QMainWindow):
     # ========== PROJECT BUILDER METHODS ==========
 
     def _setup_master_file_list(self):
-        """Set up the master file list by hiding Project Organization and reconfiguring table."""
-        from PyQt6.QtWidgets import QHeaderView, QComboBox, QPushButton, QHBoxLayout, QWidget
+        """Set up the master file list using Model/View architecture."""
+        from PyQt6.QtWidgets import QHeaderView, QVBoxLayout, QWidget
         from PyQt6.QtCore import Qt
 
-        # === Hide the Project Organization section (right column) ===
-        # Hide all widgets in the right column
-        if hasattr(self, 'projectOrganizationLabel'):
-            self.projectOrganizationLabel.hide()
-        if hasattr(self, 'experimentsTreeWidget'):
-            self.experimentsTreeWidget.hide()
-        if hasattr(self, 'experimentDetailsGroup'):
-            self.experimentDetailsGroup.hide()
-        if hasattr(self, 'removeExperimentButton'):
-            self.removeExperimentButton.hide()
-        if hasattr(self, 'exportExperimentButton'):
-            self.exportExperimentButton.hide()
-        if hasattr(self, 'addExperimentButton'):
-            self.addExperimentButton.hide()
-        if hasattr(self, 'experimentsInProjectLabel'):
-            self.experimentsInProjectLabel.hide()
+        # NOTE: Project Organization section (right column) was removed from .ui file
+        # The old experiment-based workflow widgets are no longer present
 
-        # Hide the vertical line separator between columns
-        if hasattr(self, 'line_vertical'):
-            self.line_vertical.hide()
-
-        # Hide the "Add to Project" button since we're not using experiments
-        if hasattr(self, 'addToProjectButton'):
-            self.addToProjectButton.hide()
-
-        # Make the left column stretch to fill available space
-        # Find the two-column horizontal layout and adjust stretch factors
-        from PyQt6.QtWidgets import QHBoxLayout
-        two_col_layout = self.findChild(QHBoxLayout, 'projectTwoColumnLayout')
-        if two_col_layout:
-            # Set stretch factors: left column gets all space, right column gets none
-            two_col_layout.setStretch(0, 1)  # leftColumnLayout
-            two_col_layout.setStretch(1, 0)  # line_vertical (hidden)
-            two_col_layout.setStretch(2, 0)  # rightColumnLayout (hidden)
-
-        # === Reconfigure the table columns ===
+        # === Set up QTableView with Model/View architecture ===
+        # The QTableView is already in the .ui file - just set up the model and delegates
         table = self.discoveredFilesTable
 
-        # Column structure:
-        # 0: File Name
-        # 1: Protocol
-        # 2: Avail Ch (available channels count)
-        # 3: Sweeps (number of sweeps)
-        # 4: Channel (selected for analysis)
-        # 5: Stim Ch (detected stimulus channel)
-        # 6: Keywords
-        # 7: Strain (editable)
-        # 8: Stim Type (auto-detected from stim frequency)
-        # 9: Power (editable, auto-fill)
-        # 10: Sex (editable)
-        # 11: Animal ID (editable)
-        # 12: Status
-        # 13: Actions (+/- buttons)
+        # Create and set the model
+        self._file_table_model = FileTableModel(self)
+        table.setModel(self._file_table_model)
 
-        new_columns = [
-            "File Name",      # 0
-            "Protocol",       # 1
-            "Avail Ch",       # 2 (available channels)
-            "Sweeps",         # 3 (number of sweeps)
-            "Keywords",       # 4 (path keywords - parent level info)
-            "Experiment",     # 5 (user-defined experiment grouping) - NEW
-            "Channel",        # 6 (analyzed channel - filled on save)
-            "Stim Ch",        # 7 (stim channel - filled on save)
-            "Events Ch",      # 8 (events channel - filled on save)
-            "Strain",         # 9
-            "Stim Type",      # 10 (auto-detected or manual)
-            "Power",          # 11
-            "Sex",            # 12
-            "Animal ID",      # 13
-            "Status",         # 14
-            "",               # 15 (actions - Analyze/+ buttons)
-            "Exports"         # 16 (export summary with tooltip)
-        ]
+        # Configure table view properties (some may be set in .ui, but ensure they're correct)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setAlternatingRowColors(True)
+        table.setSortingEnabled(False)  # We handle sorting ourselves
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
 
-        table.setColumnCount(len(new_columns))
-        table.setHorizontalHeaderLabels(new_columns)
-
-        # Disable default sorting - we'll implement custom grouped sorting
-        table.setSortingEnabled(False)
-
-        # Set column properties
+        # Enable drag-drop column reordering
         header = table.horizontalHeader()
+        header.setSectionsMovable(True)
+        header.setDragEnabled(True)
+        header.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
 
-        # Connect header click for custom grouped sorting
-        header.sectionClicked.connect(self._on_header_sort_clicked)
+        # Set up delegates for special columns
+        self._setup_table_delegates(table)
 
-        # 0: File name "File Name"
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(0, 70)
-        # 1: Protocol "Protocol"
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(1, 58)
-        # 2: Available channels "Avail Ch"
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(2, 52)
-        # 3: Sweeps "Sweeps"
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(3, 50)
-        # 4: Keywords "Keywords"
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(4, 62)
-        # 5: Experiment "Experiment" - NEW user-defined grouping
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(5, 70)
-        # 6: Channel "Channel"
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(6, 55)
-        # 7: Stim Ch "Stim Ch"
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(7, 52)
-        # 8: Events Ch "Events Ch"
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(8, 62)
-        # 9: Strain "Strain"
-        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(9, 45)
-        # 10: Stim Type "Stim Type"
-        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(10, 62)
-        # 11: Power "Power"
-        header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(11, 45)
-        # 12: Sex "Sex"
-        header.setSectionResizeMode(12, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(12, 30)
-        # 13: Animal ID "Animal ID"
-        header.setSectionResizeMode(13, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(13, 62)
-        # 14: Status "Status"
-        header.setSectionResizeMode(14, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(14, 45)
-        # 15: Actions "" (no header) - needs room for Analyze/+/- buttons
-        header.setSectionResizeMode(15, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(15, 85)
-        # 16: Exports "Exports"
-        header.setSectionResizeMode(16, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(16, 55)
+        # Set column widths from column definitions
+        for i, col_def in enumerate(self._file_table_model.get_visible_columns()):
+            table.setColumnWidth(i, col_def.width)
+            if col_def.fixed:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
 
-        # Connect cell changed signal for editable columns
-        table.cellChanged.connect(self._on_master_list_cell_changed)
-
-        # Connect double-click to open file for analysis
-        table.cellDoubleClicked.connect(self._on_master_list_double_click)
-
-        # Enable context menu for bulk editing
+        # Connect signals
+        table.doubleClicked.connect(self._on_table_double_clicked)
+        table.clicked.connect(self._on_table_clicked)  # Single click for Notes column
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._on_master_list_context_menu)
 
-        # Install event filter to handle resize events for auto-fit columns
-        table.viewport().installEventFilter(self)
-        self._table_resize_timer = None  # For debouncing resize events
+        # Connect model signals
+        self._file_table_model.cell_edited.connect(self._on_model_cell_edited)
 
-        print("[project-builder] Master file list configured with new columns")
+        # Connect header click for sorting
+        header.sectionClicked.connect(self._on_header_sort_clicked)
+
+        # Connect header context menu for column visibility
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._on_header_context_menu)
+
+        # Install event filter for resize events
+        table.viewport().installEventFilter(self)
+        self._table_resize_timer = None
+
+        print("[project-builder] Master file list configured with Model/View architecture")
+
+    def _setup_table_delegates(self, table: QTableView):
+        """Set up item delegates for special column types."""
+        model = self._file_table_model
+
+        # Button delegate for actions column
+        actions_col = model.get_column_index('actions')
+        if actions_col >= 0:
+            self._button_delegate = ButtonDelegate(table)
+            self._button_delegate.analyze_clicked.connect(self._on_analyze_row)
+            self._button_delegate.delete_clicked.connect(self._on_delete_row)
+            self._button_delegate.info_clicked.connect(self._on_info_row)
+            table.setItemDelegateForColumn(actions_col, self._button_delegate)
+
+        # Status delegate
+        status_col = model.get_column_index('status')
+        if status_col >= 0:
+            self._status_delegate = StatusDelegate(table)
+            table.setItemDelegateForColumn(status_col, self._status_delegate)
+
+        # Autocomplete delegates for editable columns with history
+        for col_def in model.get_visible_columns():
+            if col_def.editable and col_def.history_key:
+                col_idx = model.get_column_index(col_def.key)
+                if col_idx >= 0:
+                    delegate = AutoCompleteDelegate(table, history_key=col_def.history_key)
+                    table.setItemDelegateForColumn(col_idx, delegate)
+
+    def _on_table_double_clicked(self, index):
+        """Handle double-click on table - open file for analysis."""
+        if not index.isValid():
+            return
+        row = index.row()
+        col_key = self._file_table_model.get_column_key(index.column())
+
+        # If double-clicking on an editable column, let the delegate handle it
+        col_def = self._file_table_model.get_column_def(col_key) if col_key else None
+        if col_def and col_def.editable:
+            return  # Let editing happen
+
+        # Otherwise, analyze the file
+        self._analyze_file_at_row(row)
+
+    def _on_table_clicked(self, index):
+        """Handle single click on table - check for Notes column click."""
+        if not index.isValid():
+            return
+
+        col_key = self._file_table_model.get_column_key(index.column())
+        if col_key == 'linked_notes':
+            row = index.row()
+            row_data = self._file_table_model.get_row_data(row)
+            if row_data:
+                file_name = row_data.get('file_name', '')
+                if file_name:
+                    self._show_linked_notes_for_file(file_name)
+
+    def _show_linked_notes_for_file(self, file_name: str):
+        """Show a dialog with notes files that reference the given data file.
+
+        Uses fuzzy matching (±5 numeric range) if no exact matches are found.
+        """
+        from pathlib import Path
+
+        # Get the file stem for matching
+        file_stem = Path(file_name).stem
+
+        # Find notes files that reference this file (exact match)
+        linked_notes = self._get_notes_for_abf(file_stem)
+        is_fuzzy = False
+        fuzzy_stems = []
+
+        # If no exact matches, try fuzzy matching
+        if not linked_notes:
+            linked_notes, fuzzy_stems = self._get_fuzzy_notes_for_abf(file_stem)
+            if linked_notes:
+                is_fuzzy = True
+
+        if not linked_notes:
+            self._log_status_message(f"No notes found referencing '{file_name}'. Run 'Scan References' first.", 3000)
+            return
+
+        # Build info text with fuzzy match warning if applicable
+        if is_fuzzy:
+            # Find the closest matching stem numerically
+            import re
+            closest_stem = fuzzy_stems[0] if fuzzy_stems else file_stem
+
+            # Extract numeric part from original stem
+            orig_nums = re.findall(r'\d+', file_stem)
+            if orig_nums and fuzzy_stems:
+                orig_num = int(max(orig_nums, key=len))
+                min_diff = float('inf')
+                for stem in fuzzy_stems:
+                    stem_nums = re.findall(r'\d+', stem)
+                    if stem_nums:
+                        stem_num = int(max(stem_nums, key=len))
+                        diff = abs(stem_num - orig_num)
+                        if diff < min_diff:
+                            min_diff = diff
+                            closest_stem = stem
+
+            stems_str = ', '.join(fuzzy_stems[:3])  # Show first 3 matches
+            if len(fuzzy_stems) > 3:
+                stems_str += f" +{len(fuzzy_stems) - 3} more"
+            info_text = (
+                f'<span style="color: #FFA500;">⚠ FUZZY MATCH:</span> '
+                f'No exact match for <b>{file_name}</b><br>'
+                f'Found {len(linked_notes)} file(s) referencing nearby: <b>{stems_str}</b>'
+            )
+            title = f"Notes for: {file_name} (Fuzzy Match)"
+            # Highlight the closest matching stem
+            highlight_stem = closest_stem
+        else:
+            info_text = f"Found {len(linked_notes)} notes file(s) referencing <b>{file_name}</b>"
+            title = f"Notes for: {file_name}"
+            highlight_stem = file_stem
+
+        # Use shared preview dialog
+        self._show_notes_preview_dialog(
+            files=[{'name': n['name'], 'path': n['path']} for n in linked_notes],
+            title=title,
+            info_text=info_text,
+            highlight_stem=highlight_stem
+        )
+
+    def _show_notes_preview_dialog(self, files: list, title: str, info_text: str = None, highlight_stem: str = None):
+        """Show a unified preview dialog for notes files.
+
+        Args:
+            files: List of dicts with 'name' and 'path' keys
+            title: Dialog window title
+            info_text: Optional HTML text shown above the preview (e.g., file count)
+            highlight_stem: Optional ABF filename stem to highlight in previews
+        """
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                                     QPushButton, QTabWidget, QWidget)
+        from pathlib import Path
+
+        if not files:
+            return
+
+        # Dark theme dialog stylesheet
+        dark_dialog_style = """
+            QDialog {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QLabel {
+                color: #d4d4d4;
+            }
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #d4d4d4;
+                border: 1px solid #555555;
+                padding: 6px 16px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+            QPushButton:pressed {
+                background-color: #2a2a2a;
+            }
+            QTabWidget::pane {
+                border: 1px solid #3e3e42;
+                background-color: #1e1e1e;
+            }
+            QTabBar::tab {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                padding: 8px 16px;
+                border: 1px solid #3e3e42;
+                border-bottom: none;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                border-bottom-color: #1e1e1e;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3e3e42;
+            }
+        """
+
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(1100, 750)
+        dialog.setStyleSheet(dark_dialog_style)
+
+        # Enable dark title bar on Windows
+        self._enable_dark_title_bar(dialog)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        # Info label (optional)
+        if info_text:
+            info_label = QLabel(info_text)
+            info_label.setStyleSheet("font-size: 11pt; padding: 4px;")
+            layout.addWidget(info_label)
+
+        # Store file info for "Open in External App" button
+        self._preview_dialog_files = {}
+
+        # Single file: no tabs needed, just show the preview directly
+        if len(files) == 1:
+            file_info = files[0]
+            preview_widget = self._create_note_preview_widget(
+                {'name': file_info['name'], 'path': file_info['path']},
+                highlight_stem or ''
+            )
+            layout.addWidget(preview_widget, stretch=1)
+            self._preview_dialog_files[0] = file_info
+            current_file_getter = lambda: self._preview_dialog_files.get(0)
+        else:
+            # Multiple files: use tabs
+            tab_widget = QTabWidget()
+
+            for idx, file_info in enumerate(files):
+                preview_widget = self._create_note_preview_widget(
+                    {'name': file_info['name'], 'path': file_info['path']},
+                    highlight_stem or ''
+                )
+                tab_name = file_info['name']
+                if len(tab_name) > 30:
+                    tab_name = tab_name[:27] + "..."
+                tab_widget.addTab(preview_widget, tab_name)
+                self._preview_dialog_files[idx] = file_info
+
+            layout.addWidget(tab_widget, stretch=1)
+            current_file_getter = lambda: self._preview_dialog_files.get(tab_widget.currentIndex())
+
+        # Bottom button row
+        button_layout = QHBoxLayout()
+
+        open_btn = QPushButton("Open in External App")
+        open_btn.setToolTip("Open the file in its default application")
+
+        def open_current():
+            import os
+            file_info = current_file_getter()
+            if file_info and file_info.get('path'):
+                os.startfile(file_info['path'])
+
+        open_btn.clicked.connect(open_current)
+        button_layout.addWidget(open_btn)
+
+        button_layout.addStretch()
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(close_btn)
+
+        layout.addLayout(button_layout)
+
+        dialog.exec()
+
+    def _create_note_preview_widget(self, note_info: dict, abf_stem: str, search_term: str = None):
+        """Create a preview widget for a single note file with ABF highlighting.
+
+        Args:
+            note_info: Dict with 'path' key pointing to the notes file
+            abf_stem: Primary highlight term (ABF filename) - shown in green
+            search_term: Optional secondary search term - shown in orange/yellow
+        """
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QLabel
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor, QBrush
+        from pathlib import Path
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        file_path = Path(note_info['path'])
+
+        # Add filename header
+        filename_label = QLabel(f"<b>File:</b> {file_path.name}")
+        filename_label.setStyleSheet("QLabel { color: #9cdcfe; padding: 4px 8px; background-color: #2d2d30; border-radius: 3px; }")
+        filename_label.setToolTip(str(file_path))
+        layout.addWidget(filename_label)
+
+        if not file_path.exists():
+            text_edit = QTextEdit()
+            text_edit.setPlainText(f"File not found: {file_path}")
+            text_edit.setReadOnly(True)
+            text_edit.setStyleSheet("QTextEdit { background-color: #1e1e1e; color: #d4d4d4; border: none; }")
+            layout.addWidget(text_edit)
+            return container
+
+        suffix = file_path.suffix.lower()
+
+        try:
+            if suffix in ['.xlsx', '.xls']:
+                import pandas as pd
+                sheets = pd.read_excel(file_path, sheet_name=None, nrows=500)
+
+                if sheets:
+                    # Multiple sheets -> nested tabs
+                    sheet_tabs = QTabWidget()
+                    sheet_tabs.setStyleSheet("""
+                        QTabWidget::pane { border: 1px solid #3e3e42; background-color: #1e1e1e; }
+                        QTabBar::tab { background-color: #2d2d30; color: #d4d4d4; padding: 6px 12px; border: 1px solid #3e3e42; }
+                        QTabBar::tab:selected { background-color: #1e1e1e; }
+                    """)
+
+                    # Sort sheets: matching sheets first, then others
+                    sheet_items = list(sheets.items())
+                    matching_sheets = []
+                    other_sheets = []
+                    for sheet_name, df in sheet_items:
+                        if self._df_contains_stem(df, abf_stem):
+                            matching_sheets.append((sheet_name, df, True))
+                        else:
+                            other_sheets.append((sheet_name, df, False))
+
+                    # Add matching sheets first, then others
+                    for sheet_name, df, has_match in matching_sheets + other_sheets:
+                        table = self._create_highlighted_table(df, abf_stem, search_term)
+                        tab_name = f"★ {sheet_name}" if has_match else sheet_name
+                        sheet_tabs.addTab(table, tab_name)
+
+                    layout.addWidget(sheet_tabs)
+                else:
+                    text_edit = QTextEdit()
+                    text_edit.setPlainText("[Workbook is empty]")
+                    text_edit.setReadOnly(True)
+                    layout.addWidget(text_edit)
+
+            elif suffix == '.csv':
+                import pandas as pd
+                df = pd.read_csv(file_path, nrows=500, encoding='utf-8', on_bad_lines='skip')
+                table = self._create_highlighted_table(df, abf_stem, search_term)
+                layout.addWidget(table)
+
+            elif suffix == '.txt':
+                content = file_path.read_text(encoding='utf-8', errors='replace')
+                text_edit = self._create_highlighted_text(content, abf_stem, search_term)
+                layout.addWidget(text_edit)
+
+            elif suffix == '.docx':
+                try:
+                    from docx import Document
+                    doc = Document(str(file_path))
+
+                    # Collect paragraphs
+                    content_parts = []
+                    for p in doc.paragraphs:
+                        if p.text.strip():
+                            content_parts.append(p.text)
+
+                    # Also collect table contents (where ABF references often appear)
+                    for table in doc.tables:
+                        table_rows = []
+                        for row in table.rows:
+                            row_cells = [cell.text.strip() for cell in row.cells]
+                            table_rows.append(' | '.join(row_cells))
+                        if table_rows:
+                            content_parts.append('\n--- Table ---')
+                            content_parts.extend(table_rows)
+                            content_parts.append('--- End Table ---\n')
+
+                    content = '\n\n'.join(content_parts)
+                    text_edit = self._create_highlighted_text(content, abf_stem, search_term)
+                    layout.addWidget(text_edit)
+                except ImportError:
+                    text_edit = QTextEdit()
+                    text_edit.setPlainText("python-docx not installed. Cannot preview .docx files.\n\nUse 'Open in External App' to view.")
+                    text_edit.setReadOnly(True)
+                    text_edit.setStyleSheet("QTextEdit { background-color: #1e1e1e; color: #d4d4d4; border: none; }")
+                    layout.addWidget(text_edit)
+
+            else:
+                text_edit = QTextEdit()
+                text_edit.setPlainText(f"Preview not supported for {suffix} files.\n\nUse 'Open in External App' to view.")
+                text_edit.setReadOnly(True)
+                text_edit.setStyleSheet("QTextEdit { background-color: #1e1e1e; color: #d4d4d4; border: none; }")
+                layout.addWidget(text_edit)
+
+        except Exception as e:
+            text_edit = QTextEdit()
+            text_edit.setPlainText(f"Error loading preview: {e}")
+            text_edit.setReadOnly(True)
+            text_edit.setStyleSheet("QTextEdit { background-color: #1e1e1e; color: #d4d4d4; border: none; }")
+            layout.addWidget(text_edit)
+
+        return container
+
+    def _create_highlighted_table(self, df, abf_stem: str, search_term: str = None):
+        """Create a QTableWidget from DataFrame with dual highlighting.
+
+        Args:
+            df: DataFrame to display
+            abf_stem: Primary highlight term (ABF filename) - shown in green
+            search_term: Optional secondary search term - shown in orange/yellow
+        """
+        from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        from PyQt6.QtGui import QColor, QBrush
+
+        df = df.fillna('')
+
+        table = QTableWidget()
+        table.setRowCount(len(df))
+        table.setColumnCount(len(df.columns))
+        table.setHorizontalHeaderLabels([str(col) for col in df.columns])
+
+        # Find rows containing the ABF reference (primary) or search term (secondary)
+        primary_rows = set()
+        secondary_rows = set()
+        for row_idx in range(len(df)):
+            for col in df.columns:
+                val = str(df.iloc[row_idx][col])
+                if abf_stem and abf_stem.lower() in val.lower():
+                    primary_rows.add(row_idx)
+                if search_term and search_term.lower() in val.lower():
+                    secondary_rows.add(row_idx)
+
+        # Populate table
+        for row_idx in range(len(df)):
+            for col_idx, col in enumerate(df.columns):
+                value = df.iloc[row_idx, col_idx]
+                value_str = str(value) if value != '' else ''
+                item = QTableWidgetItem(value_str)
+
+                # Primary highlight (ABF stem) - green background
+                if row_idx in primary_rows:
+                    item.setBackground(QBrush(QColor(60, 90, 60)))
+                    if abf_stem and abf_stem.lower() in value_str.lower():
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+                        item.setForeground(QBrush(QColor(150, 255, 150)))
+
+                # Secondary highlight (search term) - orange/yellow
+                # If both match, secondary takes precedence for text color
+                if search_term and search_term.lower() in value_str.lower():
+                    if row_idx not in primary_rows:
+                        # Only search term matches - use orange background
+                        item.setBackground(QBrush(QColor(90, 70, 40)))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setForeground(QBrush(QColor(255, 200, 100)))  # Orange/yellow text
+
+                table.setItem(row_idx, col_idx, item)
+
+        table.setAlternatingRowColors(True)
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                alternate-background-color: #252526;
+                color: #d4d4d4;
+                gridline-color: #3e3e42;
+                border: none;
+            }
+            QHeaderView::section {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                padding: 6px;
+                border: 1px solid #3e3e42;
+                font-weight: bold;
+            }
+        """)
+
+        header = table.horizontalHeader()
+        # Resize columns to fit content, with last column stretching to fill space
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)  # Last column fills remaining width
+        # Allow wider columns for better readability (up to 500px)
+        header.setMaximumSectionSize(500)
+        # Minimum size so narrow columns are still readable
+        header.setMinimumSectionSize(50)
+
+        # Scroll to first highlighted row (prefer primary, fallback to secondary)
+        scroll_rows = primary_rows or secondary_rows
+        if scroll_rows:
+            first_row = min(scroll_rows)
+            table.scrollToItem(table.item(first_row, 0))
+
+        return table
+
+    def _create_highlighted_text(self, content: str, abf_stem: str, search_term: str = None):
+        """Create a QTextEdit with dual highlighting and scrolled to first match.
+
+        Args:
+            content: Text content to display
+            abf_stem: Primary highlight term (ABF filename) - shown in green
+            search_term: Optional secondary search term - shown in orange/yellow
+        """
+        from PyQt6.QtWidgets import QTextEdit
+        from PyQt6.QtGui import QTextCursor
+        from PyQt6.QtCore import QTimer
+        import re
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+
+        # Create patterns for both highlight terms
+        abf_pattern = re.compile(re.escape(abf_stem), re.IGNORECASE) if abf_stem else None
+        search_pattern = re.compile(re.escape(search_term), re.IGNORECASE) if search_term else None
+
+        # Process line by line
+        lines = content.split('\n')
+        highlighted_lines = []
+
+        for line in lines:
+            has_primary = abf_stem and abf_stem.lower() in line.lower()
+            has_secondary = search_term and search_term.lower() in line.lower()
+
+            if has_primary or has_secondary:
+                line_html = line
+
+                # Apply primary highlighting (green) - ABF stem
+                if has_primary and abf_pattern:
+                    line_html = abf_pattern.sub(
+                        r'<span style="color: #90ff90; font-weight: bold;">\g<0></span>',
+                        line_html
+                    )
+
+                # Apply secondary highlighting (orange) - search term
+                # Need to be careful not to double-highlight if terms overlap
+                if has_secondary and search_pattern:
+                    # Only highlight search term if it doesn't overlap with ABF stem
+                    if not has_primary or (abf_stem.lower() not in search_term.lower() and search_term.lower() not in abf_stem.lower()):
+                        line_html = search_pattern.sub(
+                            r'<span style="color: #ffcc66; font-weight: bold; background-color: #5a4a2a;">\g<0></span>',
+                            line_html
+                        )
+
+                # Determine background color based on what matched
+                if has_primary and has_secondary:
+                    # Both match - use a mixed color
+                    bg_color = "#4a5a4a"
+                elif has_primary:
+                    bg_color = "#3d5a3d"
+                else:
+                    bg_color = "#5a4a2a"
+
+                highlighted_lines.append(
+                    f'<div style="background-color: {bg_color}; padding: 2px 4px; margin: 1px 0;">{line_html}</div>'
+                )
+            else:
+                highlighted_lines.append(f'<div>{line}</div>')
+
+        highlighted = ''.join(highlighted_lines)
+        text_edit.setHtml(f"<div style='color: #d4d4d4; font-family: Consolas, monospace; font-size: 10pt;'>{highlighted}</div>")
+
+        text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                border: none;
+                font-size: 10pt;
+            }
+        """)
+
+        # Scroll to first match after widget is shown (prefer primary, fallback to secondary)
+        def scroll_to_match():
+            # Safety check: widget may have been deleted if user is rapidly typing in search
+            try:
+                # Check if widget is still valid (accessing any property will throw if deleted)
+                if not text_edit.isVisible():
+                    return
+            except RuntimeError:
+                # Widget has been deleted (C/C++ object no longer exists)
+                return
+
+            # Find position in original content (case-insensitive)
+            match_pos = -1
+            if abf_stem:
+                match_pos = content.lower().find(abf_stem.lower())
+            if match_pos < 0 and search_term:
+                match_pos = content.lower().find(search_term.lower())
+
+            if match_pos >= 0:
+                # Calculate approximate scroll position as percentage of document
+                total_len = len(content)
+                if total_len > 0:
+                    scroll_percent = match_pos / total_len
+                    try:
+                        scrollbar = text_edit.verticalScrollBar()
+                        max_scroll = scrollbar.maximum()
+                        # Scroll to position (with some offset to show context above)
+                        target_pos = int(max_scroll * scroll_percent)
+                        # Subtract some pixels to show context above the match
+                        target_pos = max(0, target_pos - 50)
+                        scrollbar.setValue(target_pos)
+                    except RuntimeError:
+                        # Widget deleted during scroll operation
+                        pass
+
+        # Use longer delay to ensure dialog is fully rendered
+        QTimer.singleShot(300, scroll_to_match)
+
+        return text_edit
+
+    def _df_contains_stem(self, df, abf_stem: str) -> bool:
+        """Check if a DataFrame contains the ABF stem anywhere."""
+        for col in df.columns:
+            for val in df[col].astype(str):
+                if abf_stem.lower() in val.lower():
+                    return True
+        return False
+
+    def _get_notes_for_abf(self, abf_stem: str) -> list:
+        """Find notes files that reference a specific ABF file.
+
+        Args:
+            abf_stem: The ABF filename stem (without extension)
+
+        Returns:
+            List of note_info dicts that reference this ABF file
+        """
+        linked = []
+
+        if not hasattr(self, '_notes_files_data') or not self._notes_files_data:
+            return linked
+
+        for note_info in self._notes_files_data:
+            matches = note_info.get('matches', [])
+            if abf_stem in matches:
+                linked.append(note_info)
+
+        return linked
+
+    def _get_fuzzy_notes_for_abf(self, abf_stem: str, search_range: int = 5) -> tuple:
+        """Find notes files that reference numeric neighbors of an ABF file.
+
+        Used when exact match fails. Searches for files with similar numeric patterns
+        within ±search_range of the original filename's numeric portion.
+
+        Args:
+            abf_stem: The ABF filename stem (without extension), e.g., "25708007"
+            search_range: How far to search (default ±5)
+
+        Returns:
+            Tuple of (list of note_info dicts, list of matched_stems that were fuzzy matched)
+        """
+        import re
+
+        if not hasattr(self, '_notes_files_data') or not self._notes_files_data:
+            return [], []
+
+        # Extract numeric portion from filename
+        # Handle patterns like: "25708007", "mouse1_25708007", "25708007_trial1"
+        # We want the longest numeric sequence (likely the file ID)
+        numeric_matches = re.findall(r'\d+', abf_stem)
+        if not numeric_matches:
+            return [], []
+
+        # Use the longest numeric sequence as the ID to match
+        main_numeric = max(numeric_matches, key=len)
+        numeric_idx = abf_stem.find(main_numeric)
+
+        # Generate candidate stems within range
+        candidates = set()
+        try:
+            base_num = int(main_numeric)
+            for delta in range(-search_range, search_range + 1):
+                if delta == 0:
+                    continue  # Skip exact match (already checked)
+                candidate_num = base_num + delta
+                if candidate_num >= 0:
+                    # Preserve leading zeros and surrounding text
+                    candidate_str = str(candidate_num).zfill(len(main_numeric))
+                    candidate_stem = abf_stem[:numeric_idx] + candidate_str + abf_stem[numeric_idx + len(main_numeric):]
+                    candidates.add(candidate_stem)
+        except ValueError:
+            return [], []
+
+        # Search notes files for these candidates
+        linked = []
+        matched_stems = []
+
+        for note_info in self._notes_files_data:
+            matches = note_info.get('matches', [])
+            for match in matches:
+                if match in candidates:
+                    if note_info not in linked:
+                        linked.append(note_info)
+                    if match not in matched_stems:
+                        matched_stems.append(match)
+
+        return linked, matched_stems
+
+    def _update_linked_notes_column(self):
+        """Update the linked_notes column in file table based on scanned notes.
+
+        Uses fuzzy matching (±5 numeric range) when exact matches aren't found.
+        Fuzzy matches are displayed with a '~' prefix to indicate caution.
+        """
+        if not hasattr(self, '_file_table_model') or not self._file_table_model:
+            return
+
+        if not hasattr(self, '_notes_files_data') or not self._notes_files_data:
+            return
+
+        from pathlib import Path
+
+        # Build a reverse index: ABF stem -> count of notes referencing it
+        abf_notes_count = {}
+        for note_info in self._notes_files_data:
+            matches = note_info.get('matches', [])
+            for abf_stem in matches:
+                abf_notes_count[abf_stem] = abf_notes_count.get(abf_stem, 0) + 1
+
+        fuzzy_match_count = 0
+
+        # Update each row in the file table
+        for row in range(self._file_table_model.rowCount()):
+            row_data = self._file_table_model.get_row_data(row)
+            if row_data:
+                file_name = row_data.get('file_name', '')
+                if file_name:
+                    file_stem = Path(file_name).stem
+                    exact_count = abf_notes_count.get(file_stem, 0)
+
+                    # Check for fuzzy match if no exact matches
+                    is_fuzzy = False
+                    fuzzy_stems = []
+                    if exact_count == 0:
+                        fuzzy_notes, fuzzy_stems = self._get_fuzzy_notes_for_abf(file_stem)
+                        if fuzzy_notes:
+                            exact_count = len(fuzzy_notes)
+                            is_fuzzy = True
+                            fuzzy_match_count += 1
+
+                    # Format display: "~N" for fuzzy, "N" for exact, "0" for no matches
+                    if exact_count > 0:
+                        display_value = f"~{exact_count}" if is_fuzzy else str(exact_count)
+                    else:
+                        display_value = '0'
+
+                    # Update model data (including fuzzy info for tooltips)
+                    self._file_table_model.set_cell_value(row, 'linked_notes', display_value)
+                    self._file_table_model.set_cell_value(row, 'linked_notes_fuzzy', is_fuzzy)
+                    self._file_table_model.set_cell_value(row, 'linked_notes_fuzzy_stems', fuzzy_stems)
+
+                    # Also update master file list with detailed info
+                    if row < len(self._master_file_list):
+                        self._master_file_list[row]['linked_notes'] = exact_count
+                        self._master_file_list[row]['linked_notes_fuzzy'] = is_fuzzy
+                        self._master_file_list[row]['linked_notes_fuzzy_stems'] = fuzzy_stems
+
+        fuzzy_msg = f" ({fuzzy_match_count} fuzzy)" if fuzzy_match_count > 0 else ""
+        print(f"[notes] Updated linked_notes for {self._file_table_model.rowCount()} files{fuzzy_msg}")
+
+    def _on_model_cell_edited(self, row: int, column_key: str, value):
+        """Handle cell edits from the model."""
+        # Update master file list
+        if row < len(self._master_file_list):
+            self._master_file_list[row][column_key] = value
+
+            # Update autocomplete history for certain columns
+            if column_key == 'experiment' and value:
+                self._update_experiment_history(str(value))
+            elif column_key == 'strain' and value:
+                self._update_autocomplete_history('strain_history', str(value))
+
+            # Autosave project
+            self._project_autosave()
+
+    def _on_analyze_row(self, row: int):
+        """Handle analyze button click."""
+        self._analyze_file_at_row(row)
+
+    def _on_delete_row(self, row: int):
+        """Handle delete button click - remove row from table."""
+        if row < len(self._master_file_list):
+            del self._master_file_list[row]
+            self._file_table_model.remove_row(row)
+            self._project_autosave()
+
+    def _on_info_row(self, row: int):
+        """Handle info button click - show file details."""
+        if row < len(self._master_file_list):
+            task = self._master_file_list[row]
+            file_path = task.get('file_path', 'Unknown')
+            protocol = task.get('protocol', 'Unknown')
+            channels = task.get('channel_count', 0)
+            sweeps = task.get('sweep_count', 0)
+
+            info_text = f"""File: {file_path}
+Protocol: {protocol}
+Channels: {channels}
+Sweeps: {sweeps}"""
+
+            QMessageBox.information(self, "File Information", info_text)
+
+    def _on_header_context_menu(self, pos):
+        """Show context menu for column visibility and custom columns."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtCore import QPoint
+
+        header = self.discoveredFilesTable.horizontalHeader()
+        menu = QMenu(self)
+
+        # Add show/hide options for each column
+        all_cols = self._file_table_model.get_all_column_defs()
+        for col_def in all_cols:
+            if col_def.key == 'actions':  # Don't allow hiding actions column
+                continue
+            action = menu.addAction(col_def.header or col_def.key)
+            action.setCheckable(True)
+            col_idx = self._file_table_model.get_column_index(col_def.key)
+            action.setChecked(col_idx >= 0)  # Visible if index >= 0
+            action.setData(col_def.key)
+            action.triggered.connect(lambda checked, key=col_def.key: self._toggle_column_visibility(key, checked))
+
+        menu.addSeparator()
+
+        # Custom columns submenu
+        custom_menu = menu.addMenu("Custom Columns")
+        add_custom_action = custom_menu.addAction("+ Add Custom Column...")
+        add_custom_action.triggered.connect(self._add_custom_column_dialog)
+
+        # List existing custom columns with remove option
+        custom_cols = self._file_table_model.get_custom_columns()
+        if custom_cols:
+            custom_menu.addSeparator()
+            for col_def in custom_cols:
+                remove_action = custom_menu.addAction(f"Remove '{col_def.header}'")
+                remove_action.triggered.connect(
+                    lambda checked, key=col_def.key: self._remove_custom_column(key)
+                )
+
+        menu.addSeparator()
+
+        # Reset to default
+        reset_action = menu.addAction("Reset Column Order")
+        reset_action.triggered.connect(self._reset_column_order)
+
+        # Show menu at cursor position
+        menu.exec(header.mapToGlobal(pos))
+
+    def _toggle_column_visibility(self, key: str, visible: bool):
+        """Toggle visibility of a column."""
+        if visible:
+            self._file_table_model.show_column(key)
+        else:
+            self._file_table_model.hide_column(key)
+
+    def _add_custom_column_dialog(self):
+        """Show dialog to add a custom column."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(
+            self, "Add Custom Column",
+            "Enter column name (e.g., 'Notes', 'Coordinates', 'Site'):"
+        )
+
+        if ok and name.strip():
+            name = name.strip()
+            key = self._file_table_model.add_custom_column(name)
+            if key:
+                self._log_status_message(f"✓ Added custom column: {name}", 2000)
+                # Refresh table to show new column
+                self._rebuild_table_from_master_list()
+                self._auto_fit_table_columns()
+                self._project_autosave()
+            else:
+                self._show_warning("Column Exists", f"A column named '{name}' already exists.")
+
+    def _remove_custom_column(self, key: str):
+        """Remove a custom column."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Confirm removal
+        result = QMessageBox.question(
+            self, "Remove Custom Column",
+            f"Remove this custom column?\n\nThis will delete all data in this column.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if result == QMessageBox.StandardButton.Yes:
+            if self._file_table_model.remove_custom_column(key):
+                # Also remove from master file list
+                for task in self._master_file_list:
+                    task.pop(key, None)
+                self._log_status_message(f"✓ Removed custom column", 2000)
+                self._rebuild_table_from_master_list()
+                self._auto_fit_table_columns()
+                self._project_autosave()
+
+    def _reset_column_order(self):
+        """Reset column order to default."""
+        self._file_table_model.reset_column_order()
+        # Re-setup delegates after reset
+        self._setup_table_delegates(self.discoveredFilesTable)
+
+    def _analyze_file_at_row(self, row: int):
+        """Load and analyze file at given row."""
+        if row >= len(self._master_file_list):
+            return
+
+        task = self._master_file_list[row]
+        file_path = task.get('file_path')
+        if not file_path:
+            return
+
+        from pathlib import Path
+        if not Path(file_path).exists():
+            self._show_warning("File Not Found", f"File no longer exists:\n{file_path}")
+            return
+
+        print(f"[master-list] Opening file for analysis: {file_path}")
+
+        # Track which row is being analyzed
+        self._active_master_list_row = row
+
+        # Store pending channel selections from Project Builder
+        # These will be used after file loads to override auto-detection
+        self._pending_analysis_channel = task.get('channel', '')
+        self._pending_stim_channels = task.get('stim_channels', [])
+
+        # Log what we're planning to select
+        if self._pending_analysis_channel or self._pending_stim_channels:
+            print(f"[master-list] Pre-selecting: analysis={self._pending_analysis_channel}, stim={self._pending_stim_channels}")
+
+        # Load the file
+        self.load_file(Path(file_path))
+
+        # Switch to Analysis tab (tab widget is called 'Tabs' in the UI file)
+        # Tab 0 = Project Builder, Tab 1 = Analysis
+        if hasattr(self, 'Tabs'):
+            self.Tabs.setCurrentIndex(1)  # Analysis tab is index 1
+            print("[master-list] Switched to Analysis tab")
+
+    def _update_autocomplete_history(self, history_key: str, value: str):
+        """Add a value to autocomplete history."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+        history = settings.value(f"autocomplete/{history_key}", [])
+        if not isinstance(history, list):
+            history = []
+        if value in history:
+            history.remove(value)
+        history.insert(0, value)
+        history = history[:50]
+        settings.setValue(f"autocomplete/{history_key}", history)
+
+    # ========== COMPATIBILITY LAYER ==========
+    # These methods provide backward compatibility with old QTableWidget patterns
+
+    def _get_table_cell_value(self, row: int, column_key: str):
+        """Get cell value from model by column key (replaces table.item(row, col).text())."""
+        return self._file_table_model.get_cell_value(row, column_key)
+
+    def _set_table_cell_value(self, row: int, column_key: str, value):
+        """Set cell value in model by column key (replaces table.setItem(row, col, item))."""
+        self._file_table_model.set_cell_value(row, column_key, value)
+        # Also update master file list
+        if row < len(self._master_file_list):
+            self._master_file_list[row][column_key] = value
+
+    def _get_table_row_count(self) -> int:
+        """Get number of rows in table."""
+        return self._file_table_model.rowCount()
+
+    def _clear_table(self):
+        """Clear all data from table."""
+        self._file_table_model.clear()
 
     def _format_exports_summary(self, task: dict) -> str:
         """
@@ -5583,135 +7391,31 @@ class MainWindow(QMainWindow):
 
         # Show sort indicator
         direction = "↑" if self._sort_ascending else "↓"
-        col_name = self.discoveredFilesTable.horizontalHeaderItem(column).text() if self.discoveredFilesTable.horizontalHeaderItem(column) else f"Col {column}"
+        # Get column name from model's headerData
+        col_name = self._file_table_model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+        if not col_name:
+            col_name = f"Col {column}"
         self._log_status_message(f"Sorted by {col_name} {direction}", 2000)
 
     def _rebuild_table_from_master_list(self):
-        """Rebuild the table from the current _master_file_list order."""
-        from PyQt6.QtWidgets import QTableWidgetItem
+        """Rebuild the table from the current _master_file_list order using Model/View."""
+        # With Model/View, we simply update the model's data
+        # The view automatically reflects the changes
+        # Note: The model's _get_display_value() handles all formatting
+        # (sub-row names, exports summary, status icons, etc.)
 
-        table = self.discoveredFilesTable
-        table.blockSignals(True)
-        table.setRowCount(0)
+        # Set data on model - this triggers view update
+        self._file_table_model.set_files(self._master_file_list)
 
+        # Track conflict rows for highlighting
+        conflict_rows = set()
         for i, task in enumerate(self._master_file_list):
-            table.insertRow(i)
-            is_sub_row = task.get('is_sub_row', False)
-
-            # Column 0: File Name or channel for sub-rows
-            if is_sub_row:
-                # Show channel with filename in parentheses for clarity
-                file_name = task.get('file_name', '')
-                channel = task.get('channel', '')
-                item = QTableWidgetItem(f"  ↳ {channel}")
-                item.setToolTip(f"File: {file_name}\nChannel: {channel}")
-                table.setItem(i, 0, item)
-            else:
-                table.setItem(i, 0, QTableWidgetItem(task.get('file_name', '')))
-
-            # Columns 1-4: Show parent info on sub-rows too (helps with sorting/filtering)
-            table.setItem(i, 1, QTableWidgetItem(task.get('protocol', '')))
-            if is_sub_row:
-                table.setItem(i, 2, QTableWidgetItem(''))  # Avail Ch not relevant for sub-row
-                table.setItem(i, 3, QTableWidgetItem(''))  # Sweeps not relevant for sub-row
-            else:
-                table.setItem(i, 2, QTableWidgetItem(str(task.get('channel_count', ''))))
-                table.setItem(i, 3, QTableWidgetItem(str(task.get('sweep_count', ''))))
-            table.setItem(i, 4, QTableWidgetItem(task.get('keywords_display', '')))
-
-            # Column 5: Experiment (user-defined grouping)
-            table.setItem(i, 5, QTableWidgetItem(task.get('experiment', '')))
-
-            # Columns 6-8: Channel, Stim Ch, Events Ch
-            table.setItem(i, 6, QTableWidgetItem(task.get('channel', '')))
-            table.setItem(i, 7, QTableWidgetItem(task.get('stim_channel', '')))
-            table.setItem(i, 8, QTableWidgetItem(task.get('events_channel', '')))
-
-            # Columns 9-13: Metadata
-            table.setItem(i, 9, QTableWidgetItem(task.get('strain', '')))
-            table.setItem(i, 10, QTableWidgetItem(task.get('stim_type', '')))
-            table.setItem(i, 11, QTableWidgetItem(task.get('power', '')))
-            table.setItem(i, 12, QTableWidgetItem(task.get('sex', '')))
-            table.setItem(i, 13, QTableWidgetItem(task.get('animal_id', '')))
-
-            # Column 14: Status (with warnings if applicable)
-            status = task.get('status', 'pending')
             warnings = task.get('scan_warnings', {})
-            has_conflicts = bool(warnings.get('conflicts'))
-            has_older_files = warnings.get('older_npz_count', 0) > 0
+            if warnings.get('conflicts'):
+                conflict_rows.add(i)
+        self._file_table_model.set_conflict_rows(conflict_rows)
 
-            if is_sub_row:
-                if status == 'completed':
-                    if has_conflicts:
-                        status_icon = '●⚠'
-                    elif has_older_files:
-                        status_icon = '●📁'
-                    else:
-                        status_icon = '●'
-                elif status == 'in_progress':
-                    status_icon = '◐'
-                else:
-                    status_icon = '○'
-
-                status_item = QTableWidgetItem(status_icon)
-
-                # Add tooltip for warnings
-                if has_conflicts or has_older_files:
-                    tooltip_parts = []
-                    if has_conflicts:
-                        tooltip_parts.append("⚠ Data conflicts (table vs NPZ):")
-                        for c in warnings['conflicts']:
-                            tooltip_parts.append(f"  • {c}")
-                    if has_older_files:
-                        count = warnings['older_npz_count']
-                        tooltip_parts.append(f"📁 {count} older NPZ file(s) found:")
-                        for older in warnings.get('older_npz_files', [])[:3]:
-                            tooltip_parts.append(f"  • {Path(older['file']).name} ({older['date']})")
-                        if count > 3:
-                            tooltip_parts.append(f"  • ... and {count - 3} more")
-                    status_item.setToolTip('\n'.join(tooltip_parts))
-
-                table.setItem(i, 14, status_item)
-            else:
-                # Parent row - count completed sub-rows
-                status_icon = ''  # Will be set by _apply_all_row_styling
-                table.setItem(i, 14, QTableWidgetItem(status_icon))
-
-            # Column 15: Action buttons
-            if is_sub_row:
-                self._add_sub_row_action_buttons(i)
-            else:
-                self._add_row_action_button(i)
-
-            # Column 16: Exports
-            table.setItem(i, 16, self._create_exports_table_item(task))
-
-        table.blockSignals(False)
-
-        # Apply styling
-        self._apply_all_row_styling()
-
-    def _on_master_list_cell_changed(self, row, column):
-        """Handle cell edits in the master file list."""
-        # Editable columns: 5 (Experiment), 9 (Strain), 10 (Stim Type), 11 (Power), 12 (Sex), 13 (Animal ID)
-        editable_columns = {5: 'experiment', 9: 'strain', 10: 'stim_type', 11: 'power', 12: 'sex', 13: 'animal_id'}
-
-        if column not in editable_columns:
-            return
-
-        if row >= len(self._master_file_list):
-            return
-
-        field = editable_columns[column]
-        item = self.discoveredFilesTable.item(row, column)
-        if item:
-            value = item.text().strip()
-            self._master_file_list[row][field] = value
-            print(f"[master-list] Updated row {row} {field} = '{value}'")
-
-            # Track experiment names in history for autocomplete
-            if field == 'experiment' and value:
-                self._update_experiment_history(value)
+        print(f"[project-builder] Table rebuilt with {len(self._master_file_list)} rows")
 
     def _get_experiment_history(self) -> list:
         """Get list of previously used experiment names from QSettings."""
@@ -5738,33 +7442,6 @@ class MainWindow(QMainWindow):
         history = history[:50]
 
         settings.setValue("project_builder/experiment_history", history)
-
-    def _on_master_list_double_click(self, row, column):
-        """Handle double-click on master list row - open file for analysis."""
-        if row >= len(self._master_file_list):
-            return
-
-        task = self._master_file_list[row]
-        file_path = task.get('file_path')
-
-        if file_path and Path(file_path).exists():
-            print(f"[master-list] Opening file for analysis: {file_path}")
-            # Track which row is being analyzed
-            self._active_master_list_row = row
-
-            # Store pending channel selections from Project Builder
-            # These will be used after file loads to override auto-detection
-            self._pending_analysis_channel = task.get('channel', '')
-            self._pending_stim_channels = task.get('stim_channels', [])
-
-            # Log what we're planning to select
-            if self._pending_analysis_channel or self._pending_stim_channels:
-                print(f"[master-list] Pre-selecting: analysis={self._pending_analysis_channel}, stim={self._pending_stim_channels}")
-
-            self.load_file(Path(file_path))
-            # Switch to Analysis tab
-            if hasattr(self, 'mainTabWidget'):
-                self.mainTabWidget.setCurrentIndex(0)  # Analysis tab
 
     def mark_active_analysis_complete(self, channel_used: str = None, stim_channel_used: str = None,
                                        events_channel_used: str = None, export_info: dict = None):
@@ -5892,11 +7569,49 @@ class MainWindow(QMainWindow):
                     )
                     print(f"[master-list]   - Moved existing {existing_channel} to sub-row")
 
-            # Create sub-row for the new analysis
-            self._create_sub_row_from_analysis(
-                row, channel_used, stim_channel_used, events_channel_used, export_info
-            )
-            print(f"[master-list]   - Created sub-row for {channel_used}")
+            # Check if there's already a sub-row for the channel we're analyzing
+            existing_subrow_idx = None
+            for idx, t in enumerate(self._master_file_list):
+                if (t.get('is_sub_row') and
+                    str(t.get('file_path')) == str(task.get('file_path')) and
+                    t.get('channel') == channel_used):
+                    existing_subrow_idx = idx
+                    print(f"[master-list]   - Found existing sub-row at {idx} for {channel_used}")
+                    break
+
+            if existing_subrow_idx is not None:
+                # Update existing sub-row instead of creating new one
+                existing_task = self._master_file_list[existing_subrow_idx]
+                existing_task['status'] = 'completed'
+                if stim_channel_used:
+                    existing_task['stim_channel'] = stim_channel_used
+                if events_channel_used:
+                    existing_task['events_channel'] = events_channel_used
+                if export_info:
+                    existing_task['export_path'] = export_info.get('export_path', '')
+                    existing_task['export_date'] = export_info.get('export_date', '')
+                    existing_task['export_version'] = export_info.get('export_version', '')
+                    existing_task['exports'] = export_info.get('exports', existing_task.get('exports', {}))
+                    if export_info.get('strain'):
+                        existing_task['strain'] = export_info['strain']
+                    if export_info.get('stim_type'):
+                        existing_task['stim_type'] = export_info['stim_type']
+                    if export_info.get('power'):
+                        existing_task['power'] = export_info['power']
+                    if export_info.get('sex'):
+                        existing_task['sex'] = export_info['sex']
+                    if export_info.get('animal_id'):
+                        existing_task['animal_id'] = export_info['animal_id']
+                # Update the model
+                if existing_subrow_idx < self._file_table_model.rowCount():
+                    self._file_table_model.update_row(existing_subrow_idx, existing_task)
+                print(f"[master-list]   - Updated existing sub-row for {channel_used}")
+            else:
+                # Create new sub-row for the new analysis
+                self._create_sub_row_from_analysis(
+                    row, channel_used, stim_channel_used, events_channel_used, export_info
+                )
+                print(f"[master-list]   - Created sub-row for {channel_used}")
 
             # Apply styling to update colors and clean parent
             self._apply_all_row_styling()
@@ -5932,86 +7647,9 @@ class MainWindow(QMainWindow):
             if export_info.get('animal_id'):
                 task['animal_id'] = export_info['animal_id']
 
-        # Update the table display
-        table = self.discoveredFilesTable
-        if row < table.rowCount():
-            from PyQt6.QtWidgets import QTableWidgetItem
-
-            # Status column (14) - show completed icon
-            status_item = table.item(row, 14)
-            if status_item:
-                status_item.setText('●')  # Filled circle for completed
-            else:
-                table.setItem(row, 14, QTableWidgetItem('●'))
-
-            # Channel column (6)
-            if channel_used:
-                channel_item = table.item(row, 6)
-                if channel_item:
-                    channel_item.setText(channel_used)
-                else:
-                    table.setItem(row, 6, QTableWidgetItem(channel_used))
-
-            # Stim Ch column (7)
-            if stim_channel_used:
-                stim_item = table.item(row, 7)
-                if stim_item:
-                    stim_item.setText(stim_channel_used)
-                else:
-                    table.setItem(row, 7, QTableWidgetItem(stim_channel_used))
-
-            # Events Ch column (8)
-            if events_channel_used:
-                events_item = table.item(row, 8)
-                if events_item:
-                    events_item.setText(events_channel_used)
-                else:
-                    table.setItem(row, 8, QTableWidgetItem(events_channel_used))
-
-            # Metadata columns (update if provided and currently empty)
-            if export_info:
-                # Strain column (9)
-                if export_info.get('strain'):
-                    strain_item = table.item(row, 9)
-                    if strain_item:
-                        strain_item.setText(export_info['strain'])
-                    else:
-                        table.setItem(row, 9, QTableWidgetItem(export_info['strain']))
-
-                # Stim Type column (10)
-                if export_info.get('stim_type'):
-                    stim_type_item = table.item(row, 10)
-                    if stim_type_item:
-                        stim_type_item.setText(export_info['stim_type'])
-                    else:
-                        table.setItem(row, 10, QTableWidgetItem(export_info['stim_type']))
-
-                # Power column (11)
-                if export_info.get('power'):
-                    power_item = table.item(row, 11)
-                    if power_item:
-                        power_item.setText(export_info['power'])
-                    else:
-                        table.setItem(row, 11, QTableWidgetItem(export_info['power']))
-
-                # Sex column (12)
-                if export_info.get('sex'):
-                    sex_item = table.item(row, 12)
-                    if sex_item:
-                        sex_item.setText(export_info['sex'])
-                    else:
-                        table.setItem(row, 12, QTableWidgetItem(export_info['sex']))
-
-                # Animal ID column (13)
-                if export_info.get('animal_id'):
-                    animal_item = table.item(row, 13)
-                    if animal_item:
-                        animal_item.setText(export_info['animal_id'])
-                    else:
-                        table.setItem(row, 13, QTableWidgetItem(export_info['animal_id']))
-
-            # Exports column (16) - update with summary and tooltip
-            table.setItem(row, 16, self._create_exports_table_item(task))
+        # Update the model to refresh the table display
+        if row < self._file_table_model.rowCount():
+            self._file_table_model.update_row(row, task)
 
         print(f"[master-list] Marked row {row} as completed:")
         print(f"  - Channel: {channel_used}")
@@ -6042,13 +7680,10 @@ class MainWindow(QMainWindow):
             events_channel_used: The events channel used
             export_info: Export metadata dict from save dialog
         """
-        from PyQt6.QtWidgets import QTableWidgetItem
-
         if source_row >= len(self._master_file_list):
             return
 
         source_task = self._master_file_list[source_row]
-        table = self.discoveredFilesTable
         file_path = source_task.get('file_path')
 
         # Create new task based on source but with new channel and analysis info
@@ -6094,50 +7729,21 @@ class MainWindow(QMainWindow):
         insert_row = source_row + 1
         self._master_file_list.insert(insert_row, new_task)
 
-        # Block signals while inserting
-        table.blockSignals(True)
-
-        # Insert table row with 16-column structure
-        table.insertRow(insert_row)
-        table.setItem(insert_row, 0, QTableWidgetItem(f"  ↳ {channel_used}"))  # Show channel, not filename
-        table.setItem(insert_row, 1, QTableWidgetItem(''))  # Leave protocol empty on sub-rows
-        table.setItem(insert_row, 2, QTableWidgetItem(''))  # Leave channel count empty on sub-rows
-        table.setItem(insert_row, 3, QTableWidgetItem(''))  # Leave sweep count empty on sub-rows
-        table.setItem(insert_row, 4, QTableWidgetItem(''))  # Leave keywords empty on sub-rows
-        table.setItem(insert_row, 5, QTableWidgetItem(channel_used))  # Channel
-        table.setItem(insert_row, 6, QTableWidgetItem(stim_channel_used or ''))  # Stim Ch
-        table.setItem(insert_row, 7, QTableWidgetItem(events_channel_used or ''))  # Events Ch
-        table.setItem(insert_row, 8, QTableWidgetItem(new_task['strain']))
-        table.setItem(insert_row, 9, QTableWidgetItem(new_task['stim_type']))
-        table.setItem(insert_row, 10, QTableWidgetItem(new_task['power']))
-        table.setItem(insert_row, 11, QTableWidgetItem(new_task['sex']))
-        table.setItem(insert_row, 12, QTableWidgetItem(new_task['animal_id']))
-        table.setItem(insert_row, 13, QTableWidgetItem('●'))  # Status - completed
-        # Add action buttons
-        self._add_sub_row_action_buttons(insert_row)
-        # Column 15: Exports
-        table.setItem(insert_row, 15, self._create_exports_table_item(new_task))
-
-        table.blockSignals(False)
-
-        # Apply sub-row styling
-        self._apply_row_styling(insert_row, is_sub_row=True)
+        # Rebuild table from master list
+        self._rebuild_table_from_master_list()
 
         print(f"[master-list] Created new sub-row at {insert_row} for channel {channel_used}")
         print(f"  - This preserves the previous analysis of {source_task.get('channel', 'unknown')} in row {source_row}")
 
-    def _update_task_with_export_info(self, task: dict, info: dict, row: int, table):
+    def _update_task_with_export_info(self, task: dict, info: dict, row: int):
         """
-        Update a task dict and its table row with export info from saved data scan.
+        Update a task dict with export info from saved data scan.
 
         Args:
             task: The task dict from _master_file_list
             info: Export info dict from NPZ metadata
             row: Table row index
-            table: The QTableWidget
         """
-        from PyQt6.QtWidgets import QTableWidgetItem
-
         # Track conflicts and multiple files
         conflicts = []
         older_files = info.get('older_npz_files', [])
@@ -6198,59 +7804,19 @@ class MainWindow(QMainWindow):
         if info.get('events_channel') and not task.get('events_channel'):
             task['events_channel'] = info['events_channel']
 
-        # Update table row
-        if row < table.rowCount():
-            # Status column - show warning if conflicts or multiple NPZ files
-            warnings = task.get('scan_warnings', {})
-            has_conflicts = bool(warnings.get('conflicts'))
-            has_older_files = warnings.get('older_npz_count', 0) > 0
-
-            if has_conflicts or has_older_files:
-                # Show warning indicator
-                status_text = '●⚠' if has_conflicts else '●📁'
-                status_item = QTableWidgetItem(status_text)
-                # Build tooltip
-                tooltip_parts = []
-                if has_conflicts:
-                    tooltip_parts.append("⚠ Data conflicts (table vs NPZ):")
-                    for c in warnings['conflicts']:
-                        tooltip_parts.append(f"  • {c}")
-                if has_older_files:
-                    count = warnings['older_npz_count']
-                    tooltip_parts.append(f"📁 {count} older NPZ file(s) found:")
-                    for older in warnings.get('older_npz_files', [])[:3]:  # Show first 3
-                        tooltip_parts.append(f"  • {Path(older['file']).name} ({older['date']})")
-                    if count > 3:
-                        tooltip_parts.append(f"  • ... and {count - 3} more")
-                status_item.setToolTip('\n'.join(tooltip_parts))
-                table.setItem(row, 13, status_item)
-            else:
-                table.setItem(row, 13, QTableWidgetItem('●'))  # Status completed, no warnings
-
-            table.setItem(row, 15, self._create_exports_table_item(task))
-
-            # Update channel columns from NPZ if available
-            if task.get('stim_channel'):
-                table.setItem(row, 6, QTableWidgetItem(task['stim_channel']))
-            if task.get('events_channel'):
-                table.setItem(row, 7, QTableWidgetItem(task['events_channel']))
-
-            # Update metadata columns from NPZ if available
-            if task.get('strain'):
-                table.setItem(row, 8, QTableWidgetItem(task['strain']))
-            if task.get('stim_type'):
-                table.setItem(row, 9, QTableWidgetItem(task['stim_type']))
-            if task.get('power'):
-                table.setItem(row, 10, QTableWidgetItem(task['power']))
-            if task.get('sex'):
-                table.setItem(row, 11, QTableWidgetItem(task['sex']))
-            if task.get('animal_id'):
-                table.setItem(row, 12, QTableWidgetItem(task['animal_id']))
+        # Update model row - the model will handle display
+        if row < self._file_table_model.rowCount():
+            self._file_table_model.update_row(row, task)
+            # Mark conflict rows for highlighting
+            if task.get('scan_warnings', {}).get('conflicts'):
+                self._file_table_model.add_conflict_row(row)
 
     def _create_sub_row_from_saved_data(self, source_task: dict, source_row: int,
                                          channel: str, info: dict):
         """
         Create a new sub-row from scanned saved data for an additional channel.
+
+        Updates _master_file_list only - caller should rebuild table after all updates.
 
         Args:
             source_task: The source task dict to base the new row on
@@ -6258,9 +7824,6 @@ class MainWindow(QMainWindow):
             channel: The channel for this saved data
             info: Export info dict from NPZ metadata
         """
-        from PyQt6.QtWidgets import QTableWidgetItem
-
-        table = self.discoveredFilesTable
         file_path = source_task.get('file_path')
 
         # Track any older/duplicate NPZ files found
@@ -6323,49 +7886,6 @@ class MainWindow(QMainWindow):
 
         self._master_file_list.insert(insert_row, new_task)
 
-        # Block signals while inserting
-        table.blockSignals(True)
-
-        # Insert table row with 16-column structure
-        table.insertRow(insert_row)
-        table.setItem(insert_row, 0, QTableWidgetItem(f"  ↳ {channel}"))  # Show channel, not filename
-        table.setItem(insert_row, 1, QTableWidgetItem(''))  # Leave protocol empty on sub-rows
-        table.setItem(insert_row, 2, QTableWidgetItem(''))  # Leave channel count empty on sub-rows
-        table.setItem(insert_row, 3, QTableWidgetItem(''))  # Leave sweep count empty on sub-rows
-        table.setItem(insert_row, 4, QTableWidgetItem(''))  # Leave keywords empty on sub-rows
-        table.setItem(insert_row, 5, QTableWidgetItem(channel))  # Channel
-        table.setItem(insert_row, 6, QTableWidgetItem(new_task['stim_channel']))  # Stim Ch
-        table.setItem(insert_row, 7, QTableWidgetItem(new_task['events_channel']))  # Events Ch
-        table.setItem(insert_row, 8, QTableWidgetItem(new_task['strain']))
-        table.setItem(insert_row, 9, QTableWidgetItem(new_task['stim_type']))
-        table.setItem(insert_row, 10, QTableWidgetItem(new_task['power']))
-        table.setItem(insert_row, 11, QTableWidgetItem(new_task['sex']))
-        table.setItem(insert_row, 12, QTableWidgetItem(new_task['animal_id']))
-
-        # Status column - show warning if multiple NPZ files found
-        if scan_warnings and scan_warnings.get('older_npz_count', 0) > 0:
-            status_item = QTableWidgetItem('●📁')
-            count = scan_warnings['older_npz_count']
-            tooltip_parts = [f"📁 {count} older NPZ file(s) found:"]
-            for older in scan_warnings.get('older_npz_files', [])[:3]:
-                tooltip_parts.append(f"  • {Path(older['file']).name} ({older['date']})")
-            if count > 3:
-                tooltip_parts.append(f"  • ... and {count - 3} more")
-            status_item.setToolTip('\n'.join(tooltip_parts))
-            table.setItem(insert_row, 13, status_item)
-        else:
-            table.setItem(insert_row, 13, QTableWidgetItem('●'))  # Status - completed
-
-        # Add action buttons
-        self._add_sub_row_action_buttons(insert_row)
-        # Column 15: Exports
-        table.setItem(insert_row, 15, self._create_exports_table_item(new_task))
-
-        table.blockSignals(False)
-
-        # Apply sub-row styling
-        self._apply_row_styling(insert_row, is_sub_row=True)
-
         print(f"[scan-saved] Created sub-row at {insert_row} for channel {channel}")
 
     def eventFilter(self, obj, event):
@@ -6390,188 +7910,95 @@ class MainWindow(QMainWindow):
 
     def _auto_fit_table_columns(self):
         """
-        Auto-fit column widths intelligently:
-        - Minimum width = header text width
-        - Expand to fit content if needed
-        - Constrain total width to visible area (unless full-content mode enabled)
-        - Expandable columns (File Name, Protocol, Keywords, Exports) get extra space
+        Auto-fit column widths for QTableView.
+        Uses column definitions from the model for sizing hints.
         """
         table = self.discoveredFilesTable
         header = table.horizontalHeader()
+        model = self._file_table_model
+
+        if model.columnCount() == 0:
+            return
 
         # Check if full content mode is enabled
         full_content_mode = getattr(self, 'tableFullContentCheckbox', None)
         full_content_mode = full_content_mode.isChecked() if full_content_mode else False
 
-        # Get header text widths (minimum for each column)
-        font_metrics = table.fontMetrics()
-        header_widths = {}
-        for col in range(table.columnCount()):
-            header_item = table.horizontalHeaderItem(col)
-            if header_item:
-                text = header_item.text()
-                # Add some padding for header
-                header_widths[col] = font_metrics.horizontalAdvance(text) + 16
-            else:
-                header_widths[col] = 30  # Default for empty headers
+        # Get column definitions from model
+        visible_columns = model.get_visible_columns()
 
-        # Get content widths by temporarily resizing to contents
+        # First, resize to contents to get content-based widths
         table.resizeColumnsToContents()
-        content_widths = {}
-        for col in range(table.columnCount()):
-            content_widths[col] = table.columnWidth(col)
-
-        # Columns that can expand to fill space (in priority order)
-        expandable_cols = [0, 5, 4, 1, 16]  # File Name, Experiment, Keywords, Protocol, Exports
-
-        # Fixed columns with specific widths (buttons need room)
-        fixed_col_widths = {15: 85}  # Actions button column
 
         if full_content_mode:
             # Full content mode: show all content, enable horizontal scrolling
             table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            for col in range(table.columnCount()):
-                if col in fixed_col_widths:
-                    # Fixed columns always use their specified width
-                    width = fixed_col_widths[col]
-                else:
-                    # Use max of header width and content width
-                    width = max(header_widths.get(col, 30), content_widths.get(col, 30))
-                table.setColumnWidth(col, width)
+            # Just use content widths, but ensure minimum widths from column defs
+            for i, col_def in enumerate(visible_columns):
+                current_width = table.columnWidth(i)
+                min_width = col_def.min_width
+                if current_width < min_width:
+                    table.setColumnWidth(i, min_width)
         else:
             # Fit-to-view mode: constrain to visible width
             table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-            # Get available width (viewport width minus scrollbar and margins)
+            # Get available width
             available_width = table.viewport().width()
             if available_width < 100:
-                # Fallback if viewport not ready
                 available_width = table.width() - 20
 
-            # Calculate base widths (max of header and content, but reasonable)
-            base_widths = {}
-            for col in range(table.columnCount()):
-                header_w = header_widths.get(col, 30)
-                content_w = content_widths.get(col, 30)
+            # Calculate column widths based on column definitions
+            widths = []
+            expandable_indices = []
+            total_fixed = 0
 
-                if col in fixed_col_widths:
-                    # Fixed columns: use specified width
-                    base_widths[col] = fixed_col_widths[col]
-                elif col in expandable_cols:
-                    # Expandable: use header as minimum, allow content to expand
-                    base_widths[col] = max(header_w, min(content_w, header_w + 50))
+            for i, col_def in enumerate(visible_columns):
+                content_width = table.columnWidth(i)
+                base_width = max(col_def.min_width, min(content_width, col_def.width + 30))
+
+                if col_def.fixed:
+                    # Fixed columns use their defined width
+                    widths.append(col_def.width)
+                    total_fixed += col_def.width
+                elif col_def.expandable:
+                    widths.append(base_width)
+                    expandable_indices.append(i)
                 else:
-                    # Regular columns: use header width unless content is slightly larger
-                    base_widths[col] = max(header_w, min(content_w, header_w + 20))
+                    widths.append(base_width)
 
-            # Calculate total base width
-            total_base = sum(base_widths.values())
+            total_width = sum(widths)
 
-            if total_base <= available_width:
-                # We have extra space - distribute to expandable columns
-                extra_space = available_width - total_base
+            # Distribute extra space or shrink as needed
+            if total_width < available_width and expandable_indices:
+                # Distribute extra space to expandable columns
+                extra = available_width - total_width
+                per_col = extra // len(expandable_indices)
+                for idx in expandable_indices:
+                    widths[idx] += per_col
+            elif total_width > available_width:
+                # Shrink proportionally, but respect minimums
+                scale = available_width / total_width
+                for i, col_def in enumerate(visible_columns):
+                    if not col_def.fixed:
+                        widths[i] = max(col_def.min_width, int(widths[i] * scale))
 
-                # Calculate how much each expandable column wants
-                expandable_wants = {}
-                for col in expandable_cols:
-                    content_w = content_widths.get(col, 30)
-                    current_w = base_widths.get(col, 30)
-                    want = max(0, content_w - current_w)
-                    expandable_wants[col] = want
-
-                total_want = sum(expandable_wants.values())
-
-                if total_want > 0 and extra_space > 0:
-                    # Distribute extra space proportionally to what columns want
-                    for col in expandable_cols:
-                        if expandable_wants[col] > 0:
-                            share = min(expandable_wants[col],
-                                       extra_space * expandable_wants[col] / total_want)
-                            base_widths[col] += int(share)
-
-                # Apply widths
-                for col in range(table.columnCount()):
-                    table.setColumnWidth(col, base_widths[col])
-            else:
-                # Need to shrink - reduce expandable columns first
-                overflow = total_base - available_width
-
-                # Try to take from expandable columns proportionally
-                expandable_excess = {}
-                for col in expandable_cols:
-                    header_w = header_widths.get(col, 30)
-                    current_w = base_widths.get(col, 30)
-                    excess = max(0, current_w - header_w)
-                    expandable_excess[col] = excess
-
-                total_excess = sum(expandable_excess.values())
-
-                if total_excess >= overflow:
-                    # Can shrink expandable columns enough
-                    for col in expandable_cols:
-                        if expandable_excess[col] > 0:
-                            reduction = int(overflow * expandable_excess[col] / total_excess)
-                            base_widths[col] -= reduction
-                else:
-                    # Need to shrink all columns proportionally
-                    scale = available_width / total_base
-                    for col in range(table.columnCount()):
-                        header_w = header_widths.get(col, 30)
-                        new_w = max(header_w, int(base_widths[col] * scale))
-                        base_widths[col] = new_w
-
-                # Apply widths
-                for col in range(table.columnCount()):
-                    table.setColumnWidth(col, base_widths[col])
+            # Apply widths
+            for i, width in enumerate(widths):
+                table.setColumnWidth(i, width)
 
     def _apply_row_styling(self, row: int, is_sub_row: bool = False):
-        """Apply visual styling to a table row based on whether it's a parent or sub-row."""
-        from PyQt6.QtGui import QColor, QBrush, QFont
-        from PyQt6.QtCore import Qt
-
-        table = self.discoveredFilesTable
-        if row >= table.rowCount():
-            return
-
-        if is_sub_row:
-            # Sub-rows: lighter background, normal weight text
-            bg_color = QColor(50, 55, 60)  # Slightly lighter than parent
-            text_color = QColor(200, 200, 200)  # Slightly muted text
-            font_bold = False
-        else:
-            # Parent rows: darker background, BOLD text
-            bg_color = QColor(35, 40, 45)  # Default dark theme background
-            text_color = QColor(255, 255, 255)  # White text
-            font_bold = True
-
-        # Apply to all cells in the row
-        for col in range(table.columnCount()):
-            item = table.item(row, col)
-            if item:
-                item.setBackground(QBrush(bg_color))
-                item.setForeground(QBrush(text_color))
-                # Set font weight
-                font = item.font()
-                font.setBold(font_bold)
-                item.setFont(font)
+        """Apply visual styling - now handled by model via data() method."""
+        # Styling is handled by FileTableModel.data() for BackgroundRole, ForegroundRole, FontRole
+        pass
 
     def _apply_all_row_styling(self):
-        """Apply styling to all rows based on whether they are parent or sub-rows."""
-        table = self.discoveredFilesTable
-        for row in range(table.rowCount()):
-            if row < len(self._master_file_list):
-                is_sub = self._master_file_list[row].get('is_sub_row', False)
-                self._apply_row_styling(row, is_sub_row=is_sub)
-
-        # Also clean parent rows that have sub-rows
+        """Apply styling to all rows - cleans parent rows that have sub-rows."""
+        # Styling is now handled by the model, but we still need to clean task dicts
         self._clean_parent_rows_with_subrows()
 
     def _clean_parent_rows_with_subrows(self):
-        """Clear channel-specific columns from parent rows that have sub-rows."""
-        from PyQt6.QtWidgets import QTableWidgetItem
-
-        table = self.discoveredFilesTable
-
+        """Clear channel-specific fields from parent tasks that have sub-rows."""
         # Find parent rows that have sub-rows
         parent_to_subrows = {}  # parent_file_path -> [sub_row_indices]
 
@@ -6582,7 +8009,7 @@ class MainWindow(QMainWindow):
                     parent_to_subrows[parent_path] = []
                 parent_to_subrows[parent_path].append(row)
 
-        # Find parent row for each file that has sub-rows
+        # Clear fields in parent tasks that have sub-rows
         for row, task in enumerate(self._master_file_list):
             if task.get('is_sub_row'):
                 continue
@@ -6590,33 +8017,17 @@ class MainWindow(QMainWindow):
             file_path = str(task.get('file_path', ''))
             if file_path in parent_to_subrows:
                 sub_rows = parent_to_subrows[file_path]
-                num_analyzed = len(sub_rows)
 
-                # Clear channel-specific columns from parent row
-                # Columns: 5-Channel, 6-Stim Ch, 7-Events Ch, 12-Animal ID
-                # Note: Column 4 (Keywords) is parent-level info, don't clear
-                if row < table.rowCount():
-                    table.setItem(row, 5, QTableWidgetItem(''))   # Channel
-                    table.setItem(row, 6, QTableWidgetItem(''))   # Stim Ch
-                    table.setItem(row, 7, QTableWidgetItem(''))   # Events Ch
-                    table.setItem(row, 12, QTableWidgetItem(''))  # Animal ID
+                # Count completed sub-rows for status display
+                completed = sum(1 for sr in sub_rows
+                                if self._master_file_list[sr].get('status') == 'completed')
 
-                    # Show aggregate status in Status column (13)
-                    # Count completed sub-rows
-                    completed = sum(1 for sr in sub_rows
-                                    if self._master_file_list[sr].get('status') == 'completed')
-                    status_text = f"{completed} ✓" if completed > 0 else ''
-                    table.setItem(row, 13, QTableWidgetItem(status_text))
-
-                    # Clear Exports column (15) for parent - exports are per-channel
-                    table.setItem(row, 15, QTableWidgetItem(''))
-
-                # Also clear these fields in the task dict
+                # Clear channel-specific fields in the task dict
                 task['channel'] = ''
                 task['stim_channel'] = ''
                 task['events_channel'] = ''
                 task['animal_id'] = ''
-                task['status'] = ''  # Parent doesn't have a single status
+                task['status'] = f"{completed} ✓" if completed > 0 else ''
                 task['exports'] = {}
 
     def _add_row_action_button(self, row):
@@ -6697,20 +8108,15 @@ class MainWindow(QMainWindow):
         # Load the file
         self.load_file(Path(file_path))
 
-        # Switch to Analysis tab
-        if hasattr(self, 'mainTabWidget'):
-            self.mainTabWidget.setCurrentIndex(0)
+        # Switch to Analysis tab (Tab 0 = Project Builder, Tab 1 = Analysis)
+        if hasattr(self, 'Tabs'):
+            self.Tabs.setCurrentIndex(1)
 
         # Update status to "in progress"
         task['status'] = 'in_progress'
-        table = self.discoveredFilesTable
-        if row < table.rowCount():
-            status_item = table.item(row, 14)
-            if status_item:
-                status_item.setText('◐')  # Half-filled circle for in-progress
-            else:
-                from PyQt6.QtWidgets import QTableWidgetItem
-                table.setItem(row, 14, QTableWidgetItem('◐'))
+        # Update the model row to reflect the new status
+        if row < self._file_table_model.rowCount():
+            self._file_table_model.update_row(row, task)
 
     def _on_add_row_for_file(self, source_row, force_override=False):
         """Add a new row for the same file (for multi-channel/multi-animal analysis)."""
@@ -6718,7 +8124,6 @@ class MainWindow(QMainWindow):
             return
 
         source_task = self._master_file_list[source_row]
-        table = self.discoveredFilesTable
         file_path = source_task.get('file_path')
 
         # Find the parent task (may be source_task or a different row)
@@ -6817,7 +8222,7 @@ class MainWindow(QMainWindow):
             'channel_count': total_channels,
             'sweep_count': parent_task.get('sweep_count', 0),
             'channel_names': channel_names,
-            'stim_channels': stim_channels,
+            'stim_channels': list(all_stim_channels),
             'path_keywords': parent_task.get('path_keywords', {}),
             'keywords_display': parent_task.get('keywords_display', ''),
             # Auto-populated channel
@@ -6852,35 +8257,14 @@ class MainWindow(QMainWindow):
         insert_row = source_row + 1
         self._master_file_list.insert(insert_row, new_task)
 
-        # Block signals while inserting
-        table.blockSignals(True)
+        # Rebuild table from master list (model handles all formatting)
+        self._rebuild_table_from_master_list()
 
-        # Insert table row with sub-row format (channel in col 0, not filename)
-        table.insertRow(insert_row)
-        table.setItem(insert_row, 0, QTableWidgetItem(f"  ↳ {next_channel}"))  # Show channel, not filename
-        table.setItem(insert_row, 1, QTableWidgetItem(''))  # Leave protocol empty on sub-rows
-        table.setItem(insert_row, 2, QTableWidgetItem(''))  # Leave channel count empty on sub-rows
-        table.setItem(insert_row, 3, QTableWidgetItem(''))  # Leave sweep count empty on sub-rows
-        table.setItem(insert_row, 4, QTableWidgetItem(''))  # Leave keywords empty on sub-rows
-        table.setItem(insert_row, 5, QTableWidgetItem(next_channel))  # Auto-populated channel
-        table.setItem(insert_row, 6, QTableWidgetItem(''))  # Stim Ch - filled on save
-        table.setItem(insert_row, 7, QTableWidgetItem(''))  # Events Ch - filled on save
-        table.setItem(insert_row, 8, QTableWidgetItem(new_task['strain']))
-        table.setItem(insert_row, 9, QTableWidgetItem(new_task['stim_type']))
-        table.setItem(insert_row, 10, QTableWidgetItem(new_task['power']))
-        table.setItem(insert_row, 11, QTableWidgetItem(new_task['sex']))
-        table.setItem(insert_row, 12, QTableWidgetItem(''))  # Animal ID - different
-        table.setItem(insert_row, 13, QTableWidgetItem('○'))  # Status
-
-        # Add action buttons (with remove option for sub-rows)
-        self._add_sub_row_action_buttons(insert_row)
-        # Column 15: Exports (empty initially)
-        table.setItem(insert_row, 15, self._create_exports_table_item(new_task))
-
-        table.blockSignals(False)
-
-        remaining = available_analysis_channels - len(existing_rows) - 1
+        remaining = available_analysis_channels - len(existing_subrows) - 1
         print(f"[master-list] Added sub-row at {insert_row} with channel {next_channel} ({remaining} more available)")
+
+        # Autosave after adding row
+        self._project_autosave()
 
     def _add_sub_row_action_buttons(self, row):
         """Add action buttons for sub-rows (Analyze, + and - buttons)."""
@@ -7093,7 +8477,112 @@ class MainWindow(QMainWindow):
             clear_action.triggered.connect(lambda: self._clear_scan_warnings(rows_with_warnings))
             conflict_menu.addAction(clear_action)
 
+        # Export options
+        menu.addSeparator()
+        export_menu = menu.addMenu("Export Table")
+
+        export_selected_action = QAction(f"Export {len(selected_rows)} selected rows to CSV...", self)
+        export_selected_action.triggered.connect(lambda: self._export_table_to_csv(selected_rows))
+        export_menu.addAction(export_selected_action)
+
+        export_all_action = QAction("Export all rows to CSV...", self)
+        export_all_action.triggered.connect(lambda: self._export_table_to_csv(None))
+        export_menu.addAction(export_all_action)
+
         menu.exec(table.viewport().mapToGlobal(position))
+
+    def _export_table_to_csv(self, selected_rows=None):
+        """Export table data to CSV file.
+
+        Args:
+            selected_rows: Set of row indices to export, or None for all rows
+        """
+        import csv
+        from PyQt6.QtWidgets import QFileDialog
+
+        # Determine which rows to export
+        if selected_rows is None:
+            rows_to_export = list(range(len(self._master_file_list)))
+        else:
+            rows_to_export = sorted(selected_rows)
+
+        if not rows_to_export:
+            self._show_warning("No Data", "No rows to export.")
+            return
+
+        # Get visible columns
+        visible_cols = self._file_table_model.get_visible_columns()
+
+        # Build header row (skip actions column)
+        headers = []
+        col_keys = []
+        for col_def in visible_cols:
+            if col_def.key != 'actions':
+                headers.append(col_def.header or col_def.key)
+                col_keys.append(col_def.key)
+
+        # Get save file path
+        default_name = f"{getattr(self, '_current_project_name', None) or 'project'}_table.csv"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Table to CSV",
+            str(Path(self._project_directory) / default_name) if self._project_directory else default_name,
+            "CSV files (*.csv);;All files (*.*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+
+                # Write header
+                writer.writerow(headers)
+
+                # Write data rows
+                for row_idx in rows_to_export:
+                    if row_idx >= len(self._master_file_list):
+                        continue
+                    task = self._master_file_list[row_idx]
+
+                    row_data = []
+                    for key in col_keys:
+                        value = task.get(key, '')
+
+                        # Format special values
+                        if key == 'file_name' and task.get('is_sub_row'):
+                            channel = task.get('channel', '')
+                            value = f"↳ {channel}"
+                        elif key == 'exports' and isinstance(value, dict):
+                            # Format exports dict
+                            parts = []
+                            csv_count = sum([
+                                1 if value.get('timeseries_csv') else 0,
+                                1 if value.get('breaths_csv') else 0,
+                                1 if value.get('events_csv') else 0,
+                            ])
+                            if value.get('pdf'):
+                                parts.append('PDF')
+                            if csv_count > 0:
+                                parts.append(f'{csv_count} CSV')
+                            if value.get('npz'):
+                                parts.append('NPZ')
+                            if value.get('session_state'):
+                                parts.append('Session')
+                            value = ', '.join(parts) if parts else ''
+                        elif key == 'file_path':
+                            value = str(value) if value else ''
+
+                        row_data.append(str(value) if value is not None else '')
+
+                    writer.writerow(row_data)
+
+            self._log_status_message(f"✓ Exported {len(rows_to_export)} rows to {Path(file_path).name}", 3000)
+            self._show_info("Export Complete", f"Exported {len(rows_to_export)} rows to:\n{file_path}")
+
+        except Exception as e:
+            self._show_error("Export Failed", f"Failed to export table:\n{e}")
+            print(f"[export] Error: {e}")
 
     def _bulk_set_column(self, rows, column, field_name, dialog_title, preset_value=None):
         """Set a column value for multiple rows at once.
@@ -7105,7 +8594,7 @@ class MainWindow(QMainWindow):
             dialog_title: Title for the input dialog
             preset_value: If provided, use this value without showing dialog
         """
-        from PyQt6.QtWidgets import QInputDialog, QTableWidgetItem
+        from PyQt6.QtWidgets import QInputDialog
 
         if preset_value is not None:
             value = preset_value
@@ -7129,20 +8618,13 @@ class MainWindow(QMainWindow):
             )
 
         if ok:
-            table = self.discoveredFilesTable
-            table.blockSignals(True)
-
             for row in rows:
                 if row < len(self._master_file_list):
-                    self._master_file_list[row][field_name] = value
-                if row < table.rowCount():
-                    item = table.item(row, column)
-                    if item:
-                        item.setText(value)
-                    else:
-                        table.setItem(row, column, QTableWidgetItem(value))
-
-            table.blockSignals(False)
+                    task = self._master_file_list[row]
+                    task[field_name] = value
+                    # Update the model row to reflect the change
+                    if row < self._file_table_model.rowCount():
+                        self._file_table_model.update_row(row, task)
 
             # Update experiment history if this is the experiment field
             if field_name == 'experiment' and value:
@@ -7152,11 +8634,6 @@ class MainWindow(QMainWindow):
 
     def _resolve_conflicts_use_npz(self, rows):
         """Resolve conflicts by overwriting table values with NPZ values."""
-        from PyQt6.QtWidgets import QTableWidgetItem
-
-        table = self.discoveredFilesTable
-        table.blockSignals(True)
-
         resolved_count = 0
         for row in rows:
             if row >= len(self._master_file_list):
@@ -7177,20 +8654,18 @@ class MainWindow(QMainWindow):
                     field_part = conflict.split(':')[0].strip()
                     npz_part = conflict.split("NPZ='")[1].split("'")[0]
 
-                    # Map display name to field and column
+                    # Map display name to field
                     field_map = {
-                        'Strain': ('strain', 8),
-                        'Stim Type': ('stim_type', 9),
-                        'Power': ('power', 10),
-                        'Sex': ('sex', 11),
-                        'Animal ID': ('animal_id', 12),
+                        'Strain': 'strain',
+                        'Stim Type': 'stim_type',
+                        'Power': 'power',
+                        'Sex': 'sex',
+                        'Animal ID': 'animal_id',
                     }
 
                     if field_part in field_map:
-                        field_name, column = field_map[field_part]
+                        field_name = field_map[field_part]
                         task[field_name] = npz_part
-                        if row < table.rowCount():
-                            table.setItem(row, column, QTableWidgetItem(npz_part))
                         print(f"[conflict-resolve] Row {row}: Set {field_name} = '{npz_part}' from NPZ")
                 except Exception as e:
                     print(f"[conflict-resolve] Error parsing conflict '{conflict}': {e}")
@@ -7199,10 +8674,9 @@ class MainWindow(QMainWindow):
             task.pop('scan_warnings', None)
             resolved_count += 1
 
-            # Update status icon
+            # Update the model row to reflect changes
             self._update_row_status_icon(row, task)
 
-        table.blockSignals(False)
         self._log_status_message(f"✓ Resolved conflicts for {resolved_count} rows (used NPZ values)", 3000)
         self._update_resolve_conflicts_button()
 
@@ -7304,47 +8778,16 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _update_row_status_icon(self, row, task):
-        """Update the status icon for a row based on its current state."""
-        from PyQt6.QtWidgets import QTableWidgetItem
+        """Update the status icon for a row based on its current state.
 
-        table = self.discoveredFilesTable
-        if row >= table.rowCount():
+        The model's data() method handles the actual status icon display.
+        This method just triggers a refresh of the row.
+        """
+        if row >= self._file_table_model.rowCount():
             return
 
-        is_sub_row = task.get('is_sub_row', False)
-        status = task.get('status', 'pending')
-        warnings = task.get('scan_warnings', {})
-        has_conflicts = bool(warnings.get('conflicts'))
-        has_older_files = warnings.get('older_npz_count', 0) > 0
-
-        if is_sub_row:
-            if status == 'completed':
-                if has_conflicts:
-                    status_icon = '●⚠'
-                elif has_older_files:
-                    status_icon = '●📁'
-                else:
-                    status_icon = '●'
-            elif status == 'in_progress':
-                status_icon = '◐'
-            else:
-                status_icon = '○'
-
-            status_item = QTableWidgetItem(status_icon)
-
-            # Add tooltip for warnings
-            if has_conflicts or has_older_files:
-                tooltip_parts = []
-                if has_conflicts:
-                    tooltip_parts.append("⚠ Data conflicts (table vs NPZ):")
-                    for c in warnings['conflicts']:
-                        tooltip_parts.append(f"  • {c}")
-                if has_older_files:
-                    count = warnings['older_npz_count']
-                    tooltip_parts.append(f"📁 {count} older NPZ file(s) found")
-                status_item.setToolTip('\n'.join(tooltip_parts))
-
-            table.setItem(row, 13, status_item)
+        # Update the model row to refresh the display
+        self._file_table_model.update_row(row, task)
 
     def _combine_selected_files(self, rows):
         """Combine selected files for multi-file analysis."""
@@ -7378,9 +8821,9 @@ class MainWindow(QMainWindow):
             # Load files using multi-file loader
             print(f"[master-list] Combining {len(file_paths)} files for analysis")
             self.load_multiple_files(file_paths)
-            # Switch to Analysis tab
-            if hasattr(self, 'mainTabWidget'):
-                self.mainTabWidget.setCurrentIndex(0)
+            # Switch to Analysis tab (Tab 0 = Project Builder, Tab 1 = Analysis)
+            if hasattr(self, 'Tabs'):
+                self.Tabs.setCurrentIndex(1)
 
     def on_project_browse_directory(self):
         """Browse for directory containing recordings."""
@@ -7421,6 +8864,9 @@ class MainWindow(QMainWindow):
 
             recursive = self.recursiveCheckBox.isChecked()
 
+            # Get selected file types from checkboxes
+            file_types = self._get_selected_file_types()
+
             # PHASE 1: Quick file discovery
             progress = QProgressDialog("Finding files...", "Cancel", 0, 0, self)
             progress.setWindowTitle("Scanning Directory")
@@ -7430,9 +8876,16 @@ class MainWindow(QMainWindow):
             progress.show()
             QApplication.processEvents()
 
-            files = project_builder.discover_files(self._project_directory, recursive=recursive)
+            files = project_builder.discover_files(
+                self._project_directory, recursive=recursive, file_types=file_types
+            )
             abf_files = files['abf_files']
-            excel_files = files['excel_files']
+            smrx_files = files.get('smrx_files', [])
+            edf_files = files.get('edf_files', [])
+            notes_files = files.get('notes_files', [])
+
+            # Combine all data files
+            all_data_files = abf_files + smrx_files + edf_files
 
             if progress.wasCanceled():
                 progress.close()
@@ -7441,6 +8894,11 @@ class MainWindow(QMainWindow):
                 return
 
             progress.close()
+
+            # Store notes files for AI integration (future use)
+            self._discovered_notes_files = notes_files
+            if notes_files:
+                print(f"[project-builder] Found {len(notes_files)} notes files")
 
             # PHASE 2: Build set of existing file paths to avoid duplicates
             # Use string paths for comparison (normalized)
@@ -7451,48 +8909,79 @@ class MainWindow(QMainWindow):
                     # Normalize path for comparison
                     existing_paths.add(str(Path(fp).resolve()))
 
-            # Find new files only
-            new_abf_files = []
-            for abf_path in abf_files:
-                normalized = str(abf_path.resolve())
+            # Find new files only (across all types)
+            new_data_files = []
+            for data_path in all_data_files:
+                normalized = str(data_path.resolve())
                 if normalized not in existing_paths:
-                    new_abf_files.append(abf_path)
+                    new_data_files.append(data_path)
 
-            if not new_abf_files:
-                self._log_status_message(f"No new files found ({len(abf_files)} files already in list)", 3000)
-                self.scanFilesButton.setEnabled(True)
+            if not new_data_files:
+                total_existing = len(all_data_files)
+
+                # Check if any existing files have incomplete metadata (need reloading)
+                files_needing_metadata = []
+                for i, task in enumerate(self._master_file_list):
+                    protocol = task.get('protocol', '')
+                    if protocol in ('Loading...', '', 'Unknown') or not protocol:
+                        file_path = task.get('file_path')
+                        if file_path:
+                            files_needing_metadata.append((i, Path(file_path)))
+
+                if files_needing_metadata:
+                    # Reload metadata for incomplete files
+                    self._log_status_message(f"Reloading metadata for {len(files_needing_metadata)} files...", 0)
+                    self._reload_incomplete_metadata(files_needing_metadata)
+                else:
+                    self._log_status_message(f"No new files found ({total_existing} files already in list)", 3000)
+                    self.scanFilesButton.setEnabled(True)
                 return
+
+            # Count by type for summary
+            new_abf = len([f for f in new_data_files if f.suffix.lower() == '.abf'])
+            new_smrx = len([f for f in new_data_files if f.suffix.lower() == '.smrx'])
+            new_edf = len([f for f in new_data_files if f.suffix.lower() == '.edf'])
 
             # Extract path keywords for each new file
             from core.fast_abf_reader import extract_path_keywords
 
-            table = self.discoveredFilesTable
-            start_row = table.rowCount()  # Insert after existing rows
+            # Track starting position for metadata loading offset
+            start_row = len(self._master_file_list)
             new_files_data = []
 
-            for i, abf_path in enumerate(new_abf_files):
-                file_size_mb = abf_path.stat().st_size / (1024 * 1024)
+            for i, data_path in enumerate(new_data_files):
+                # Note: file_size is obtained during metadata loading to avoid network I/O here
+                file_type = data_path.suffix.lower()[1:]  # 'abf', 'smrx', or 'edf'
 
                 # Extract keywords from path
-                path_info = extract_path_keywords(abf_path, Path(self._project_directory))
+                path_info = extract_path_keywords(data_path, Path(self._project_directory))
 
-                # Format keywords for display
+                # Format keywords for display - show relative path as the primary keyword
+                # This makes it easy to see where the file is located relative to the project
                 keywords_display = []
+
+                # Add relative path (the main keyword showing file location)
+                if path_info.get('relative_path'):
+                    keywords_display.append(path_info['relative_path'])
+                elif path_info['subdirs']:
+                    # Fallback to subdirs if relative_path not available
+                    keywords_display.append('/'.join(path_info['subdirs']))
+
+                # Also add power levels and animal IDs if detected
                 if path_info['power_levels']:
                     keywords_display.extend(path_info['power_levels'])
                 if path_info['animal_ids']:
                     keywords_display.extend([f"ID:{id}" for id in path_info['animal_ids']])
-                if path_info['keywords']:
-                    keywords_display.extend(path_info['keywords'])
 
                 # Auto-fill power and animal ID from path keywords
                 power_auto = path_info['power_levels'][0] if path_info['power_levels'] else ''
                 animal_id_auto = path_info['animal_ids'][0] if path_info['animal_ids'] else ''
 
                 file_info = {
-                    'file_path': abf_path,
-                    'file_name': abf_path.name,
-                    'protocol': '...',
+                    'file_path': data_path,
+                    'file_name': data_path.name,
+                    'file_type': file_type,  # Track file type
+                    'protocol': 'Loading...',
                     'channel_count': 0,
                     'sweep_count': 0,
                     'stim_channels': [],  # Detected stimulus channels (e.g., ['AD1', 'AD2'])
@@ -7526,41 +9015,30 @@ class MainWindow(QMainWindow):
                 new_files_data.append(file_info)
                 self._master_file_list.append(file_info)
 
-                # Insert new table row
-                row_idx = start_row + i
-                table.insertRow(row_idx)
-                table.setItem(row_idx, 0, QTableWidgetItem(file_info['file_name']))  # File Name
-                table.setItem(row_idx, 1, QTableWidgetItem('Loading...'))  # Protocol
-                table.setItem(row_idx, 2, QTableWidgetItem(''))  # Avail Ch (loaded later)
-                table.setItem(row_idx, 3, QTableWidgetItem(''))  # Sweeps (loaded later)
-                table.setItem(row_idx, 4, QTableWidgetItem(file_info['keywords_display']))  # Keywords
-                table.setItem(row_idx, 5, QTableWidgetItem(''))  # Channel (filled on save)
-                table.setItem(row_idx, 6, QTableWidgetItem(''))  # Stim Ch (filled on save)
-                table.setItem(row_idx, 7, QTableWidgetItem(''))  # Events Ch (filled on save)
-                table.setItem(row_idx, 8, QTableWidgetItem(''))  # Strain
-                table.setItem(row_idx, 9, QTableWidgetItem(''))  # Stim Type (auto-detected or manual)
-                table.setItem(row_idx, 10, QTableWidgetItem(power_auto))  # Power (auto-filled)
-                table.setItem(row_idx, 11, QTableWidgetItem(''))  # Sex
-                table.setItem(row_idx, 12, QTableWidgetItem(animal_id_auto))  # Animal ID (auto-filled)
-                table.setItem(row_idx, 13, QTableWidgetItem('○'))  # Status (pending)
-                # Column 14: Actions buttons
-                self._add_row_action_button(row_idx)
-                # Column 15: Exports (empty initially)
-                table.setItem(row_idx, 15, self._create_exports_table_item(file_info))
+            # Rebuild table from master list (model handles all rendering)
+            self._rebuild_table_from_master_list()
+            self._auto_fit_table_columns()
 
-            table.resizeColumnsToContents()
-
-            # Update summary - show total files in list
+            # Update summary - show total files by type
             total_files = len(self._master_file_list)
-            summary_text = f"Summary: {total_files} ABF files total | Added {len(new_abf_files)} new files | Loading protocols..."
+            type_counts = []
+            if new_abf:
+                type_counts.append(f"{new_abf} ABF")
+            if new_smrx:
+                type_counts.append(f"{new_smrx} SMRX")
+            if new_edf:
+                type_counts.append(f"{new_edf} EDF")
+            type_summary = ", ".join(type_counts) if type_counts else "0 files"
+
+            summary_text = f"Summary: {total_files} files total | Added {type_summary} | Loading metadata..."
             self.summaryLabel.setText(summary_text)
-            self._log_status_message(f"Added {len(new_abf_files)} new files, loading metadata...", 3000)
+            self._log_status_message(f"Added {len(new_data_files)} new files, loading metadata...", 3000)
 
             # Store reference to new files data for background metadata update
             self._discovered_files_data = new_files_data
 
             # PHASE 3: Load metadata in background thread (only for new files)
-            self._start_background_metadata_loading(new_abf_files, start_row_offset=start_row)
+            self._start_background_metadata_loading(new_data_files, start_row_offset=start_row)
 
         except Exception as e:
             if progress:
@@ -7571,11 +9049,11 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
-    def _start_background_metadata_loading(self, abf_files, start_row_offset=0):
+    def _start_background_metadata_loading(self, data_files, start_row_offset=0):
         """Start background thread to load metadata using parallel processing.
 
         Args:
-            abf_files: List of ABF file paths to load
+            data_files: List of data file paths to load (.abf, .smrx, .edf)
             start_row_offset: Row offset for updating table (for additive scans)
         """
         from PyQt6.QtCore import QThread, pyqtSignal
@@ -7585,7 +9063,7 @@ class MainWindow(QMainWindow):
 
         class MetadataThread(QThread):
             # Batch updates: send list of results instead of individual items
-            batch_progress = pyqtSignal(list, int)  # [(index, metadata), ...], total
+            batch_progress = pyqtSignal(list, int, int)  # [(index, metadata), ...], total, completed_so_far
             finished = pyqtSignal(set)  # protocols
 
             def __init__(self, files):
@@ -7594,29 +9072,39 @@ class MainWindow(QMainWindow):
                 self.should_stop = False
 
             def run(self):
-                from core.fast_abf_reader import read_abf_metadata_parallel
+                # Use generic metadata reader that handles all file types
+                from core.fast_abf_reader import read_metadata_parallel
                 protocols = set()
                 batch = []
                 batch_size = 25  # Update UI every 25 files to reduce signal traffic
+                completed_count = [0]  # Use list to allow modification in nested function
 
                 def callback(index, total, metadata):
                     if self.should_stop:
                         return
 
                     if metadata:
-                        protocols.add(metadata['protocol'])
+                        protocols.add(metadata.get('protocol', 'Unknown'))
 
                     # Collect results in batches
                     batch.append((index, metadata))
+                    completed_count[0] += 1
 
-                    # Emit batch when it reaches batch_size or at the end
-                    if len(batch) >= batch_size or index == total - 1:
-                        self.batch_progress.emit(batch[:], total)  # Send copy of batch
+                    # Emit batch when it reaches batch_size or ALL files are done
+                    # Note: index is original order, completed_count tracks actual progress
+                    if len(batch) >= batch_size or completed_count[0] == total:
+                        self.batch_progress.emit(batch[:], total, completed_count[0])
                         batch.clear()
 
                 try:
-                    # Use parallel processing with 4 workers
-                    read_abf_metadata_parallel(self.files, progress_callback=callback, max_workers=4)
+                    # Use parallel processing with 4 workers (handles ABF, SMRX, EDF)
+                    read_metadata_parallel(self.files, progress_callback=callback, max_workers=4)
+
+                    # Emit any remaining items in batch (safety check)
+                    if batch:
+                        self.batch_progress.emit(batch[:], len(self.files), completed_count[0])
+                        batch.clear()
+
                     self.finished.emit(protocols)
                 except Exception as e:
                     print(f"[project-builder] Error during parallel loading: {e}")
@@ -7627,18 +9115,16 @@ class MainWindow(QMainWindow):
         # Show progress bar
         self.projectProgressBar.setVisible(True)
         self.projectProgressBar.setValue(0)
-        self.projectProgressBar.setFormat(f"Loading metadata: 0/{len(abf_files)} (0%)")
+        self.projectProgressBar.setFormat(f"Loading metadata: 0/{len(data_files)} (0%)")
 
-        self._metadata_thread = MetadataThread(abf_files)
+        self._metadata_thread = MetadataThread(data_files)
         self._metadata_thread.batch_progress.connect(self._update_file_metadata_batch)
         self._metadata_thread.finished.connect(self._metadata_finished)
         self._metadata_thread.start()
-        print(f"[project-builder] Started background loading for {len(abf_files)} files (offset={start_row_offset})")
+        print(f"[project-builder] Started background loading for {len(data_files)} files (offset={start_row_offset})")
 
-    def _update_file_metadata_batch(self, batch, total):
+    def _update_file_metadata_batch(self, batch, total, completed):
         """Update table cells with a batch of loaded metadata (called from main thread via signal)."""
-        table = self.discoveredFilesTable
-
         # Get the row offset (for additive scans)
         row_offset = getattr(self, '_metadata_row_offset', 0)
 
@@ -7659,42 +9145,29 @@ class MainWindow(QMainWindow):
                 # Master list index includes the offset
                 master_idx = row_offset + index
                 if master_idx < len(self._master_file_list):
-                    self._master_file_list[master_idx]['protocol'] = metadata['protocol']
-                    self._master_file_list[master_idx]['channel_count'] = metadata.get('channel_count', 0)
-                    self._master_file_list[master_idx]['sweep_count'] = metadata.get('sweep_count', 0)
-                    self._master_file_list[master_idx]['stim_channels'] = metadata.get('stim_channels', [])
-                    self._master_file_list[master_idx]['stim_frequency'] = metadata.get('stim_frequency', '')
+                    task = self._master_file_list[master_idx]
+                    task['protocol'] = metadata['protocol']
+                    task['channel_count'] = metadata.get('channel_count', 0)
+                    task['sweep_count'] = metadata.get('sweep_count', 0)
+                    task['stim_channels'] = metadata.get('stim_channels', [])
+                    task['stim_frequency'] = metadata.get('stim_frequency', '')
                     # Auto-fill stim_type from detected frequency
-                    if metadata.get('stim_frequency') and not self._master_file_list[master_idx].get('stim_type'):
-                        self._master_file_list[master_idx]['stim_type'] = metadata.get('stim_frequency')
+                    if metadata.get('stim_frequency') and not task.get('stim_type'):
+                        task['stim_type'] = metadata.get('stim_frequency')
+                    # Auto-fill events_channel from stim_channels
+                    if metadata.get('stim_channels') and not task.get('events_channel'):
+                        task['events_channel'] = ', '.join(metadata.get('stim_channels', []))
 
-                # Update table cells - use row_offset for correct table row
-                # Col 1: Protocol, Col 2: Avail Ch, Col 3: Sweeps, Col 7: Stim Ch, Col 10: Stim Type
-                table_row = row_offset + index
-                if table_row < table.rowCount():
-                    table.setItem(table_row, 1, QTableWidgetItem(metadata['protocol']))
-                    table.setItem(table_row, 2, QTableWidgetItem(str(metadata.get('channel_count', ''))))
-                    table.setItem(table_row, 3, QTableWidgetItem(str(metadata.get('sweep_count', ''))))
-                    # Stim channels (column 7) - only update if row hasn't been analyzed yet
-                    current_stim = table.item(table_row, 7)
-                    if not current_stim or not current_stim.text():
-                        stim_ch_list = metadata.get('stim_channels', [])
-                        stim_ch_display = ', '.join(stim_ch_list) if stim_ch_list else ''
-                        table.setItem(table_row, 7, QTableWidgetItem(stim_ch_display))
-                    # Stim type auto-detection (column 10) - only if not already set
-                    stim_freq = metadata.get('stim_frequency', '')
-                    if stim_freq:
-                        current_stim_type = table.item(table_row, 10)
-                        if not current_stim_type or not current_stim_type.text():
-                            table.setItem(table_row, 10, QTableWidgetItem(stim_freq))
+                    # Update the model row to reflect the changes
+                    if master_idx < self._file_table_model.rowCount():
+                        self._file_table_model.update_row(master_idx, task)
 
-        # Update progress bar and status (use last item in batch for progress)
+        # Update progress bar and status using actual completed count
         if batch:
-            last_index = batch[-1][0]
-            progress_pct = int((last_index + 1) / total * 100)
+            progress_pct = int(completed / total * 100)
             self.projectProgressBar.setValue(progress_pct)
-            self.projectProgressBar.setFormat(f"Loading metadata: {last_index + 1}/{total} ({progress_pct}%)")
-            self._log_status_message(f"Loading metadata... {last_index + 1}/{total}", 0)
+            self.projectProgressBar.setFormat(f"Loading metadata: {completed}/{total} ({progress_pct}%)")
+            self._log_status_message(f"Loading metadata... {completed}/{total}", 0)
 
     def _metadata_finished(self, protocols):
         """Called when background loading completes."""
@@ -7720,207 +9193,4513 @@ class MainWindow(QMainWindow):
         # Re-enable scan button
         self.scanFilesButton.setEnabled(True)
 
+        # Clear any active filter to show all rows
+        if hasattr(self, 'tableFilterEdit') and self.tableFilterEdit.text():
+            self._on_table_filter_changed()
+
         # Reset row offset
         self._metadata_row_offset = 0
 
-    def _populate_discovered_files_table(self, abf_files):
-        """Populate the discovered files table with ABF metadata."""
-        table = self.discoveredFilesTable
+        # Autosave after scan completes
+        self._project_autosave()
 
-        # Clear existing rows
-        table.setRowCount(0)
+        # Populate the Consolidation tab's source list with project files
+        self._populate_consolidation_source_list()
 
-        # Populate rows
-        for i, file_info in enumerate(abf_files):
-            table.insertRow(i)
+    def _reload_incomplete_metadata(self, files_with_indices: list):
+        """
+        Reload metadata for files that have incomplete data (e.g., protocol='Loading...').
 
-            # File Name
-            table.setItem(i, 0, QTableWidgetItem(file_info['file_name']))
+        Args:
+            files_with_indices: List of (row_index, file_path) tuples
+        """
+        from PyQt6.QtCore import QThread, pyqtSignal
 
-            # Protocol
-            table.setItem(i, 1, QTableWidgetItem(file_info['protocol']))
+        if not files_with_indices:
+            return
 
-            # Duration (convert to minutes)
-            duration_min = file_info['duration_sec'] / 60.0
-            table.setItem(i, 2, QTableWidgetItem(f"{duration_min:.1f} min"))
+        # Extract just the file paths for the parallel reader
+        file_paths = [fp for _, fp in files_with_indices]
+        row_indices = [idx for idx, _ in files_with_indices]
 
-            # Channels (count)
-            channel_count = len(file_info['channels'])
-            table.setItem(i, 3, QTableWidgetItem(str(channel_count)))
+        class ReloadMetadataThread(QThread):
+            batch_progress = pyqtSignal(list, int, int)  # [(orig_index, row_index, metadata), ...], total, completed
+            finished = pyqtSignal(set)
 
-            # Size (MB)
-            table.setItem(i, 4, QTableWidgetItem(f"{file_info['file_size_mb']:.2f}"))
+            def __init__(self, file_paths, row_indices):
+                super().__init__()
+                self.file_paths = file_paths
+                self.row_indices = row_indices
 
-        # Resize columns to content
-        table.resizeColumnsToContents()
+            def run(self):
+                from core.fast_abf_reader import read_file_metadata_fast
+                protocols = set()
+                results = []
 
-        print(f"[project-builder] Populated table with {len(abf_files)} files")
+                for i, (file_path, row_idx) in enumerate(zip(self.file_paths, self.row_indices)):
+                    try:
+                        metadata = read_file_metadata_fast(file_path)
+                        if metadata:
+                            protocols.add(metadata.get('protocol', 'Unknown'))
+                        results.append((i, row_idx, metadata))
+                    except Exception as e:
+                        print(f"[metadata-reload] Error reading {file_path}: {e}")
+                        results.append((i, row_idx, None))
+
+                    # Emit progress every 10 files
+                    if len(results) % 10 == 0 or i == len(self.file_paths) - 1:
+                        self.batch_progress.emit(results[:], len(self.file_paths), len(results))
+                        results.clear()
+
+                # Emit any remaining
+                if results:
+                    self.batch_progress.emit(results, len(self.file_paths), len(self.file_paths))
+
+                self.finished.emit(protocols)
+
+        def on_reload_batch(batch, total, completed):
+            for orig_idx, row_idx, metadata in batch:
+                if metadata and row_idx < len(self._master_file_list):
+                    task = self._master_file_list[row_idx]
+                    task['protocol'] = metadata.get('protocol', 'Unknown')
+                    task['channel_count'] = metadata.get('channel_count', 0)
+                    task['sweep_count'] = metadata.get('sweep_count', 0)
+                    task['stim_channels'] = metadata.get('stim_channels', [])
+                    task['stim_frequency'] = metadata.get('stim_frequency', '')
+
+                    # Update table display
+                    if row_idx < self._file_table_model.rowCount():
+                        self._file_table_model.update_row(row_idx, task)
+
+            # Update progress
+            progress_pct = int(completed / total * 100)
+            self.projectProgressBar.setValue(progress_pct)
+            self.projectProgressBar.setFormat(f"Reloading metadata: {completed}/{total} ({progress_pct}%)")
+
+        def on_reload_finished(protocols):
+            self.projectProgressBar.setVisible(False)
+            self.scanFilesButton.setEnabled(True)
+            self._log_status_message(f"✓ Reloaded metadata ({len(protocols)} protocols found)", 3000)
+            self._project_autosave()
+
+        # Show progress bar
+        self.projectProgressBar.setVisible(True)
+        self.projectProgressBar.setValue(0)
+        self.projectProgressBar.setFormat(f"Reloading metadata: 0/{len(file_paths)} (0%)")
+
+        self._reload_thread = ReloadMetadataThread(file_paths, row_indices)
+        self._reload_thread.batch_progress.connect(on_reload_batch)
+        self._reload_thread.finished.connect(on_reload_finished)
+        self._reload_thread.start()
 
     # NOTE: Old experiment-based methods removed (on_project_add_files, _add_files_to_experiment)
     # We now use the master file list approach where all files are in a flat table with metadata columns
 
     def on_project_clear_files(self):
-        """Clear the discovered files table and master file list."""
-        self.discoveredFilesTable.setRowCount(0)
+        """Clear the discovered files table and master file list with confirmation."""
+        # Count files to show in warning
+        file_count = len(self._master_file_list) if self._master_file_list else 0
+
+        if file_count == 0:
+            self._log_status_message("No files to clear", 1500)
+            return
+
+        # Show confirmation dialog
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("Clear All Files?")
+        msg.setText(f"Are you sure you want to clear {file_count} files from the list?")
+        msg.setInformativeText(
+            "This will remove all files from the table.\n"
+            "Your original data files will NOT be deleted.\n\n"
+            "Any unsaved metadata changes will be lost."
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        # User confirmed - clear everything
+        self._file_table_model.clear()
         self._discovered_files_data = []
         self._master_file_list = []
         self.summaryLabel.setText("Summary: No files scanned")
         # Hide progress bar
         self.projectProgressBar.setVisible(False)
         self.projectProgressBar.setValue(0)
-        self._log_status_message("Cleared discovered files", 1500)
+        # Clear filter
+        if hasattr(self, 'tableFilterEdit'):
+            self.tableFilterEdit.clear()
+        if hasattr(self, 'filterCountLabel'):
+            self.filterCountLabel.setText("")
+        self._log_status_message("Cleared all files", 1500)
 
-    def _add_scan_saved_data_button(self):
-        """Add the 'Scan Saved Data', 'Resolve Conflicts' buttons and column mode checkbox to the Project Builder toolbar."""
-        from PyQt6.QtWidgets import QPushButton, QCheckBox
+    # =========================================================================
+    # Notes Files Tab Methods
+    # =========================================================================
 
-        # Create the Scan Saved Data button
-        self.scanSavedDataButton = QPushButton("📁 Scan Saved Data")
-        self.scanSavedDataButton.setToolTip(
-            "Scan for existing exported data files and auto-populate the table.\n"
-            "Looks for Pleth_App_analysis folders and matches saved files to ABF names."
+    def _init_notes_files_model(self):
+        """Initialize the notes files table model."""
+        from PyQt6.QtGui import QStandardItemModel, QStandardItem
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, 'notesFilesTable'):
+            return
+
+        self._notes_model = QStandardItemModel()
+        # Columns: Use, File Name, Actions, Type, Matches, Location, Size, Modified
+        self._notes_model.setHorizontalHeaderLabels(['Use', 'File Name', '', 'Type', 'Matches', 'Location', 'Size', 'Modified'])
+        self.notesFilesTable.setModel(self._notes_model)
+
+        # Set up Actions column delegate (Folder/Open/Preview buttons)
+        from core.file_table_delegates import NotesActionsDelegate
+        self._notes_actions_delegate = NotesActionsDelegate(self.notesFilesTable)
+        self._notes_actions_delegate.folder_clicked.connect(self._on_notes_action_folder)
+        self._notes_actions_delegate.open_clicked.connect(self._on_notes_action_open)
+        self._notes_actions_delegate.preview_clicked.connect(self._on_notes_action_preview)
+        self.notesFilesTable.setItemDelegateForColumn(2, self._notes_actions_delegate)
+
+        # Enable mouse tracking for hover effects
+        self.notesFilesTable.setMouseTracking(True)
+
+        # Set column widths - auto-fit to content with reasonable minimums
+        from PyQt6.QtWidgets import QHeaderView
+        header = self.notesFilesTable.horizontalHeader()
+        header.setStretchLastSection(True)
+        # Use ResizeToContents for most columns, with minimum widths
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)  # Use checkbox - fixed
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # File Name - stretch
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  # Actions - fixed
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Type
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Matches
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # Location
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)  # Size
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)  # Modified
+        self.notesFilesTable.setColumnWidth(0, 50)   # Use (checkbox) - fixed width for "Use" header
+        self.notesFilesTable.setColumnWidth(2, 82)   # Actions (Folder/Open/Preview) - 3 buttons
+
+        # Double-click to open
+        self.notesFilesTable.doubleClicked.connect(self.on_notes_open)
+
+        # Connect model changes to track checkbox state
+        self._notes_model.itemChanged.connect(self._on_notes_item_changed)
+
+        # Hide the bottom Open/Preview buttons since they're now in the table
+        if hasattr(self, 'openNoteButton'):
+            self.openNoteButton.setVisible(False)
+        if hasattr(self, 'previewNoteButton'):
+            self.previewNoteButton.setVisible(False)
+
+    def _add_notes_action_buttons(self):
+        """Add additional action buttons to the Notes tab programmatically."""
+        from PyQt6.QtWidgets import QPushButton, QHBoxLayout, QWidget
+
+        # Find the notes actions layout or create one
+        if not hasattr(self, 'notesFilesTable'):
+            return
+
+        # Try to find existing action buttons layout by name
+        # The notesActionsLayout is a QHBoxLayout containing the action buttons
+        if hasattr(self, 'linkNoteButton'):
+            # Find the notesActionsLayout - it's the layout containing linkNoteButton
+            parent_layout = None
+            if hasattr(self, 'notesActionsLayout'):
+                # Direct access if available from UI
+                parent_layout = self.notesActionsLayout
+            else:
+                # Fallback: find QHBoxLayout containing the button
+                parent_widget = self.linkNoteButton.parentWidget()
+                if parent_widget:
+                    layout = parent_widget.layout()
+                    if layout:
+                        # Look for the QHBoxLayout that contains linkNoteButton
+                        for i in range(layout.count()):
+                            item = layout.itemAt(i)
+                            if item and item.layout():
+                                inner_layout = item.layout()
+                                # Check if this layout contains linkNoteButton
+                                for j in range(inner_layout.count()):
+                                    widget = inner_layout.itemAt(j).widget()
+                                    if widget == self.linkNoteButton:
+                                        parent_layout = inner_layout
+                                        break
+                                if parent_layout:
+                                    break
+            if parent_layout:
+                # Common button style matching UI file buttons
+                button_style = """
+                    QPushButton {
+                        background-color: #6c757d;
+                        color: white;
+                        border-radius: 4px;
+                        padding: 4px 8px;
+                    }
+                    QPushButton:hover {
+                        background-color: #5a6268;
+                    }
+                    QPushButton:pressed {
+                        background-color: #545b62;
+                    }
+                """
+
+                # Add Scan References button (after Link to File, before spacer)
+                # Layout order: Search(0), Open(1), Preview(2), Link(3), [insert here], Spacer
+                self.scanReferencesButton = QPushButton("Scan for Refs")
+                self.scanReferencesButton.setToolTip("Scan notes files for references to data file names")
+                self.scanReferencesButton.setMinimumSize(70, 26)
+                self.scanReferencesButton.setMaximumWidth(100)
+                self.scanReferencesButton.setStyleSheet(button_style)
+                self.scanReferencesButton.clicked.connect(self.on_notes_scan_references)
+                parent_layout.insertWidget(4, self.scanReferencesButton)
+
+                # Add Toggle Unmatched button
+                self.toggleUnmatchedButton = QPushButton("Hide Unmatched")
+                self.toggleUnmatchedButton.setToolTip("Hide/show files with no data file matches")
+                self.toggleUnmatchedButton.setMinimumSize(100, 26)
+                self.toggleUnmatchedButton.setMaximumWidth(120)
+                self.toggleUnmatchedButton.setStyleSheet(button_style)
+                self.toggleUnmatchedButton.clicked.connect(self.on_notes_toggle_unmatched)
+                parent_layout.insertWidget(5, self.toggleUnmatchedButton)
+
+                # Add Build AI Index button (blue for distinction)
+                ai_button_style = """
+                    QPushButton {
+                        background-color: #0d6efd;
+                        color: white;
+                        border: 1px solid #0b5ed7;
+                        border-radius: 4px;
+                        padding: 4px 8px;
+                    }
+                    QPushButton:hover {
+                        background-color: #0b5ed7;
+                    }
+                    QPushButton:pressed {
+                        background-color: #0a58ca;
+                    }
+                """
+                self.buildAIIndexButton = QPushButton("🤖 AI Index")
+                self.buildAIIndexButton.setToolTip("Build AI-powered metadata lookup table from selected notes")
+                self.buildAIIndexButton.setMinimumSize(80, 26)
+                self.buildAIIndexButton.setMaximumWidth(100)
+                self.buildAIIndexButton.setStyleSheet(ai_button_style)
+                self.buildAIIndexButton.clicked.connect(self.on_notes_build_ai_index)
+                self.buildAIIndexButton.setVisible(False)  # Hidden - not currently used
+                parent_layout.insertWidget(6, self.buildAIIndexButton)
+
+                # Move filter box and count label from search row to action row
+                # Find them in the search layout and re-parent to actions layout
+                if hasattr(self, 'notesFilterEdit') and hasattr(self, 'notesFilterCountLabel'):
+                    filter_edit = self.notesFilterEdit
+                    count_label = self.notesFilterCountLabel
+
+                    # Remove from current parent layout
+                    old_layout = filter_edit.parentWidget().layout() if filter_edit.parentWidget() else None
+                    if old_layout:
+                        # Find and remove from old layout
+                        for i in range(old_layout.count()):
+                            item = old_layout.itemAt(i)
+                            if item and item.widget() == filter_edit:
+                                old_layout.takeAt(i)
+                                break
+                        for i in range(old_layout.count()):
+                            item = old_layout.itemAt(i)
+                            if item and item.widget() == count_label:
+                                old_layout.takeAt(i)
+                                break
+
+                    # Insert into action row (after the buttons, before spacer)
+                    # Buttons are at 0-6, spacer is at end
+                    insert_pos = parent_layout.count() - 1  # Before spacer
+                    if insert_pos < 0:
+                        insert_pos = 0
+                    parent_layout.insertWidget(insert_pos, filter_edit)
+                    parent_layout.insertWidget(insert_pos + 1, count_label)
+                    print("[notes] Moved filter box to action row")
+
+                print("[notes] Added Scan Refs and Unmatched buttons to action row")
+
+    def on_notes_browse(self):
+        """Browse for a folder to search for notes files."""
+        from PyQt6.QtWidgets import QFileDialog
+
+        # Default to parent of project directory if set
+        start_dir = ""
+        if self._notes_directory:
+            start_dir = str(self._notes_directory)
+        elif self._project_directory:
+            start_dir = str(Path(self._project_directory).parent)
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Notes Folder",
+            start_dir
         )
-        self.scanSavedDataButton.setStyleSheet("""
-            QPushButton {
-                background-color: #4a7c4c;
-                color: white;
-                border: 1px solid #3d6e3f;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #5a8c5c;
-            }
-            QPushButton:pressed {
-                background-color: #3a6c3c;
-            }
-        """)
-        self.scanSavedDataButton.clicked.connect(self.on_project_scan_saved_data)
 
-        # Create the Resolve Conflicts button
-        self.resolveConflictsButton = QPushButton("⚠ Resolve Conflicts")
-        self.resolveConflictsButton.setToolTip(
-            "View and resolve all data conflicts and warnings.\n"
-            "Shows rows where table values differ from saved NPZ files."
+        if folder:
+            self._notes_directory = Path(folder)
+            if hasattr(self, 'notesFolderEdit'):
+                self.notesFolderEdit.setText(str(folder))
+            self._log_status_message(f"Notes folder set to: {folder}", 2000)
+
+    def _set_default_notes_directory(self):
+        """Set default notes directory to parent of project directory."""
+        if self._project_directory:
+            # Default to parent folder
+            parent = Path(self._project_directory).parent
+            self._notes_directory = parent
+            if hasattr(self, 'notesFolderEdit'):
+                self.notesFolderEdit.setText(str(parent))
+
+    def on_notes_search(self):
+        """Search for notes files in project folder and parent directories.
+
+        Search pattern:
+        - Project folder + all subfolders (recursive)
+        - Parent folder (immediate files only, no subdirs)
+        - Grandparent folder (immediate files only, no subdirs)
+        """
+        from PyQt6.QtGui import QStandardItem
+        from PyQt6.QtCore import Qt
+        import os
+        from datetime import datetime
+
+        if not self._project_directory:
+            self._log_status_message("Please select a project directory first", 2000)
+            return
+
+        project_path = Path(self._project_directory)
+
+        # Get selected file types
+        extensions = []
+        if hasattr(self, 'notesWordCheckbox') and self.notesWordCheckbox.isChecked():
+            extensions.extend(['.docx', '.doc'])
+        if hasattr(self, 'notesExcelCheckbox') and self.notesExcelCheckbox.isChecked():
+            extensions.extend(['.xlsx', '.xls'])
+        if hasattr(self, 'notesCsvCheckbox') and self.notesCsvCheckbox.isChecked():
+            extensions.append('.csv')
+        if hasattr(self, 'notesTxtCheckbox') and self.notesTxtCheckbox.isChecked():
+            extensions.append('.txt')
+        if hasattr(self, 'notesPdfCheckbox') and self.notesPdfCheckbox.isChecked():
+            extensions.append('.pdf')
+
+        if not extensions:
+            self._log_status_message("Please select at least one file type", 2000)
+            return
+
+        # Clear existing data
+        self._notes_model.removeRows(0, self._notes_model.rowCount())
+        self._notes_files_data = []
+
+        found_files = set()  # Use set to avoid duplicates
+
+        # Folders to exclude (analysis output folders)
+        excluded_folders = {'pleth_app_analysis', 'pleth_app_analysis'}  # case-insensitive check
+
+        # File suffixes to exclude (analysis output files)
+        excluded_suffixes = (
+            '_breaths.csv', '_means_by_time.csv', '_timeseries.csv',
+            '_events.csv', '_summary.pdf', '_session.npz', '.pleth.npz',
+            '_ml_training.npz', '_stim_aligned.csv'
         )
-        self.resolveConflictsButton.setStyleSheet("""
-            QPushButton {
-                background-color: #7c6a4a;
-                color: white;
-                border: 1px solid #6e5d3f;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #8c7a5a;
-            }
-            QPushButton:pressed {
-                background-color: #6c5a3a;
-            }
-            QPushButton:disabled {
-                background-color: #555;
-                color: #888;
-            }
-        """)
-        self.resolveConflictsButton.clicked.connect(self.on_resolve_all_conflicts)
-        self.resolveConflictsButton.setEnabled(False)  # Disabled until conflicts exist
 
-        # Create the "Show Full Content" checkbox for column width mode
-        self.tableFullContentCheckbox = QCheckBox("Show Full Content")
-        self.tableFullContentCheckbox.setToolTip(
-            "When checked: columns expand to show all content (enables horizontal scrolling)\n"
-            "When unchecked: columns fit to visible area, clipping long text"
-        )
-        self.tableFullContentCheckbox.setChecked(False)
-        self.tableFullContentCheckbox.stateChanged.connect(self._on_table_column_mode_changed)
+        def is_excluded_file(file_path: Path) -> bool:
+            """Check if file should be excluded from notes search."""
+            # Check if in excluded folder
+            for part in file_path.parts:
+                if part.lower() in excluded_folders:
+                    return True
+            # Check if has excluded suffix
+            name_lower = file_path.name.lower()
+            for suffix in excluded_suffixes:
+                if name_lower.endswith(suffix):
+                    return True
+            return False
 
-        # Create the AI Settings button
-        self.aiSettingsButton = QPushButton("🤖 AI Assistant")
-        self.aiSettingsButton.setToolTip(
-            "Configure AI integration (Claude, GPT, Gemini)\n"
-            "Use AI to help organize files, extract metadata from notes,\n"
-            "and get analysis suggestions."
-        )
-        self.aiSettingsButton.setStyleSheet("""
-            QPushButton {
-                background-color: #5a4a7c;
-                color: white;
-                border: 1px solid #4a3d6e;
-                border-radius: 4px;
-                padding: 5px 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #6a5a8c;
-            }
-            QPushButton:pressed {
-                background-color: #4a3a6c;
-            }
-        """)
-        self.aiSettingsButton.clicked.connect(self._open_ai_settings)
+        # 1. Search project folder recursively (includes all subfolders)
+        for ext in extensions:
+            for f in project_path.rglob(f'*{ext}'):
+                if not is_excluded_file(f):
+                    found_files.add(f)
 
-        # Find the layout containing scanFilesButton and add next to it
-        # The scan button is in the projectFilesFrame area
-        if hasattr(self, 'scanFilesButton'):
-            parent = self.scanFilesButton.parent()
-            if parent and parent.layout():
-                layout = parent.layout()
-                # Find the position of scanFilesButton and insert after it
-                for i in range(layout.count()):
-                    widget = layout.itemAt(i).widget()
-                    if widget == self.scanFilesButton:
-                        layout.insertWidget(i + 1, self.scanSavedDataButton)
-                        layout.insertWidget(i + 2, self.resolveConflictsButton)
-                        layout.insertWidget(i + 3, self.tableFullContentCheckbox)
-                        layout.insertWidget(i + 4, self.aiSettingsButton)
-                        break
+        # 2. Search parent folder (immediate files only, no subdirs)
+        parent_path = project_path.parent
+        if parent_path.exists() and parent_path != project_path:
+            for ext in extensions:
+                for f in parent_path.glob(f'*{ext}'):
+                    if not is_excluded_file(f):
+                        found_files.add(f)
+
+        # 3. Search grandparent folder (immediate files only, no subdirs)
+        grandparent_path = parent_path.parent
+        if grandparent_path.exists() and grandparent_path != parent_path:
+            for ext in extensions:
+                for f in grandparent_path.glob(f'*{ext}'):
+                    if not is_excluded_file(f):
+                        found_files.add(f)
+
+        # Update the notes folder display to show search scope
+        if hasattr(self, 'notesFolderEdit'):
+            self.notesFolderEdit.setText(f"{project_path.name} + parent folders")
+        self._notes_directory = str(project_path)
+
+        # Populate table
+        for file_path in sorted(found_files):
+            try:
+                stat = file_path.stat()
+                size_kb = stat.st_size / 1024
+                if size_kb < 1024:
+                    size_str = f"{size_kb:.1f} KB"
                 else:
-                    # Fallback: just add it to the layout
-                    layout.addWidget(self.scanSavedDataButton)
-                    layout.addWidget(self.resolveConflictsButton)
-                    layout.addWidget(self.tableFullContentCheckbox)
-                    layout.addWidget(self.aiSettingsButton)
+                    size_str = f"{size_kb/1024:.1f} MB"
+                mod_time = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+
+                # Determine location relative to project
+                if file_path.parent == project_path or project_path in file_path.parents:
+                    try:
+                        rel_path = file_path.relative_to(project_path)
+                        location = str(rel_path.parent) if rel_path.parent != Path('.') else '.'
+                    except ValueError:
+                        location = str(file_path.parent)
+                elif file_path.parent == parent_path:
+                    location = '../'
+                elif file_path.parent == grandparent_path:
+                    location = '../../'
+                else:
+                    location = str(file_path.parent)
+
+                # Create checkbox item for "Use" column
+                use_item = QStandardItem()
+                use_item.setCheckable(True)
+                use_item.setCheckState(Qt.CheckState.Checked)  # Default to checked
+                use_item.setEditable(False)
+
+                # File name item with path stored
+                name_item = QStandardItem(file_path.name)
+                name_item.setData(str(file_path), Qt.ItemDataRole.UserRole)
+
+                # Actions column - empty (rendered by delegate)
+                actions_item = QStandardItem("")
+                actions_item.setEditable(False)
+
+                # Type column - file extension
+                type_item = QStandardItem(file_path.suffix.lower())
+
+                # Matches column - will be populated by scan
+                matches_item = QStandardItem("—")
+                matches_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                row = [
+                    use_item,                    # 0: Use
+                    name_item,                   # 1: File Name
+                    actions_item,                # 2: Actions (buttons)
+                    type_item,                   # 3: Type
+                    matches_item,                # 4: Matches
+                    QStandardItem(location),     # 5: Location
+                    QStandardItem(size_str),     # 6: Size
+                    QStandardItem(mod_time),     # 7: Modified
+                ]
+
+                self._notes_model.appendRow(row)
+
+                # Store file metadata for project save
+                self._notes_files_data.append({
+                    'name': file_path.name,
+                    'path': str(file_path),
+                    'type': file_path.suffix.lower(),
+                    'location': location,
+                    'size': size_str,
+                    'modified': mod_time,
+                    'use_as_notes': True,  # Track checkbox state
+                    'matches': [],  # Will store matched ABF filenames
+                    'match_count': 0
+                })
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+
+        # Update summary and filter count
+        count = len(self._notes_files_data)
+        self._log_status_message(f"Found {count} notes files", 2000)
+        if hasattr(self, 'notesFilterCountLabel'):
+            self.notesFilterCountLabel.setText(f"{count} files")
+
+    def _on_notes_filter_changed(self):
+        """Filter notes table rows based on search text."""
+        if not hasattr(self, 'notesFilterEdit') or not hasattr(self, 'notesFilesTable'):
+            return
+
+        filter_text = self.notesFilterEdit.text().strip().lower()
+        table = self.notesFilesTable
+        total_count = self._notes_model.rowCount()
+        visible_count = 0
+
+        # If no filter, show all rows
+        if not filter_text:
+            for row in range(total_count):
+                table.setRowHidden(row, False)
+            visible_count = total_count
+        else:
+            # Filter rows - search across name, type, and location columns
+            for row in range(total_count):
+                match = False
+                for col in range(self._notes_model.columnCount()):
+                    item = self._notes_model.item(row, col)
+                    if item and filter_text in item.text().lower():
+                        match = True
+                        break
+                table.setRowHidden(row, not match)
+                if match:
+                    visible_count += 1
+
+        # Update filter count label
+        if hasattr(self, 'notesFilterCountLabel'):
+            if filter_text:
+                self.notesFilterCountLabel.setText(f"{visible_count} of {total_count}")
+            else:
+                self.notesFilterCountLabel.setText(f"{total_count} files")
+
+    def _on_notes_item_changed(self, item):
+        """Handle changes to notes table items (e.g., checkbox state)."""
+        from PyQt6.QtCore import Qt
+
+        # Only handle checkbox column (column 0)
+        if item.column() != 0:
+            return
+
+        row = item.row()
+        if row < len(self._notes_files_data):
+            is_checked = item.checkState() == Qt.CheckState.Checked
+            self._notes_files_data[row]['use_as_notes'] = is_checked
+            print(f"[notes] File '{self._notes_files_data[row]['name']}' use_as_notes = {is_checked}")
+
+    def on_notes_scan_references(self):
+        """Scan notes files marked with 'Use' checkbox to find references to ABF data files.
+
+        Searches file contents for ABF filenames (with or without .abf extension).
+        Updates the 'Matches' column with count of found references.
+        Uses background thread to keep UI responsive for network drives.
+        Only scans files where use_as_notes is True.
+
+        Optimization: Copies files to local temp directory first for faster network access.
+        """
+        from PyQt6.QtCore import Qt, QThread, pyqtSignal
+        from PyQt6.QtWidgets import QProgressDialog
+        import tempfile
+        import shutil
+
+        if not self._notes_files_data:
+            self._log_status_message("No notes files to scan. Search for files first.", 2000)
+            return
+
+        # Filter to only files with 'Use' checkbox checked
+        files_to_scan = [(i, f) for i, f in enumerate(self._notes_files_data) if f.get('use_as_notes', False)]
+
+        if not files_to_scan:
+            self._log_status_message("No files selected for scanning. Check the 'Use' boxes for files to scan.", 2000)
+            return
+
+        # Get list of ABF filenames from the file table
+        abf_filenames = self._get_project_abf_filenames()
+        if not abf_filenames:
+            self._log_status_message("No data files in project to match against.", 2000)
+            return
+
+        print(f"[notes-scan] Scanning {len(files_to_scan)} selected notes files for {len(abf_filenames)} ABF references...")
+
+        # Create worker thread for scanning
+        class ScanWorker(QThread):
+            # stage (0=copy, 1=scan), progress_idx, original_idx, filename, matches
+            progress_update = pyqtSignal(int, int, int, str, list)
+            status_update = pyqtSignal(str)  # Status message
+            finished = pyqtSignal(int, int)  # files_with_matches, total_matches
+
+            def __init__(self, files_to_scan, abf_names, scan_func):
+                super().__init__()
+                self.files_to_scan = files_to_scan  # List of (original_index, file_info)
+                self.abf_names = abf_names
+                self.scan_func = scan_func
+                self._cancelled = False
+                self.cache_dir = None
+
+            def cancel(self):
+                self._cancelled = True
+
+            def run(self):
+                import tempfile
+                import shutil
+                import time
+                import hashlib
+                from pathlib import Path
+
+                total_matches = 0
+                files_with_matches = 0
+
+                # Use persistent cache directory (not deleted after scan)
+                cache_base = Path(tempfile.gettempdir()) / "physiometrics_notes_cache"
+                cache_base.mkdir(exist_ok=True)
+                self.cache_dir = cache_base
+
+                print(f"[notes-scan] ========== BENCHMARK START ==========")
+                print(f"[notes-scan] Cache directory: {cache_base}")
+                print(f"[notes-scan] Files to scan: {len(self.files_to_scan)}")
+                print(f"[notes-scan] ABF names to match: {len(self.abf_names)}")
+
+                overall_start = time.perf_counter()
+
+                # Stage 1: Copy files locally (only if not already cached)
+                self.status_update.emit("Checking cache / copying files...")
+                local_files = []  # (original_idx, local_path, file_info)
+
+                copy_start = time.perf_counter()
+                copied_count = 0
+                cached_count = 0
+
+                for progress_idx, (original_idx, file_info) in enumerate(self.files_to_scan):
+                    if self._cancelled:
+                        break
+
+                    src_path = Path(file_info['path'])
+
+                    # Create cache filename based on path hash + original name
+                    path_hash = hashlib.md5(str(src_path).encode()).hexdigest()[:8]
+                    cache_name = f"{path_hash}_{src_path.name}"
+                    cache_path = cache_base / cache_name
+
+                    try:
+                        # Check if cached copy exists and is up-to-date
+                        if cache_path.exists():
+                            src_mtime = src_path.stat().st_mtime
+                            cache_mtime = cache_path.stat().st_mtime
+                            if cache_mtime >= src_mtime:
+                                # Use cached copy
+                                local_files.append((original_idx, str(cache_path), file_info))
+                                cached_count += 1
+                                self.progress_update.emit(0, progress_idx, original_idx, f"(cached) {file_info['name']}", [])
+                                continue
+
+                        # Copy file to cache
+                        file_start = time.perf_counter()
+                        shutil.copy2(src_path, cache_path)
+                        file_time = (time.perf_counter() - file_start) * 1000
+                        print(f"[notes-scan]   Copy: {file_info['name']} - {file_time:.1f}ms")
+
+                        local_files.append((original_idx, str(cache_path), file_info))
+                        copied_count += 1
+                        self.progress_update.emit(0, progress_idx, original_idx, file_info['name'], [])
+
+                    except Exception as e:
+                        print(f"[notes-scan] Failed to copy {src_path.name}: {e}")
+
+                copy_time = time.perf_counter() - copy_start
+                print(f"[notes-scan] COPY STAGE: {copy_time:.2f}s total ({copied_count} copied, {cached_count} from cache)")
+
+                if self._cancelled:
+                    return
+
+                # Stage 2: Scan local copies (parallel with fallback to sequential)
+                self.status_update.emit("Scanning files (parallel)...")
+
+                scan_start = time.perf_counter()
+                scan_results = {}  # original_idx -> (file_info, matches, scan_time)
+
+                def scan_single_file(args):
+                    """Worker function for parallel scanning."""
+                    original_idx, local_path, file_info = args
+                    file_start = time.perf_counter()
+                    try:
+                        matches = self.scan_func(local_path, self.abf_names)
+                    except Exception as e:
+                        print(f"[notes-scan] Error scanning {file_info['name']}: {e}")
+                        matches = []
+                    file_time = (time.perf_counter() - file_start) * 1000
+                    return (original_idx, file_info, matches, file_time, local_path)
+
+                # Try parallel processing first
+                use_parallel = True
+                try:
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    import os
+
+                    # Use number of CPUs, but cap at 8 to avoid overwhelming the system
+                    max_workers = min(os.cpu_count() or 4, 8)
+                    print(f"[notes-scan] Using parallel scanning with {max_workers} workers")
+
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # Submit all scan tasks
+                        futures = {executor.submit(scan_single_file, (orig_idx, path, info)): orig_idx
+                                   for orig_idx, path, info in local_files}
+
+                        completed = 0
+                        for future in as_completed(futures):
+                            if self._cancelled:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                break
+
+                            original_idx, file_info, matches, file_time, local_path = future.result()
+                            suffix = Path(local_path).suffix.lower()
+                            print(f"[notes-scan]   Scan: {file_info['name']} ({suffix}) - {file_time:.1f}ms - {len(matches)} matches")
+
+                            if matches:
+                                files_with_matches += 1
+                                total_matches += len(matches)
+
+                            # Emit progress (completed count as progress_idx)
+                            self.progress_update.emit(1, completed, original_idx, file_info['name'], matches)
+                            completed += 1
+
+                except Exception as parallel_error:
+                    # Fallback to sequential scanning
+                    print(f"[notes-scan] Parallel scanning failed ({parallel_error}), falling back to sequential...")
+                    self.status_update.emit("Scanning files (sequential fallback)...")
+                    use_parallel = False
+
+                    for progress_idx, (original_idx, local_path, file_info) in enumerate(local_files):
+                        if self._cancelled:
+                            break
+
+                        # Benchmark individual file scan
+                        file_start = time.perf_counter()
+                        try:
+                            matches = self.scan_func(local_path, self.abf_names)
+                        except Exception as e:
+                            print(f"[notes-scan] Error scanning {file_info['name']}: {e}")
+                            matches = []
+                        file_time = (time.perf_counter() - file_start) * 1000
+
+                        suffix = Path(local_path).suffix.lower()
+                        print(f"[notes-scan]   Scan: {file_info['name']} ({suffix}) - {file_time:.1f}ms - {len(matches)} matches")
+
+                        if matches:
+                            files_with_matches += 1
+                            total_matches += len(matches)
+
+                        self.progress_update.emit(1, progress_idx, original_idx, file_info['name'], matches)
+
+                scan_time = time.perf_counter() - scan_start
+                mode_str = "parallel" if use_parallel else "sequential (fallback)"
+                overall_time = time.perf_counter() - overall_start
+
+                print(f"[notes-scan] SCAN STAGE ({mode_str}): {scan_time:.2f}s total")
+                print(f"[notes-scan] ========== BENCHMARK END ==========")
+                print(f"[notes-scan] TOTAL TIME: {overall_time:.2f}s")
+                print(f"[notes-scan] Results: {files_with_matches} files with {total_matches} matches")
+
+                # Note: Cache is NOT deleted - files persist for faster re-scans
+
+                self.finished.emit(files_with_matches, total_matches)
+
+        # Create progress dialog
+        progress = QProgressDialog("Copying files locally...", "Cancel", 0, len(files_to_scan) * 2, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        # Create and store worker
+        self._scan_worker = ScanWorker(files_to_scan, abf_filenames, self._scan_file_for_abf_references)
+
+        def on_status(msg):
+            progress.setLabelText(msg)
+
+        def on_progress(stage, progress_idx, original_idx, filename, matches):
+            if progress.wasCanceled():
+                self._scan_worker.cancel()
+                return
+
+            # Stage 0 = copying, Stage 1 = scanning
+            total_progress = progress_idx + (len(files_to_scan) if stage == 1 else 0)
+            progress.setValue(total_progress + 1)
+
+            if stage == 0:
+                progress.setLabelText(f"Copying ({progress_idx+1}/{len(files_to_scan)}): {filename}")
+            else:
+                progress.setLabelText(f"Scanning ({progress_idx+1}/{len(files_to_scan)}): {filename}")
+
+                # Update file info using original index
+                if original_idx < len(self._notes_files_data):
+                    self._notes_files_data[original_idx]['matches'] = matches
+                    self._notes_files_data[original_idx]['match_count'] = len(matches)
+
+                # Update table display using original index
+                if original_idx < self._notes_model.rowCount():
+                    matches_item = self._notes_model.item(original_idx, 4)  # Column 4 = Matches
+                    if matches_item:
+                        count = len(matches)
+                        matches_item.setText(str(count) if count > 0 else "0")
+
+        def on_finished(files_with_matches, total_matches):
+            progress.close()
+            msg = f"Scan complete: {files_with_matches} files with {total_matches} total references"
+            print(f"[notes-scan] {msg}")
+            self._log_status_message(msg, 3000)
+
+            # Update linked_notes column in file table
+            self._update_linked_notes_column()
+
+            # Auto-hide unmatched files after scan
+            if not hasattr(self, '_notes_hide_unmatched'):
+                self._notes_hide_unmatched = False
+            self._notes_hide_unmatched = True
+            self._apply_hide_unmatched(show_status=False)  # Don't show redundant status
+
+        # Connect signals
+        self._scan_worker.status_update.connect(on_status)
+        self._scan_worker.progress_update.connect(on_progress)
+        self._scan_worker.finished.connect(on_finished)
+
+        # Handle cancel
+        progress.canceled.connect(self._scan_worker.cancel)
+
+        # Start scanning
+        self._scan_worker.start()
+
+    def _get_project_abf_filenames(self) -> list:
+        """Get list of ABF filenames from the project file table.
+
+        Returns list of filename stems (without .abf extension) for matching.
+        """
+        abf_names = []
+
+        # Try to get from file table model
+        if hasattr(self, 'project_builder') and self.project_builder:
+            pb = self.project_builder
+            if hasattr(pb, 'file_table_model') and pb.file_table_model:
+                model = pb.file_table_model
+                for row in range(model.rowCount()):
+                    if row < len(model._files):
+                        file_name = model._files[row].get('file_name', '')
+                        if file_name:
+                            # Store stem (without extension) for flexible matching
+                            stem = Path(file_name).stem
+                            abf_names.append(stem)
+
+        # Also get from master file list if available
+        if hasattr(self, '_master_file_list') and self._master_file_list:
+            for file_info in self._master_file_list:
+                # file_info is a dict with 'file_path' and 'file_name' keys
+                if isinstance(file_info, dict):
+                    file_name = file_info.get('file_name', '')
+                    if file_name:
+                        stem = Path(file_name).stem
+                        if stem not in abf_names:
+                            abf_names.append(stem)
+                elif isinstance(file_info, (str, Path)):
+                    # Fallback for string paths
+                    stem = Path(file_info).stem
+                    if stem not in abf_names:
+                        abf_names.append(stem)
+
+        return abf_names
+
+    def _scan_file_for_abf_references(self, file_path: str, abf_filenames: list) -> list:
+        """Scan a single file for references to ABF filenames.
+
+        Args:
+            file_path: Path to the notes file
+            abf_filenames: List of ABF filename stems to search for
+
+        Returns:
+            List of matched ABF filename stems found in the file
+        """
+        import re
+
+        file_path = Path(file_path)
+        if not file_path.exists():
+            return []
+
+        matches = []
+        suffix = file_path.suffix.lower()
+
+        try:
+            content = ""
+
+            # Read content based on file type
+            if suffix in ['.txt', '.csv']:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+
+            elif suffix == '.xlsx':
+                # Use openpyxl in read-only mode with batch regex matching
+                # Much faster than per-cell substring checks (O(1) regex vs O(n) checks per cell)
+                try:
+                    from openpyxl import load_workbook
+
+                    # Build a single regex pattern for all ABF names (case-insensitive)
+                    # This is much faster than checking each name individually
+                    escaped_names = [re.escape(name) for name in abf_filenames]
+                    pattern = re.compile('|'.join(escaped_names), re.IGNORECASE)
+
+                    # Create lookup from lowercase to original case
+                    name_lookup = {name.lower(): name for name in abf_filenames}
+                    found_set = set()
+
+                    wb = load_workbook(file_path, read_only=True, data_only=True)
+
+                    for sheet in wb.worksheets:
+                        # Batch all cell values into one string per sheet for faster regex
+                        sheet_text_parts = []
+                        for row in sheet.iter_rows(values_only=True):
+                            for cell in row:
+                                if cell is not None:
+                                    sheet_text_parts.append(str(cell))
+
+                        # Single regex search on concatenated sheet text
+                        if sheet_text_parts:
+                            sheet_text = ' '.join(sheet_text_parts)
+                            for match in pattern.findall(sheet_text):
+                                found_set.add(name_lookup.get(match.lower(), match))
+
+                        # Early exit if all names found
+                        if len(found_set) >= len(abf_filenames):
+                            break
+
+                    wb.close()
+                    return list(found_set)
+
+                except Exception as e:
+                    print(f"[notes-scan] Could not read Excel file {file_path.name}: {e}")
+                    return []
+
+            elif suffix == '.xls':
+                # Old .xls format - use pandas (slower but works)
+                try:
+                    import pandas as pd
+                    xl = pd.ExcelFile(file_path)
+                    parts = []
+                    for sheet_name in xl.sheet_names:
+                        df = pd.read_excel(xl, sheet_name=sheet_name, dtype=str)
+                        parts.append(df.fillna('').astype(str).values.flatten())
+                    content = ' '.join(' '.join(p) for p in parts)
+                except Exception as e:
+                    print(f"[notes-scan] Could not read .xls file {file_path.name}: {e}")
+                    return []
+
+            elif suffix in ['.docx']:
+                try:
+                    from docx import Document
+                    doc = Document(file_path)
+                    paragraphs = [p.text for p in doc.paragraphs]
+                    # Also get table contents
+                    for table in doc.tables:
+                        for row in table.rows:
+                            for cell in row.cells:
+                                paragraphs.append(cell.text)
+                    content = ' '.join(paragraphs)
+                except ImportError:
+                    print(f"[notes-scan] python-docx not installed, skipping {file_path.name}")
+                    return []
+                except Exception as e:
+                    print(f"[notes-scan] Could not read Word file {file_path.name}: {e}")
+                    return []
+
+            elif suffix == '.doc':
+                # Old .doc format not easily supported
+                print(f"[notes-scan] Skipping old .doc format: {file_path.name}")
+                return []
+
+            elif suffix == '.pdf':
+                # Would need PyPDF2 or similar
+                print(f"[notes-scan] PDF scanning not implemented: {file_path.name}")
+                return []
+
+            # Search for ABF filename references
+            content_lower = content.lower()
+            for abf_name in abf_filenames:
+                # Search for the filename (case-insensitive)
+                # Match with or without .abf extension
+                if abf_name.lower() in content_lower:
+                    if abf_name not in matches:
+                        matches.append(abf_name)
+
+        except Exception as e:
+            print(f"[notes-scan] Error scanning {file_path.name}: {e}")
+
+        return matches
+
+    def on_notes_toggle_unmatched(self):
+        """Toggle visibility of notes files with no ABF matches."""
+        if not hasattr(self, '_notes_hide_unmatched'):
+            self._notes_hide_unmatched = False
+
+        self._notes_hide_unmatched = not self._notes_hide_unmatched
+        self._apply_hide_unmatched()
+
+    def _apply_hide_unmatched(self, show_status=True):
+        """Apply the current hide/show unmatched setting.
+
+        Args:
+            show_status: Whether to show status message (False when auto-hiding after scan)
+        """
+        table = self.notesFilesTable
+        hidden_count = 0
+
+        for row in range(self._notes_model.rowCount()):
+            if row < len(self._notes_files_data):
+                match_count = self._notes_files_data[row].get('match_count', 0)
+                if match_count == 0 and self._notes_hide_unmatched:
+                    table.setRowHidden(row, True)
+                    hidden_count += 1
+                else:
+                    table.setRowHidden(row, False)
+
+        # Update button text to reflect current state
+        if hasattr(self, 'toggleUnmatchedButton'):
+            if self._notes_hide_unmatched:
+                self.toggleUnmatchedButton.setText("Show Unmatched")
+            else:
+                self.toggleUnmatchedButton.setText("Hide Unmatched")
+
+        if show_status:
+            if self._notes_hide_unmatched:
+                self._log_status_message(f"Hidden {hidden_count} files with no matches", 2000)
+            else:
+                self._log_status_message("Showing all files", 2000)
+
+    def on_notes_build_ai_index(self):
+        """Build AI-powered metadata index from selected notes files.
+
+        Sends notes file contents to AI to extract structured metadata
+        for each data file, creating a lookup table for auto-fill suggestions.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Get files marked for use
+        use_files = [f for f in self._notes_files_data if f.get('use_as_notes', False)]
+
+        if not use_files:
+            QMessageBox.warning(
+                self,
+                "No Notes Selected",
+                "Please check the 'Use' column for notes files you want to include in the AI index."
+            )
+            return
+
+        # Get ABF filenames and their metadata for context
+        abf_filenames = self._get_project_abf_filenames()
+
+        # TODO: Implement AI indexing
+        # 1. Read content from selected notes files
+        # 2. Get keywords/metadata from project table
+        # 3. Send to AI (Sonnet) to build structured lookup table
+        # 4. Save as project_metadata.json
+
+        QMessageBox.information(
+            self,
+            "AI Index - Coming Soon",
+            f"Ready to index {len(use_files)} notes files.\n\n"
+            f"This feature will:\n"
+            f"• Read selected notes files\n"
+            f"• Send to AI for metadata extraction\n"
+            f"• Build lookup table for {len(abf_filenames)} data files\n\n"
+            f"Implementation in progress..."
+        )
+
+    def on_notes_open(self):
+        """Open selected notes file in default application."""
+        import os
+        import subprocess
+        import sys
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, 'notesFilesTable'):
+            return
+
+        indexes = self.notesFilesTable.selectionModel().selectedRows()
+        if not indexes:
+            self._log_status_message("Please select a file to open", 1500)
+            return
+
+        # Get file path from first selected row (column 1 = File Name with path in UserRole)
+        row = indexes[0].row()
+        path_item = self._notes_model.item(row, 1)  # Column 1 is File Name
+        if path_item:
+            file_path = path_item.data(Qt.ItemDataRole.UserRole)
+            if file_path and Path(file_path).exists():
+                try:
+                    if sys.platform == 'win32':
+                        os.startfile(file_path)
+                    elif sys.platform == 'darwin':
+                        subprocess.run(['open', file_path])
+                    else:
+                        subprocess.run(['xdg-open', file_path])
+                    self._log_status_message(f"Opened: {Path(file_path).name}", 1500)
+                except Exception as e:
+                    self._log_status_message(f"Error opening file: {e}", 3000)
+
+    def on_notes_preview(self):
+        """Preview contents of selected notes file using the shared preview dialog."""
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, 'notesFilesTable'):
+            return
+
+        indexes = self.notesFilesTable.selectionModel().selectedRows()
+        if not indexes:
+            self._log_status_message("Please select a file to preview", 1500)
+            return
+
+        row = indexes[0].row()
+        path_item = self._notes_model.item(row, 1)  # Column 1 = File Name with path in UserRole
+        if not path_item:
+            return
+
+        file_path = Path(path_item.data(Qt.ItemDataRole.UserRole))
+        if not file_path.exists():
+            self._log_status_message("File not found", 1500)
+            return
+
+        # Use shared preview dialog (no highlighting since not searching for ABF)
+        self._show_notes_preview_dialog(
+            files=[{'name': file_path.name, 'path': str(file_path)}],
+            title=f"Preview: {file_path.name}"
+        )
+
+    def _on_notes_action_folder(self, row: int):
+        """Open containing folder for notes file at given row."""
+        import os
+        import subprocess
+        import sys
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, '_notes_model'):
+            return
+
+        path_item = self._notes_model.item(row, 1)  # Column 1 is File Name with path in UserRole
+        if path_item:
+            file_path = path_item.data(Qt.ItemDataRole.UserRole)
+            if file_path and Path(file_path).exists():
+                folder_path = Path(file_path).parent
+                try:
+                    if sys.platform == 'win32':
+                        # Open folder and select the file
+                        subprocess.run(['explorer', '/select,', str(file_path)])
+                    elif sys.platform == 'darwin':
+                        subprocess.run(['open', '-R', str(file_path)])
+                    else:
+                        subprocess.run(['xdg-open', str(folder_path)])
+                    self._log_status_message(f"Opened folder: {folder_path.name}", 1500)
+                except Exception as e:
+                    self._log_status_message(f"Error opening folder: {e}", 3000)
+
+    def _on_notes_action_open(self, row: int):
+        """Open notes file at given row (called from delegate button click)."""
+        import os
+        import subprocess
+        import sys
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, '_notes_model'):
+            return
+
+        path_item = self._notes_model.item(row, 1)  # Column 1 is File Name with path in UserRole
+        if path_item:
+            file_path = path_item.data(Qt.ItemDataRole.UserRole)
+            if file_path and Path(file_path).exists():
+                try:
+                    if sys.platform == 'win32':
+                        os.startfile(file_path)
+                    elif sys.platform == 'darwin':
+                        subprocess.run(['open', file_path])
+                    else:
+                        subprocess.run(['xdg-open', file_path])
+                    self._log_status_message(f"Opened: {Path(file_path).name}", 1500)
+                except Exception as e:
+                    self._log_status_message(f"Error opening file: {e}", 3000)
+
+    def _on_notes_action_preview(self, row: int):
+        """Preview notes file at given row (called from delegate button click)."""
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, '_notes_model'):
+            return
+
+        path_item = self._notes_model.item(row, 1)  # Column 1 = File Name with path in UserRole
+        if not path_item:
+            return
+
+        file_path = Path(path_item.data(Qt.ItemDataRole.UserRole))
+        if not file_path.exists():
+            self._log_status_message("File not found", 1500)
+            return
+
+        # Use shared preview dialog
+        self._show_notes_preview_dialog(
+            files=[{'name': file_path.name, 'path': str(file_path)}],
+            title=f"Preview: {file_path.name}"
+        )
+
+    def on_notes_link(self):
+        """Link selected notes file to a data file in the project."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QListWidget, QDialogButtonBox
+        from PyQt6.QtCore import Qt
+
+        if not hasattr(self, 'notesFilesTable'):
+            return
+
+        indexes = self.notesFilesTable.selectionModel().selectedRows()
+        if not indexes:
+            self._log_status_message("Please select a notes file to link", 1500)
+            return
+
+        row = indexes[0].row()
+        path_item = self._notes_model.item(row, 1)  # Column 1 = File Name with path in UserRole
+        if not path_item:
+            return
+
+        notes_path = Path(path_item.data(Qt.ItemDataRole.UserRole))
+
+        # Get list of data files
+        if not self._master_file_list:
+            self._log_status_message("No data files in project. Scan for files first.", 2000)
+            return
+
+        # Create link dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Link: {notes_path.name}")
+        dialog.resize(500, 400)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel(f"Link '{notes_path.name}' to which data file?"))
+
+        file_list = QListWidget()
+        for task in self._master_file_list:
+            if not task.get('is_sub_row'):
+                file_list.addItem(task.get('file_name', str(task.get('file_path', 'Unknown'))))
+        layout.addWidget(file_list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = file_list.currentItem()
+            if selected:
+                # TODO: Store the link in metadata
+                self._log_status_message(f"Linked '{notes_path.name}' to '{selected.text()}'", 2000)
+            else:
+                self._log_status_message("No file selected", 1500)
+
+    def _setup_project_name_combo(self):
+        """Set up the unified project name combo (shows name, loads recent, editable for rename)."""
+        if not hasattr(self, 'projectNameCombo'):
+            print("[project-builder] WARNING: projectNameCombo not found in UI")
+            return
+
+        combo = self.projectNameCombo
+        self._project_combo_updating = False  # Prevent recursive updates
+
+        # Add a small dropdown indicator button after the combo
+        # Find the combo's parent layout and add a subtle arrow button
+        from PyQt6.QtWidgets import QPushButton
+        parent_widget = combo.parentWidget()
+        if parent_widget and parent_widget.layout():
+            layout = parent_widget.layout()
+            # Find combo's index in layout
+            combo_idx = -1
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item and item.widget() == combo:
+                    combo_idx = i
+                    break
+
+            if combo_idx >= 0:
+                # Add dropdown arrow button right after combo
+                dropdown_btn = QPushButton("▼")
+                dropdown_btn.setFixedSize(24, 28)
+                dropdown_btn.setToolTip("Select project")
+                dropdown_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: transparent;
+                        color: #cccccc;
+                        border: none;
+                        font-size: 10px;
+                        padding: 0;
+                        margin-left: -4px;
+                    }
+                    QPushButton:hover {
+                        color: #ffffff;
+                    }
+                """)
+                dropdown_btn.setFlat(True)
+                dropdown_btn.clicked.connect(lambda: combo.showPopup())
+                layout.insertWidget(combo_idx + 1, dropdown_btn)
+
+        # Populate with "None" + recent projects
+        self._populate_project_name_combo()
+
+        # Connect selection change (for loading projects)
+        combo.currentIndexChanged.connect(self._on_project_combo_selected)
+
+        # Connect text editing (for renaming)
+        combo.lineEdit().editingFinished.connect(self._on_project_name_edited)
+
+        print("[project-builder] Set up projectNameCombo with None + recent projects")
+
+    def _populate_project_name_combo(self, current_name: str = None):
+        """Populate the project name combo with None + recent projects."""
+        if not hasattr(self, 'projectNameCombo'):
+            return
+
+        combo = self.projectNameCombo
+        self._project_combo_updating = True
+        combo.blockSignals(True)
+        combo.clear()
+
+        # Add "None" option (index 0)
+        combo.addItem("No Project", None)
+
+        # Add recent projects
+        recent_projects = self.project_manager.get_recent_projects()
+        for project_info in recent_projects:
+            combo.addItem(project_info['name'], project_info['path'])
+
+        # Set current selection
+        if current_name:
+            # Find and select the current project
+            idx = combo.findText(current_name)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                # Project name not in list - set as editable text
+                combo.setCurrentText(current_name)
+        else:
+            combo.setCurrentIndex(0)  # "No Project"
+
+        combo.blockSignals(False)
+        self._project_combo_updating = False
+
+    def _on_project_combo_selected(self, index: int):
+        """Handle selection from project name combo dropdown."""
+        if self._project_combo_updating:
+            return
+
+        combo = self.projectNameCombo
+
+        if index == 0:
+            # "None" selected - clear current project
+            self._clear_current_project()
+            return
+
+        # Get project path from item data
+        project_path = combo.itemData(index)
+        if not project_path:
+            return
+
+        project_path = Path(project_path)
+        if not project_path.exists():
+            self._log_status_message(f"Project file not found: {project_path.name}", 3000)
+            self._populate_project_name_combo()  # Refresh list
+            return
+
+        # IMPORTANT: Cancel any pending autosave before loading new project
+        self._cancel_pending_autosave()
+
+        try:
+            project_data = self.project_manager.load_project(project_path)
+            self._populate_ui_from_project(project_data)
+            self._log_status_message(f"Loaded project: {project_data['project_name']}", 2000)
+        except Exception as e:
+            self._show_error("Load Failed", f"Failed to load project:\n{e}")
+            self._populate_project_name_combo()  # Reset
+
+    def _on_project_name_edited(self):
+        """Handle project name editing (rename)."""
+        if self._project_combo_updating:
+            return
+
+        combo = self.projectNameCombo
+        new_name = combo.currentText().strip()
+
+        if not new_name or new_name == "No Project":
+            # Empty or invalid name - revert
+            self._populate_project_name_combo(getattr(self, '_current_project_name', None))
+            return
+
+        # Get current project name
+        old_name = getattr(self, '_current_project_name', None)
+
+        if new_name == old_name:
+            return  # No change
+
+        if old_name:
+            # Rename existing project
+            self._current_project_name = new_name
+            self._log_status_message(f"Project renamed to: {new_name}", 2000)
+            # Schedule autosave to persist the rename
+            self._schedule_project_autosave()
+        else:
+            # Setting name for new unsaved project
+            self._current_project_name = new_name
+            self._log_status_message(f"Project name set: {new_name}", 2000)
+
+    def _clear_current_project(self):
+        """Clear the current project (when None is selected)."""
+        self._current_project_name = None
+        self._project_directory = None
+        self._master_file_list = []
+        self._discovered_files_data = []
+        self._notes_files_data = []
+
+        # Clear UI
+        if hasattr(self, 'directoryPathEdit'):
+            self.directoryPathEdit.clear()
+        if hasattr(self, '_file_table_model'):
+            self._file_table_model.clear_all()
+        if hasattr(self, '_notes_model'):
+            self._notes_model.removeRows(0, self._notes_model.rowCount())
+        if hasattr(self, 'summaryLabel'):
+            self.summaryLabel.setText("Summary: No project loaded")
+
+        self._log_status_message("Project closed", 2000)
+
+    def _connect_project_builder_buttons(self):
+        """Connect signals for Project Builder buttons defined in .ui file."""
+        # Connect Scan Saved Data button
+        if hasattr(self, 'scanSavedDataButton'):
+            self.scanSavedDataButton.clicked.connect(self.on_project_scan_saved_data)
+
+        # Connect Resolve Conflicts button
+        if hasattr(self, 'resolveConflictsButton'):
+            self.resolveConflictsButton.clicked.connect(self.on_resolve_all_conflicts)
+
+        # Connect Show Full Content checkbox
+        if hasattr(self, 'tableFullContentCheckbox'):
+            self.tableFullContentCheckbox.stateChanged.connect(self._on_table_column_mode_changed)
+
+        # Connect chatbot panel widgets
+        if hasattr(self, 'chatSendButton'):
+            self.chatSendButton.clicked.connect(self._on_chat_send)
+        if hasattr(self, 'chatInputEdit'):
+            self.chatInputEdit.returnPressed.connect(self._on_chat_send)
+        if hasattr(self, 'chatSettingsButton'):
+            self.chatSettingsButton.clicked.connect(self._open_ai_settings)
+        if hasattr(self, 'chatClearButton'):
+            self.chatClearButton.clicked.connect(self._clear_chat_history)
+        if hasattr(self, 'chatStopButton'):
+            self.chatStopButton.clicked.connect(self._on_chat_stop)
+
+        # Initialize model selection combo
+        if hasattr(self, 'modelSelectCombo'):
+            self._init_model_selector()
+
+        # Connect notebook widgets
+        if hasattr(self, 'runCodeButton'):
+            self.runCodeButton.clicked.connect(self._on_run_code)
+        if hasattr(self, 'clearOutputButton'):
+            self.clearOutputButton.clicked.connect(self._on_clear_code_output)
+
+        # Add Pop Out and Save Figure buttons to notebook header
+        self._add_notebook_extra_buttons()
+
+        # Connect table filter widgets
+        if hasattr(self, 'tableFilterEdit'):
+            self.tableFilterEdit.textChanged.connect(self._on_table_filter_changed)
+        if hasattr(self, 'filterColumnCombo'):
+            self.filterColumnCombo.currentIndexChanged.connect(self._on_table_filter_changed)
+
+        # Set up main horizontal splitter (left column vs AI assistant, 75%/25%)
+        if hasattr(self, 'mainContentSplitter'):
+            self.mainContentSplitter.setSizes([750, 250])
 
     def _on_table_column_mode_changed(self, state):
         """Handle toggle of the 'Show Full Content' checkbox."""
         self._auto_fit_table_columns()
+
+    def _init_model_selector(self):
+        """Initialize the AI model selection dropdown with only AVAILABLE models."""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+
+        # Only show models that are actually configured/available
+        # Format: (display_name, provider, model_id)
+        self._ai_models = []
+
+        # 1. Add Ollama models if running and installed
+        ollama_available = False
+        try:
+            from core.ai_client import get_ollama_models, check_ollama_running
+            if check_ollama_running():
+                installed_models = get_ollama_models()
+                if installed_models:
+                    ollama_available = True
+                    for model in installed_models[:8]:  # Limit to 8 models
+                        self._ai_models.append((f"🆓 Ollama: {model}", "ollama", model))
+        except Exception as e:
+            print(f"[ai] Could not fetch Ollama models: {e}")
+
+        # 2. Add Claude models only if API key is configured
+        claude_key = settings.value("ai/claude_api_key", "")
+        if claude_key:
+            self._ai_models.append(("Claude: Haiku (fast)", "claude", "claude-3-5-haiku-latest"))
+            self._ai_models.append(("Claude: Sonnet (smart)", "claude", "claude-sonnet-4-20250514"))
+
+        # 3. Add OpenAI models only if API key is configured
+        openai_key = settings.value("ai/openai_api_key", "")
+        if openai_key:
+            self._ai_models.append(("GPT-4o", "openai", "gpt-4o"))
+            self._ai_models.append(("GPT-4o mini (fast)", "openai", "gpt-4o-mini"))
+
+        # 4. If nothing available, show setup hint
+        if not self._ai_models:
+            self._ai_models.append(("⚙️ Click gear to set up AI", "setup_hint", ""))
+
+        # Populate combo
+        self.modelSelectCombo.clear()
+        for display_name, _, _ in self._ai_models:
+            self.modelSelectCombo.addItem(display_name)
+
+        # Load saved selection
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+        saved_provider = settings.value("ai/provider", "ollama")
+        saved_model = settings.value("ai/selected_model", "llama3.2")
+
+        # Find and select the saved model
+        for i, (_, provider, model_id) in enumerate(self._ai_models):
+            if provider == saved_provider and model_id == saved_model:
+                self.modelSelectCombo.setCurrentIndex(i)
+                break
+
+        # Connect change signal to save selection
+        self.modelSelectCombo.currentIndexChanged.connect(self._on_model_changed)
+
+    def _on_model_changed(self, index):
+        """Save selected model to settings."""
+        if hasattr(self, '_ai_models') and 0 <= index < len(self._ai_models):
+            _, provider, model_id = self._ai_models[index]
+            settings = QSettings("PhysioMetrics", "BreathAnalysis")
+            settings.setValue("ai/provider", provider)
+            settings.setValue("ai/selected_model", model_id)
+
+    def _get_selected_model(self) -> tuple:
+        """Get the currently selected (provider, model_id) tuple."""
+        if hasattr(self, 'modelSelectCombo') and hasattr(self, '_ai_models'):
+            index = self.modelSelectCombo.currentIndex()
+            if 0 <= index < len(self._ai_models):
+                _, provider, model_id = self._ai_models[index]
+                return (provider, model_id)
+        # Default to Ollama
+        return ("ollama", "llama3.2")
+
+    def _get_model_display_name(self) -> str:
+        """Get a short display name for the current model."""
+        if hasattr(self, 'modelSelectCombo') and hasattr(self, '_ai_models'):
+            index = self.modelSelectCombo.currentIndex()
+            if 0 <= index < len(self._ai_models):
+                display_name, provider, model_id = self._ai_models[index]
+                # Extract short name
+                if provider == "ollama":
+                    return model_id.split(":")[0].capitalize()
+                elif 'haiku' in model_id.lower():
+                    return "Haiku"
+                elif 'sonnet' in model_id.lower():
+                    return "Sonnet"
+                elif 'gpt-4o-mini' in model_id.lower():
+                    return "GPT-4o mini"
+                elif 'gpt-4o' in model_id.lower():
+                    return "GPT-4o"
+                else:
+                    return model_id.split("-")[0].capitalize()
+        return "AI"
+
+    def _on_table_filter_changed(self, *args):
+        """Filter table rows based on search text and selected column."""
+        if not hasattr(self, 'tableFilterEdit') or not hasattr(self, 'filterColumnCombo'):
+            return
+
+        filter_text = self.tableFilterEdit.text().strip().lower()
+        column_filter = self.filterColumnCombo.currentText()
+
+        # Map column filter to data keys
+        column_map = {
+            'All Columns': None,  # Search all
+            'File Name': 'file_name',
+            'Protocol': 'protocol',
+            'Animal ID': 'animal_id',
+            'Strain': 'strain',
+            'Keywords': 'keywords_display',
+        }
+        target_column = column_map.get(column_filter)
+
+        # Get table view (it's called discoveredFilesTable in the UI)
+        if not hasattr(self, 'discoveredFilesTable'):
+            return
+
+        table = self.discoveredFilesTable
+        visible_count = 0
+        total_count = len(self._master_file_list) if self._master_file_list else 0
+
+        # If no filter, show all rows
+        if not filter_text:
+            for row in range(self._file_table_model.rowCount()):
+                table.setRowHidden(row, False)
+            if hasattr(self, 'filterCountLabel'):
+                self.filterCountLabel.setText("")
+            return
+
+        # Filter rows
+        for row in range(self._file_table_model.rowCount()):
+            if row >= len(self._master_file_list):
+                continue
+
+            task = self._master_file_list[row]
+            match = False
+
+            if target_column:
+                # Search specific column
+                value = str(task.get(target_column, '')).lower()
+                match = filter_text in value
+            else:
+                # Search all relevant columns - include file path for better searching
+                searchable_columns = ['file_name', 'protocol', 'animal_id', 'strain',
+                                     'keywords_display', 'power', 'sex', 'stim_type',
+                                     'experiment', 'file_path']
+                for col in searchable_columns:
+                    value = str(task.get(col, '')).lower()
+                    if filter_text in value:
+                        match = True
+                        break
+
+            table.setRowHidden(row, not match)
+            if match:
+                visible_count += 1
+
+        # Update count label
+        if hasattr(self, 'filterCountLabel'):
+            if visible_count == total_count:
+                self.filterCountLabel.setText("")
+            else:
+                self.filterCountLabel.setText(f"({visible_count} of {total_count})")
+
+    def _on_chat_send(self):
+        """Handle sending a message in the chatbot panel."""
+        if not hasattr(self, 'chatInputEdit') or not hasattr(self, 'chatHistoryText'):
+            return
+
+        message = self.chatInputEdit.text().strip()
+        if not message:
+            return
+
+        # Add user message to chat history
+        self.chatHistoryText.append(f"<b style='color: #569cd6;'>You:</b> {message}")
+        self.chatInputEdit.clear()
+
+        # Get selected provider and model from dropdown
+        provider, model = self._get_selected_model()
+
+        # Check if provider is available
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+
+        if provider == "setup_hint":
+            # User selected the "Click gear to set up AI" hint
+            self.chatHistoryText.append(
+                f"<b style='color: #f48771;'>AI Setup Required:</b><br><br>"
+                f"<b>Option 1 - Ollama (FREE, runs locally):</b><br>"
+                f"• Download from: <a href='https://ollama.com/download'>https://ollama.com/download</a><br>"
+                f"• Run: <code>ollama pull llama3.2</code><br><br>"
+                f"<b>Option 2 - Cloud API (requires account):</b><br>"
+                f"• Click ⚙️ gear icon to add API key<br>"
+                f"• Supports Claude and GPT models"
+            )
+            self._scroll_chat_to_bottom()
+            return
+
+        if provider == "ollama":
+            # Ollama doesn't need API key - check if server is running
+            try:
+                from core.ai_client import check_ollama_running
+                if not check_ollama_running():
+                    self.chatHistoryText.append(
+                        f"<b style='color: #f44747;'>Error:</b> Ollama is not running.<br>"
+                        f"<i>Download FREE from: <a href='https://ollama.com/download'>https://ollama.com/download</a><br>"
+                        f"Then run: ollama pull {model}</i>"
+                    )
+                    self._scroll_chat_to_bottom()
+                    return
+                # Use Ollama (no API key needed)
+                self._send_to_ai_api(message, provider, api_key=None, model=model)
+            except ImportError as e:
+                self.chatHistoryText.append(
+                    f"<b style='color: #f44747;'>Error:</b> {e}"
+                )
+                self._scroll_chat_to_bottom()
+        else:
+            # Cloud provider - needs API key
+            api_key = settings.value(f"ai/{provider}_api_key", "")
+
+            if api_key:
+                # Use real AI API
+                self._send_to_ai_api(message, provider, api_key, model=model)
+            else:
+                # No API key configured
+                self.chatHistoryText.append(
+                    f"<b style='color: #f44747;'>Error:</b> No API key configured for {provider}.<br>"
+                    f"<i>Click the ⚙️ gear icon to configure, or select an Ollama model (FREE!).</i>"
+                )
+                self._scroll_chat_to_bottom()
+
+    def _send_to_ai_api(self, message: str, provider: str, api_key: str, model: str = None):
+        """Send message to actual AI API in background thread."""
+        from PyQt6.QtCore import QThread, pyqtSignal
+
+        # Soft token warning threshold (warn but allow continuing)
+        TOKEN_WARNING_THRESHOLD = 500000  # 500k tokens - just a warning
+
+        # Initialize conversation history if not exists
+        if not hasattr(self, '_chat_conversation_history'):
+            self._chat_conversation_history = []
+
+        # Check token usage and warn (but allow continuing)
+        current_tokens = getattr(self, '_total_tokens_used', 0)
+        if current_tokens >= TOKEN_WARNING_THRESHOLD and not getattr(self, '_token_warning_shown', False):
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setWindowTitle("High Token Usage")
+            msg.setText(f"You have used {current_tokens:,} tokens in this session.")
+            msg.setInformativeText(
+                "This is just a heads up about your usage.\n\n"
+                "Click 'Continue' to keep chatting, or 'Clear Chat' to start fresh."
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            msg.button(QMessageBox.StandardButton.Ok).setText("Continue")
+            msg.button(QMessageBox.StandardButton.Cancel).setText("Clear Chat")
+
+            if msg.exec() == QMessageBox.StandardButton.Cancel:
+                self._clear_chat_history()
+                return
+
+            self._token_warning_shown = True  # Don't show again until cleared
+
+        # Show thinking indicator with model name
+        model_name = self._get_model_display_name()
+        self.chatHistoryText.append(f"<b style='color: #4ec9b0;'>{model_name}:</b> <i>Thinking...</i>")
+        self._scroll_chat_to_bottom()
+
+        # Disable send button, enable stop button while processing
+        if hasattr(self, 'chatSendButton'):
+            self.chatSendButton.setEnabled(False)
+        if hasattr(self, 'chatStopButton'):
+            self.chatStopButton.setEnabled(True)
+
+        # Build context about current files
+        context = self._build_ai_context()
+
+        # Add user message to conversation history
+        self._chat_conversation_history.append({
+            "role": "user",
+            "content": message
+        })
+
+        # Prepare messages for API (copy to avoid mutation)
+        messages_for_api = list(self._chat_conversation_history)
+
+        # Use the model passed as parameter (already extracted from dropdown)
+        selected_model = model
+
+        # Define native tools for Claude (Ollama may not support tools)
+        tools = self._get_ai_tool_definitions() if provider != "ollama" else []
+
+        # Create worker thread with native tool support
+        class AIWorker(QThread):
+            # response, is_error, input_tokens, output_tokens, tool_calls (JSON string)
+            finished = pyqtSignal(str, bool, int, int, str)
+
+            def __init__(self, provider, api_key, messages, context, model, tools):
+                super().__init__()
+                self.provider = provider
+                self.api_key = api_key
+                self.messages = messages
+                self.context = context
+                self.model = model
+                self.tools = tools
+
+            def run(self):
+                import time
+                import json
+                max_retries = 3
+                base_delay = 2  # seconds
+
+                for attempt in range(max_retries):
+                    try:
+                        from core.ai_client import AIClient
+
+                        client = AIClient(provider=self.provider, api_key=self.api_key, model=self.model)
+
+                        # Comprehensive system prompt with data documentation
+                        system_prompt = f"""You are an AI assistant for PhysioMetrics, a respiratory signal analysis application.
+You help users analyze plethysmography data and generate Python code for plotting and analysis.
+
+=== DEMO REQUEST ===
+
+If the user says "demo", "example", "show me", "sample plot", or similar:
+
+First, use list_available_files() to find a file with exports, 10 sweeps, and "30hz" in name/protocol.
+
+Then: "Create a demo plot showing breathing frequency response to optogenetic stimulation. Use a single panel with dark theme (plt.style.use('dark_background')), plot individual sweeps in light gray, mean frequency in cyan with SEM shading, and highlight stimulation periods with steelblue rectangles. Make it publication-ready with white text and clean styling."
+
+Helper functions to use:
+- load_means_csv(filename) - DataFrame with frequency_sweep0, frequency_sweep1, ..., frequency_mean, frequency_sem
+- load_bundle_npz(filename) - bundle with stim timing
+- get_stim_spans(bundle) - returns [(start_time, end_time), ...]
+- add_stim_shading(ax, stim_spans, color='steelblue', alpha=0.4) - adds stim rectangles
+
+=== SEARCH STRATEGY ===
+ALWAYS call get_searchable_values() FIRST before searching! This shows you:
+- Exact protocol names, status values, animal IDs, etc. that exist in the data
+- Which files have exports
+
+IMPORTANT: If the user asks for something that doesn't exist in the searchable values:
+- DON'T search for it (you'll get 0 results)
+- TELL the user what's actually available and suggest alternatives
+
+=== QUICK CONTEXT ===
+{self.context}
+
+=== EXPORTED DATA FILE STRUCTURE ===
+
+PhysioMetrics exports several file types. Use the export_path from file context above.
+
+**1. _means_by_time.csv** - Time-series metrics (best for plotting over time)
+Columns:
+- `time`: Time in seconds (relative to stim start if stim present)
+- `sweep`: Sweep index (0, 1, 2, ...)
+- For each metric: `<metric>_sweep0`, `<metric>_sweep1`, etc., `<metric>_mean`, `<metric>_sem`
+- Normalized versions: `<metric>_norm_mean`, `<metric>_norm_sem` (baseline-normalized)
+
+Key metrics available:
+- `frequency` or `if` - Instantaneous frequency (Hz, breaths/min)
+- `amp_insp` - Inspiratory amplitude
+- `amp_exp` - Expiratory amplitude
+- `ti` - Inspiratory time (seconds)
+- `te` - Expiratory time (seconds)
+- `ttot` - Total breath cycle time (seconds)
+- `area_insp` - Inspiratory area under curve
+- `area_exp` - Expiratory area under curve
+- `duty_cycle` - Ti/Ttot ratio (0-1)
+- `ve` - Minute ventilation (frequency × amplitude)
+
+**2. _breaths.csv** - Per-breath data (one row per breath)
+Columns:
+- `sweep_idx`, `breath_idx` - Identifiers
+- `time_onset`, `time_peak` - Timing (seconds)
+- All metrics above, plus:
+- `is_in_stim` - Boolean, True if breath occurred during stimulation
+- `is_eupnea` - Boolean, True if classified as eupnea
+- `is_sniffing` - Boolean, True if classified as sniffing
+
+**3. _bundle.npz** - Complete data bundle (numpy format)
+Load with: `data = np.load('file_bundle.npz', allow_pickle=True)`
+Contains:
+- `t_downsampled` - Time array (downsampled)
+- `trace_downsampled` - Signal trace per sweep
+- `stim_spans_json` - JSON string with stim timing
+- Metric arrays for each sweep
+
+**4. Stimulation Timing**
+From _bundle.npz, stim_spans are stored as JSON:
+```python
+import json
+stim_spans = json.loads(str(data['stim_spans_json']))
+# stim_spans is dict: {{sweep_idx: [(start_time, end_time), ...]}}
+```
+From _breaths.csv, use `is_in_stim` column.
+
+=== HELPER FUNCTIONS (available in Code Notebook) ===
+
+The Code Notebook has these helper functions pre-loaded:
+
+```python
+# List all files with exports
+print(list_available_files())
+
+# Load data by filename (partial match)
+df = load_means_csv('xxx.abf')      # Returns DataFrame from _means_by_time.csv
+df = load_breaths_csv('xxx.abf')    # Returns DataFrame from _breaths.csv
+data = load_bundle_npz('xxx.abf')   # Returns numpy NpzFile
+
+# Get stim timing from bundle
+stim_spans = get_stim_spans(data)   # Returns {{sweep_idx: [(start, end), ...]}}
+
+# Add stim shading to plot
+add_stim_shading(ax, stim_spans, sweep_idx=0, color='blue', alpha=0.2)
+
+# Get export paths
+paths = get_export_paths('xxx')     # Returns {{filename: export_path}}
+```
+
+=== CODE TEMPLATES ===
+
+**Plot frequency vs time with mean±SEM and stim shading (RECOMMENDED):**
+```python
+# Load data using helper function
+df = load_means_csv('xxx.abf')  # Replace xxx.abf with actual filename
+bundle = load_bundle_npz('xxx.abf')
+stim_spans = get_stim_spans(bundle)
+
+fig, ax = plt.subplots(figsize=(12, 6))
+
+# Overlay all sweeps in gray
+sweep_cols = [c for c in df.columns if c.startswith('frequency_sweep')]
+for col in sweep_cols:
+    ax.plot(df['time'], df[col], alpha=0.3, color='gray', linewidth=0.5)
+
+# Plot mean±SEM
+ax.fill_between(df['time'],
+                df['frequency_mean'] - df['frequency_sem'],
+                df['frequency_mean'] + df['frequency_sem'],
+                alpha=0.3, color='blue', label='Mean ± SEM')
+ax.plot(df['time'], df['frequency_mean'], 'b-', linewidth=2, label='Mean')
+
+# Add blue stim shading
+add_stim_shading(ax, stim_spans, color='blue', alpha=0.2, label='Laser ON')
+
+ax.set_xlabel('Time (s)')
+ax.set_ylabel('Frequency (Hz)')
+ax.legend()
+ax.set_title('Breathing Frequency Over Time')
+```
+
+**Compare eupnea vs sniffing:**
+```python
+df = load_breaths_csv('xxx.abf')
+eupnea = df[df['is_eupnea'] == True]
+sniffing = df[df['is_sniffing'] == True]
+
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+ax[0].hist(eupnea['frequency'], bins=30, alpha=0.7, label='Eupnea')
+ax[0].hist(sniffing['frequency'], bins=30, alpha=0.7, label='Sniffing')
+ax[0].legend()
+ax[0].set_xlabel('Frequency (Hz)')
+ax[1].boxplot([eupnea['ti'].dropna(), sniffing['ti'].dropna()], labels=['Eupnea', 'Sniffing'])
+ax[1].set_ylabel('Ti (s)')
+```
+
+**Multi-metric comparison:**
+```python
+df = load_means_csv('xxx.abf')
+metrics = ['frequency', 'amp_insp', 'ti', 'duty_cycle']
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+for ax, metric in zip(axes.flat, metrics):
+    mean_col = f'{{metric}}_mean'
+    sem_col = f'{{metric}}_sem'
+    if mean_col in df.columns:
+        ax.fill_between(df['time'], df[mean_col]-df[sem_col], df[mean_col]+df[sem_col], alpha=0.3)
+        ax.plot(df['time'], df[mean_col])
+        ax.set_ylabel(metric)
+        ax.set_xlabel('Time (s)')
+plt.tight_layout()
+```
+
+=== OTHER COMMANDS (include in your response text) ===
+- [LOAD_PROJECT: project_name] - Load a saved project
+- [UPDATE_META: filename | field=value] - Update file metadata
+
+WHEN GENERATING CODE:
+- ALWAYS use actual filenames from the context or search results (NOT placeholder 'xxx.abf')
+- Helper functions accept: full paths, filenames, or partial name matches
+- For raw Windows paths, use raw strings: r'C:\\path\\to\\file.csv'
+- Import: pandas as pd, matplotlib.pyplot as plt, numpy as np
+- Code runs in a Code Notebook - user clicks "Run" to execute
+- Plots will render inline in the output area
+
+Be concise. Use markdown. Put code in ```python ``` blocks."""
+
+                        # Use native tool use
+                        response = client.chat_with_tools(
+                            messages=self.messages,
+                            tools=self.tools,
+                            system_prompt=system_prompt,
+                            max_tokens=4096,  # Increased for longer code responses
+                            temperature=0.7
+                        )
+
+                        # Extract token usage
+                        input_tokens = response.usage.get('input_tokens', 0) if response.usage else 0
+                        output_tokens = response.usage.get('output_tokens', 0) if response.usage else 0
+
+                        # Convert tool_calls to JSON string for signal
+                        tool_calls_json = json.dumps(response.tool_calls) if response.tool_calls else ""
+
+                        self.finished.emit(response.content, False, input_tokens, output_tokens, tool_calls_json)
+                        return  # Success, exit retry loop
+
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        is_rate_limit = '429' in str(e) or 'rate_limit' in error_str or 'rate limit' in error_str
+
+                        if is_rate_limit and attempt < max_retries - 1:
+                            # Rate limit - wait and retry with exponential backoff
+                            delay = base_delay * (2 ** attempt)  # 2, 4, 8 seconds
+                            time.sleep(delay)
+                            continue  # Retry
+                        else:
+                            # Final attempt failed or non-rate-limit error
+                            self.finished.emit(str(e), True, 0, 0, "")
+                            return
+
+        self._chat_worker = AIWorker(provider, api_key, messages_for_api, context, selected_model, tools)
+        self._chat_worker.finished.connect(self._on_ai_response)
+        self._chat_worker.start()
+
+    def _on_ai_response(self, response: str, is_error: bool, input_tokens: int = 0, output_tokens: int = 0, tool_calls_json: str = ""):
+        """Handle response from AI API with native tool support."""
+        import json
+
+        # Remove "Thinking..." message
+        cursor = self.chatHistoryText.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.deletePreviousChar()  # Remove newline
+
+        if is_error:
+            # Detect specific error types for better messages
+            error_lower = response.lower()
+            if '429' in response or 'rate_limit' in error_lower or 'rate limit' in error_lower:
+                # Rate limit error - give helpful guidance
+                self.chatHistoryText.append(
+                    f"<b style='color: #f48771;'>Rate Limit:</b> Too many requests.<br>"
+                    "<i>Wait 30-60 seconds before sending another message, or try using Haiku (faster/lower limits).</i>"
+                )
+            elif '401' in response or 'unauthorized' in error_lower or 'invalid' in error_lower and 'key' in error_lower:
+                # Authentication error
+                self.chatHistoryText.append(
+                    f"<b style='color: #f48771;'>Auth Error:</b> {response}<br>"
+                    "<i>Check your API key in settings (⚙)</i>"
+                )
+            elif 'timeout' in error_lower or 'timed out' in error_lower:
+                # Timeout error
+                self.chatHistoryText.append(
+                    f"<b style='color: #f48771;'>Timeout:</b> Request took too long.<br>"
+                    "<i>Try again with a shorter question, or check your network connection.</i>"
+                )
+            else:
+                # Generic error
+                self.chatHistoryText.append(
+                    f"<b style='color: #f48771;'>Error:</b> {response}<br>"
+                    "<i>Check your API key in settings (⚙) or try again.</i>"
+                )
+            # Remove the failed user message from history
+            if hasattr(self, '_chat_conversation_history') and self._chat_conversation_history:
+                self._chat_conversation_history.pop()
+        else:
+            # Update token count
+            if not hasattr(self, '_total_tokens_used'):
+                self._total_tokens_used = 0
+            self._total_tokens_used += input_tokens + output_tokens
+            self._update_token_display()
+
+            # Check for NATIVE tool calls
+            tool_calls = json.loads(tool_calls_json) if tool_calls_json else []
+
+            if tool_calls:
+                # Show that tools are being executed
+                self.chatHistoryText.append(
+                    f"<i style='color: #dcdcaa;'>🔍 Searching locally...</i>"
+                )
+
+                # Execute each tool call and collect results
+                tool_results = []
+                for tc in tool_calls:
+                    tool_name = tc.get('name', '')
+                    tool_input = tc.get('input', {})
+                    tool_id = tc.get('id', '')
+
+                    result = self._execute_native_tool(tool_name, tool_input)
+                    tool_results.append({
+                        'id': tool_id,
+                        'name': tool_name,
+                        'input': tool_input,
+                        'result': result
+                    })
+
+                    # Show summary in chat (include search params for debugging)
+                    if 'error' in result:
+                        self.chatHistoryText.append(
+                            f"<i style='color: #f48771;'>✗ {tool_name}: {result['error']}</i>"
+                        )
+                    else:
+                        if 'count' in result:
+                            # Show what was searched for
+                            search_params = ', '.join(f"{k}={v}" for k, v in tool_input.items() if v) if tool_input else "all"
+                            self.chatHistoryText.append(
+                                f"<i style='color: #89d185;'>✓ {tool_name}({search_params}): Found {result.get('count', 0)} results</i>"
+                            )
+                        elif 'protocols' in result:
+                            self.chatHistoryText.append(
+                                f"<i style='color: #89d185;'>✓ {tool_name}: Found {len(result['protocols'])} protocols</i>"
+                            )
+                        elif 'animals' in result:
+                            self.chatHistoryText.append(
+                                f"<i style='color: #89d185;'>✓ {tool_name}: Found {len(result['animals'])} animals</i>"
+                            )
+                        elif 'file_count' in result:
+                            self.chatHistoryText.append(
+                                f"<i style='color: #89d185;'>✓ {tool_name}: {result['file_count']} files in project</i>"
+                            )
+                        else:
+                            self.chatHistoryText.append(
+                                f"<i style='color: #89d185;'>✓ {tool_name}: Done</i>"
+                            )
+
+                # Make follow-up request with native tool results
+                self._send_native_tool_followup(response, tool_calls, tool_results)
+                return  # Don't process this response further - wait for follow-up
+
+            # Add AI response to conversation history
+            if hasattr(self, '_chat_conversation_history'):
+                self._chat_conversation_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+
+            # Check if response contains code blocks and extract them
+            code_extracted = self._extract_code_from_response(response)
+            model_name = self._get_model_display_name()
+
+            # Debug logging
+            has_backticks = '```' in response
+            print(f"[AI Response Debug] Response length: {len(response)}, has ```: {has_backticks}, code extracted: {len(code_extracted) if code_extracted else 0} chars")
+
+            if code_extracted:
+                # Put code in the notebook
+                has_widget = hasattr(self, 'codeInputEdit')
+                print(f"[AI Response Debug] codeInputEdit exists: {has_widget}")
+                if has_widget:
+                    self.codeInputEdit.setPlainText(code_extracted)
+                    print(f"[AI Response Debug] Code placed in notebook ({len(code_extracted)} chars)")
+                else:
+                    print(f"[AI Response Debug] WARNING: codeInputEdit widget not found!")
+                # Format response with code stripped (since it's in notebook)
+                formatted = self._format_ai_response(response, strip_code=True)
+                formatted += "<br><br><i style='color: #4ec9b0;'>📓 Code placed in notebook below. Click ▶ Run to execute.</i>"
+                self.chatHistoryText.append(f"<b style='color: #4ec9b0;'>{model_name}:</b><br>{formatted}")
+            else:
+                # Format response with code blocks styled (if any)
+                if has_backticks:
+                    print(f"[AI Response Debug] WARNING: Response has ``` but no code extracted!")
+                    print(f"[AI Response Debug] First 500 chars: {response[:500]}")
+                formatted = self._format_ai_response(response, strip_code=False)
+                self.chatHistoryText.append(f"<b style='color: #4ec9b0;'>{model_name}:</b><br>{formatted}")
+
+            # Execute any AI commands in the response
+            command_results = self._execute_ai_commands(response)
+            if command_results:
+                for result in command_results:
+                    if result['success']:
+                        self.chatHistoryText.append(
+                            f"<i style='color: #89d185;'>✓ {result['command']}: {result['message']}</i>"
+                        )
+                    else:
+                        self.chatHistoryText.append(
+                            f"<i style='color: #f48771;'>✗ {result['command']}: {result['message']}</i>"
+                        )
+
+        self._scroll_chat_to_bottom()
+
+        # Re-enable send button, disable stop button
+        if hasattr(self, 'chatSendButton'):
+            self.chatSendButton.setEnabled(True)
+        if hasattr(self, 'chatStopButton'):
+            self.chatStopButton.setEnabled(False)
+
+    def _send_native_tool_followup(self, original_response: str, tool_calls: list, tool_results: list):
+        """
+        Send a follow-up request with native tool results so AI can generate final response.
+        Uses proper Claude tool_result format.
+        """
+        import json
+        from PyQt6.QtCore import QThread, pyqtSignal
+
+        # Build the assistant message with tool_use blocks (reconstruct what Claude sent)
+        assistant_content = []
+        if original_response:
+            assistant_content.append({"type": "text", "text": original_response})
+        for tc in tool_calls:
+            assistant_content.append({
+                "type": "tool_use",
+                "id": tc.get('id', ''),
+                "name": tc.get('name', ''),
+                "input": tc.get('input', {})
+            })
+
+        # Build the user message with tool_result blocks
+        user_content = []
+        for tr in tool_results:
+            result_data = tr.get('result', {})
+            is_error = 'error' in result_data
+            user_content.append({
+                "type": "tool_result",
+                "tool_use_id": tr.get('id', ''),
+                "content": json.dumps(result_data, indent=2, default=str),
+                "is_error": is_error
+            })
+
+        # Add to conversation history with proper structure
+        if hasattr(self, '_chat_conversation_history'):
+            self._chat_conversation_history.append({
+                "role": "assistant",
+                "content": assistant_content
+            })
+            self._chat_conversation_history.append({
+                "role": "user",
+                "content": user_content
+            })
+
+        # Get API settings from the model selector
+        provider, selected_model = self._get_selected_model()
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+        api_key = settings.value(f"ai/{provider}_api_key", "") if provider != "ollama" else None
+        tools = self._get_ai_tool_definitions() if provider != "ollama" else []
+
+        if provider != "ollama" and not api_key:
+            self.chatHistoryText.append("<b style='color: #f48771;'>Error:</b> No API key configured")
+            return
+
+        # Create follow-up worker using native tools
+        class FollowupWorker(QThread):
+            finished = pyqtSignal(str, bool, int, int, str)  # Match main worker signature
+
+            def __init__(self, provider, api_key, messages, model, tools):
+                super().__init__()
+                self.provider = provider
+                self.api_key = api_key
+                self.messages = messages
+                self.model = model
+                self.tools = tools
+
+            def run(self):
+                try:
+                    from core.ai_client import AIClient
+                    client = AIClient(provider=self.provider, api_key=self.api_key, model=self.model)
+
+                    system_prompt = """You received tool results. Now provide a helpful response to the user.
+If they asked for code, generate Python code in ```python ``` blocks.
+Use the file paths and data from the tool results.
+Be concise and helpful."""
+
+                    # Use chat_with_tools for proper format handling
+                    response = client.chat_with_tools(
+                        messages=self.messages,
+                        tools=self.tools,
+                        system_prompt=system_prompt,
+                        max_tokens=4096,  # Increased for longer code responses
+                        temperature=0.7
+                    )
+                    input_tokens = response.usage.get('input_tokens', 0) if response.usage else 0
+                    output_tokens = response.usage.get('output_tokens', 0) if response.usage else 0
+                    tool_calls_json = json.dumps(response.tool_calls) if response.tool_calls else ""
+                    self.finished.emit(response.content, False, input_tokens, output_tokens, tool_calls_json)
+                except Exception as e:
+                    self.finished.emit(str(e), True, 0, 0, "")
+
+        # Prepare messages (include conversation history)
+        messages_for_api = list(self._chat_conversation_history) if hasattr(self, '_chat_conversation_history') else []
+
+        self._chat_worker = FollowupWorker(provider, api_key, messages_for_api, selected_model, tools)
+        self._chat_worker.finished.connect(self._on_ai_response)
+        self._chat_worker.start()
+
+    def _on_chat_stop(self):
+        """Stop the current AI request."""
+        if hasattr(self, '_chat_worker') and self._chat_worker and self._chat_worker.isRunning():
+            # Terminate the worker thread
+            self._chat_worker.terminate()
+            self._chat_worker.wait(1000)
+
+            # Remove "Thinking..." message
+            cursor = self.chatHistoryText.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.movePosition(cursor.MoveOperation.StartOfBlock, cursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.deletePreviousChar()
+
+            self.chatHistoryText.append("<span style='color: #f48771;'>⏹ Request stopped by user.</span>")
+
+            # Remove the pending user message from history
+            if hasattr(self, '_chat_conversation_history') and self._chat_conversation_history:
+                self._chat_conversation_history.pop()
+
+            # Re-enable send button, disable stop button
+            if hasattr(self, 'chatSendButton'):
+                self.chatSendButton.setEnabled(True)
+            if hasattr(self, 'chatStopButton'):
+                self.chatStopButton.setEnabled(False)
+
+            self._scroll_chat_to_bottom()
+
+    def _clear_chat_history(self):
+        """Clear the chat conversation history and display."""
+        self._chat_conversation_history = []
+        self._total_tokens_used = 0
+        self._token_warning_shown = False  # Reset warning flag
+        self._update_token_display()
+        if hasattr(self, 'chatHistoryText'):
+            self.chatHistoryText.clear()
+
+    def _update_token_display(self):
+        """Update the token usage display in the chat header."""
+        if hasattr(self, 'tokenUsageLabel'):
+            tokens = getattr(self, '_total_tokens_used', 0)
+            if tokens >= 1000:
+                display = f"{tokens / 1000:.1f}k tokens"
+            else:
+                display = f"{tokens} tokens"
+            self.tokenUsageLabel.setText(display)
+
+            # Estimate cost (approximate rates as of 2025)
+            # Claude Sonnet: ~$3/1M input, ~$15/1M output (avg ~$9/1M combined)
+            # GPT-4o: ~$2.50/1M input, ~$10/1M output (avg ~$6/1M combined)
+            # Using conservative estimate of ~$10 per 1M tokens
+            est_cost = tokens * 0.00001  # $10 per 1M tokens
+
+            # Update tooltip with more detail
+            self.tokenUsageLabel.setToolTip(
+                f"Total tokens used: {tokens:,}\n"
+                f"Estimated cost: ${est_cost:.4f}\n"
+                f"(actual cost varies by model)\n\n"
+                f"Note: API providers don't offer\n"
+                f"balance check APIs. Check your\n"
+                f"account dashboard for usage limits."
+            )
+
+    def _extract_code_from_response(self, response: str) -> str:
+        """Extract Python code blocks from AI response."""
+        import re
+
+        all_code_blocks = []
+
+        # Most reliable method: Split by ``` and take alternating sections
+        # This handles all edge cases with the markdown format
+        if '```' in response:
+            parts = response.split('```')
+            print(f"[AI Code Extraction] Split response into {len(parts)} parts")
+
+            for i, part in enumerate(parts):
+                if i % 2 == 1:  # Odd indices are inside code blocks
+                    # The first line might be a language identifier
+                    lines = part.split('\n', 1)  # Split only on first newline
+                    first_line = lines[0].strip().lower() if lines else ''
+
+                    # Check if first line is a language identifier
+                    if first_line in ['python', 'py', 'python3', '']:
+                        # Take everything after the first line
+                        code = lines[1].strip() if len(lines) > 1 else ''
+                    elif first_line.startswith('python'):
+                        # Handle cases like "python\n" or "python "
+                        code = lines[1].strip() if len(lines) > 1 else ''
+                    else:
+                        # First line is part of the code
+                        code = part.strip()
+
+                    # Only add if it looks like meaningful code
+                    if code and len(code) > 20:
+                        # Quick check it looks like Python
+                        python_indicators = ['import ', 'def ', 'class ', 'for ', 'while ',
+                                            'plt.', 'pd.', 'np.', 'print(', 'from ', '= ']
+                        if any(kw in code for kw in python_indicators):
+                            all_code_blocks.append(code)
+                            print(f"[AI Code Extraction] Found code block {i}: {len(code)} chars")
+
+        # Combine all code blocks with newlines
+        if all_code_blocks:
+            combined = '\n\n'.join(all_code_blocks)
+
+            # Check for signs of truncation
+            truncation_signs = []
+            # Unbalanced quotes
+            single_quotes = combined.count("'") - combined.count("\\'")
+            double_quotes = combined.count('"') - combined.count('\\"')
+            if single_quotes % 2 != 0:
+                truncation_signs.append("odd number of single quotes")
+            if double_quotes % 2 != 0:
+                truncation_signs.append("odd number of double quotes")
+            # Unbalanced brackets/parens
+            if combined.count('(') != combined.count(')'):
+                truncation_signs.append("unbalanced parentheses")
+            if combined.count('[') != combined.count(']'):
+                truncation_signs.append("unbalanced brackets")
+            if combined.count('{') != combined.count('}'):
+                truncation_signs.append("unbalanced braces")
+            # Code ends mid-statement
+            last_line = combined.strip().split('\n')[-1].strip()
+            if last_line and not last_line.endswith((':',')',')',']','}',',','"',"'")):
+                if '=' in last_line or last_line.startswith(('def ', 'class ', 'if ', 'for ', 'while ')):
+                    truncation_signs.append(f"incomplete last line: '{last_line[:50]}...'")
+
+            if truncation_signs:
+                print(f"[AI Code Extraction] WARNING: Code may be truncated! Signs: {', '.join(truncation_signs)}")
+                print(f"[AI Code Extraction] Last 100 chars: {repr(combined[-100:])}")
+
+            print(f"[AI Code Extraction] SUCCESS: {len(all_code_blocks)} block(s), {len(combined)} total chars")
+            return combined
+
+        # Debug: log if no code found but response looks like it has code
+        if '```' in response:
+            print(f"[AI Code Extraction] Warning: Response contains ``` but no code extracted. Response preview: {response[:200]}")
+
+        return ""
+
+    def _format_ai_response(self, response: str, strip_code: bool = False) -> str:
+        """
+        Format AI response for display in chat.
+
+        - Converts newlines to <br> for proper line breaks
+        - Formats or strips code blocks
+        - Handles basic markdown (bold, italic, lists)
+        """
+        import re
+
+        formatted = response
+
+        # If stripping code (because it went to notebook), remove code blocks entirely
+        if strip_code:
+            # Remove ```python...``` blocks
+            formatted = re.sub(r'```python\s*.*?\s*```', '<i>[Code sent to notebook]</i>', formatted, flags=re.DOTALL | re.IGNORECASE)
+            # Remove generic ```...``` blocks that look like code
+            formatted = re.sub(r'```\s*.*?\s*```', '<i>[Code sent to notebook]</i>', formatted, flags=re.DOTALL)
+        else:
+            # Format code blocks with styled pre tags
+            def format_code_block(match):
+                code = match.group(1).strip()
+                # Escape HTML in code
+                code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                return f'<pre style="background-color: #1e1e1e; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 9pt;">{code}</pre>'
+
+            formatted = re.sub(r'```python\s*(.*?)\s*```', format_code_block, formatted, flags=re.DOTALL | re.IGNORECASE)
+            formatted = re.sub(r'```\s*(.*?)\s*```', format_code_block, formatted, flags=re.DOTALL)
+
+        # Convert markdown bold **text** to <b>text</b>
+        formatted = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', formatted)
+
+        # Convert markdown italic *text* to <i>text</i> (but not inside code)
+        formatted = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<i>\1</i>', formatted)
+
+        # Convert markdown bullet lists
+        formatted = re.sub(r'^[\-\*]\s+(.+)$', r'• \1', formatted, flags=re.MULTILINE)
+
+        # Convert numbered lists (1. 2. 3.)
+        formatted = re.sub(r'^(\d+)\.\s+(.+)$', r'\1. \2', formatted, flags=re.MULTILINE)
+
+        # Convert newlines to <br> for display (but preserve pre blocks)
+        # Split by pre tags, only convert newlines outside pre
+        parts = re.split(r'(<pre.*?</pre>)', formatted, flags=re.DOTALL)
+        for i, part in enumerate(parts):
+            if not part.startswith('<pre'):
+                parts[i] = part.replace('\n', '<br>')
+        formatted = ''.join(parts)
+
+        return formatted
+
+    def _build_ai_context(self) -> str:
+        """Build comprehensive context string about current files for AI."""
+        import json
+        lines = []
+
+        # Data files - detailed view
+        num_files = len(self._master_file_list) if self._master_file_list else 0
+        if num_files > 0:
+            # Summary counts
+            abf_count = sum(1 for f in self._master_file_list if str(f.get('file_path', '')).lower().endswith('.abf'))
+            smrx_count = sum(1 for f in self._master_file_list if str(f.get('file_path', '')).lower().endswith('.smrx'))
+            edf_count = sum(1 for f in self._master_file_list if str(f.get('file_path', '')).lower().endswith('.edf'))
+
+            # Count by status
+            completed = sum(1 for f in self._master_file_list if f.get('status') == 'completed')
+            pending = sum(1 for f in self._master_file_list if f.get('status', 'pending') == 'pending')
+
+            # Count files with exports
+            with_exports = sum(1 for f in self._master_file_list if f.get('exports'))
+
+            lines.append(f"=== PROJECT DATA SUMMARY ===")
+            lines.append(f"Total rows: {num_files} ({abf_count} ABF, {smrx_count} SMRX, {edf_count} EDF)")
+            lines.append(f"Status: {completed} completed, {pending} pending")
+            lines.append(f"Files with exports: {with_exports}")
+
+            # Protocols
+            protocols = set(f.get('protocol', '') for f in self._master_file_list if f.get('protocol'))
+            if protocols:
+                lines.append(f"Protocols: {', '.join(sorted(protocols))}")
+
+            # Detailed file list (limit to avoid token bloat)
+            MAX_FILES_DETAILED = 30  # Show full details for first N files
+            lines.append(f"\n=== DETAILED FILE LIST (showing {min(num_files, MAX_FILES_DETAILED)} of {num_files} rows) ===")
+
+            # Group files by parent (for sub-row organization)
+            current_parent = None
+            for i, task in enumerate(self._master_file_list[:MAX_FILES_DETAILED]):
+                file_name = task.get('file_name', 'Unknown')
+                is_sub_row = task.get('is_sub_row', False)
+
+                # Build file info line
+                info_parts = []
+
+                # Basic info
+                status = task.get('status', 'pending')
+                status_icon = "✓" if status == 'completed' else "○"
+
+                if is_sub_row:
+                    prefix = f"  └─ {status_icon} [Sub-row]"
+                else:
+                    prefix = f"{status_icon}"
+                    current_parent = file_name
+
+                info_parts.append(f"{prefix} {file_name}")
+
+                # File path (source data file)
+                file_path = task.get('file_path', '')
+                if file_path:
+                    info_parts.append(f"path={file_path}")
+
+                # Channel info
+                channel = task.get('channel', '')
+                if channel:
+                    info_parts.append(f"channel={channel}")
+
+                # Protocol
+                protocol = task.get('protocol', '')
+                if protocol:
+                    info_parts.append(f"protocol={protocol}")
+
+                # Export info - this is what the user asked about!
+                exports = task.get('exports', {})
+                if exports:
+                    export_str = ", ".join([f"{count} {fmt.upper()}" for fmt, count in exports.items() if count > 0])
+                    if export_str:
+                        info_parts.append(f"exports=[{export_str}]")
+
+                # Export path (where CSV/NPZ files are saved)
+                export_path = task.get('export_path', '')
+                if export_path:
+                    info_parts.append(f"export_dir={export_path}")
+
+                # Metadata columns
+                animal_id = task.get('animal_id', '')
+                if animal_id:
+                    info_parts.append(f"animal={animal_id}")
+
+                strain = task.get('strain', '')
+                if strain:
+                    info_parts.append(f"strain={strain}")
+
+                sex = task.get('sex', '')
+                if sex:
+                    info_parts.append(f"sex={sex}")
+
+                power = task.get('power', '')
+                if power:
+                    info_parts.append(f"power={power}")
+
+                stim_type = task.get('stim_type', '')
+                if stim_type:
+                    info_parts.append(f"stim={stim_type}")
+
+                # Scan warnings
+                warnings = task.get('scan_warnings', {})
+                if warnings:
+                    info_parts.append(f"warnings={len(warnings)}")
+
+                lines.append(" | ".join(info_parts))
+
+            if num_files > MAX_FILES_DETAILED:
+                lines.append(f"... and {num_files - MAX_FILES_DETAILED} more files (ask about specific files by name or filter)")
+            lines.append(f"=== END FILE LIST ===")
+        else:
+            lines.append("No data files currently loaded.")
+            lines.append("User should scan a directory or load a project first.")
+
+        # Scan for CSV files and read headers (limit to first few unique export dirs)
+        if num_files > 0:
+            export_dirs = set()
+            for task in self._master_file_list:
+                ep = task.get('export_path', '')
+                if ep:
+                    export_dirs.add(ep)
+
+            if export_dirs:
+                lines.append(f"\n=== EXPORTED CSV FILES & HEADERS ===")
+                csv_files_found = []
+
+                for export_dir in list(export_dirs)[:3]:  # Limit to 3 directories
+                    try:
+                        from pathlib import Path
+                        export_path = Path(export_dir)
+                        if export_path.exists():
+                            # Find CSV files
+                            csv_files = list(export_path.glob("*.csv"))[:5]  # Limit per dir
+                            for csv_file in csv_files:
+                                try:
+                                    # Read just the header line
+                                    with open(csv_file, 'r') as f:
+                                        header_line = f.readline().strip()
+                                    headers = header_line.split(',')
+                                    csv_files_found.append({
+                                        'path': str(csv_file),
+                                        'name': csv_file.name,
+                                        'headers': headers[:20]  # Limit columns shown
+                                    })
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                if csv_files_found:
+                    # Show unique header patterns
+                    header_patterns = {}
+                    for cf in csv_files_found:
+                        pattern = tuple(cf['headers'])
+                        if pattern not in header_patterns:
+                            header_patterns[pattern] = []
+                        header_patterns[pattern].append(cf['name'])
+
+                    lines.append(f"Found {len(csv_files_found)} CSV files in export directories")
+                    lines.append("")
+
+                    for headers, files in list(header_patterns.items())[:3]:  # Show up to 3 patterns
+                        lines.append(f"CSV Pattern (used by {len(files)} files, e.g., {files[0]}):")
+                        lines.append(f"  Columns: {', '.join(headers)}")
+                        lines.append("")
+
+                    # List CSV files with paths (limited)
+                    lines.append("CSV file paths:")
+                    for cf in csv_files_found[:8]:  # Limit to 8 files
+                        lines.append(f"  - {cf['path']}")
+                    if len(csv_files_found) > 8:
+                        lines.append(f"  ... and {len(csv_files_found) - 8} more")
+                else:
+                    lines.append("No CSV files found in export directories yet.")
+
+        # Notes files
+        notes_files = getattr(self, '_discovered_notes_files', [])
+        if notes_files:
+            lines.append(f"\n=== NOTES FILES ({len(notes_files)}) ===")
+            for nf in notes_files:
+                lines.append(f"  - {nf.name} ({nf})")
+        else:
+            lines.append("\nNo notes files found.")
+
+        # Project info
+        project_dir = getattr(self, '_project_directory', None)
+        if project_dir:
+            lines.append(f"\nProject directory: {project_dir}")
+
+        # Available project files
+        lines.append(f"\n=== AVAILABLE PROJECT FILES ===")
+        try:
+            recent_projects = self.project_manager.get_recent_projects()
+            if recent_projects:
+                lines.append(f"Recent projects ({len(recent_projects)}):")
+                for proj in recent_projects:
+                    lines.append(f"  - {proj['name']} (path: {proj['path']})")
+            else:
+                lines.append("No recent projects found.")
+        except Exception:
+            lines.append("Could not retrieve project list.")
+
+        # AI Commands documentation
+        lines.append(f"\n=== AI COMMANDS ===")
+        lines.append("You can execute these commands by including them in your response:")
+        lines.append("")
+        lines.append("PROJECT MANAGEMENT:")
+        lines.append("  [NEW_PROJECT: project_name] - Create a new project with the given name")
+        lines.append("  [SAVE_PROJECT] - Save the current project")
+        lines.append("  [RENAME_PROJECT: new_name] - Rename the current project")
+        lines.append("  [LOAD_PROJECT: project_name] - Load a project by name")
+        lines.append("")
+        lines.append("FILE SCANNING:")
+        lines.append("  [SCAN_DIRECTORY: path] - Scan a directory for data files")
+        lines.append("  [SCAN_SAVED_DATA] - Scan for existing exported CSV/NPZ files")
+        lines.append("  [SET_FILE_TYPES: abf,smrx,edf] - Set which file types to scan for")
+        lines.append("")
+        lines.append("TABLE FILTERING:")
+        lines.append("  [FILTER_ROWS: search_text] - Filter table rows by search text")
+        lines.append("  [CLEAR_FILTER] - Clear the table filter to show all rows")
+        lines.append("  [SET_FILTER_COLUMN: column_name] - Set which column to filter (All, File Name, Protocol, Animal ID, Strain, Keywords)")
+        lines.append("")
+        lines.append("METADATA UPDATES:")
+        lines.append("  [UPDATE_META: filename | field=value, field2=value2] - Update metadata")
+        lines.append("    Valid fields: animal_id, strain, sex, power, stim_type, experiment")
+        lines.append("  Example: [UPDATE_META: 0801_testday7_10.edf | animal_id=mouse_42, sex=M]")
+
+        return "\n".join(lines)
+
+    def _scroll_chat_to_bottom(self):
+        """Scroll chat history to bottom."""
+        scrollbar = self.chatHistoryText.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    # ==================== LOCAL AI TOOLS ====================
+    # These tools are called by the AI to search/query data locally
+    # without sending the full dataset over the API
+
+    def _get_ai_tool_definitions(self) -> list:
+        """
+        Get tool definitions for native Claude tool use.
+        These define the schema for each tool the AI can call.
+        """
+        return [
+            {
+                "name": "search_files",
+                "description": "Search project files by combining multiple criteria in ONE call. You can specify ANY combination of filters - they are applied together (AND logic). For example: protocol='30Hz' + has_exports=true + min_sweeps=10 finds 30Hz files with exports and at least 10 sweeps.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "protocol": {
+                            "type": "string",
+                            "description": "Protocol name to filter by (partial match, e.g., '30Hz', 'baseline')"
+                        },
+                        "animal_id": {
+                            "type": "string",
+                            "description": "Animal ID to filter by"
+                        },
+                        "strain": {
+                            "type": "string",
+                            "description": "Strain to filter by (e.g., 'VgatCre', 'C57')"
+                        },
+                        "sex": {
+                            "type": "string",
+                            "description": "Sex to filter by ('M' or 'F')"
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "Status to filter by ('completed' or 'pending')"
+                        },
+                        "has_exports": {
+                            "type": "boolean",
+                            "description": "If true, only return files that have exported CSV/NPZ data"
+                        },
+                        "min_sweeps": {
+                            "type": "integer",
+                            "description": "Minimum number of sweeps required (e.g., 10 for files with at least 10 sweeps)"
+                        },
+                        "stim_type": {
+                            "type": "string",
+                            "description": "Stimulation type to filter by"
+                        },
+                        "power": {
+                            "type": "string",
+                            "description": "Laser/stim power to filter by (e.g., '10mW')"
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "General keyword to search in file name, protocol, and notes"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "list_all_files",
+                "description": "FALLBACK: List ALL files in the project with compact info. Use this when search isn't finding what you need, or to see everything available. Returns file names, protocols, sweep counts, status, and export info for every file.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "include_exports": {
+                            "type": "boolean",
+                            "description": "Include export details (default: true)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max files to return (default: 50, max: 100)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "get_csv_columns",
+                "description": "Get the column headers from CSV export files for a specific data file or export directory.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path or name of the data file to get CSV columns for"
+                        },
+                        "export_path": {
+                            "type": "string",
+                            "description": "Direct path to export directory containing CSV files"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "list_protocols",
+                "description": "List all unique protocols in the project with file counts for each.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "list_animals",
+                "description": "List all unique animal IDs in the project with file counts for each.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "project_summary",
+                "description": "Get a summary overview of the current project including file counts, status breakdown, and available protocols.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_searchable_values",
+                "description": "IMPORTANT: Call this FIRST before searching! Returns all unique values for each searchable field so you know exactly what terms exist in the data (exact protocol names, status values, animal IDs, etc). Use these exact values in your search queries.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        ]
+
+    def _execute_native_tool(self, tool_name: str, tool_input: dict) -> dict:
+        """Execute a native tool call and return the result."""
+        tool_method = getattr(self, f'_ai_tool_{tool_name}', None)
+        if tool_method:
+            try:
+                return tool_method(**tool_input)
+            except Exception as e:
+                return {"error": str(e)}
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    def _ai_tool_search_files(self, **kwargs) -> dict:
+        """
+        Search files by criteria. Returns matching files with details.
+        Kwargs can include: protocol, animal_id, strain, sex, status,
+                           has_exports, min_sweeps, stim_type, power, keyword
+        """
+        if not self._master_file_list:
+            return {"matches": [], "count": 0, "message": "No files loaded"}
+
+        # First, build a map of file_path -> aggregated info from all rows (parent + sub-rows)
+        # This allows us to aggregate exports from sub-rows to their parent file
+        file_info_map = {}  # file_path -> aggregated info
+
+        for task in self._master_file_list:
+            file_path = str(task.get('file_path', ''))
+            if not file_path:
+                continue
+
+            if file_path not in file_info_map:
+                # Initialize with parent info
+                file_info_map[file_path] = {
+                    'file_name': task.get('file_name', ''),
+                    'file_path': file_path,
+                    'protocol': task.get('protocol', ''),
+                    'status': task.get('status', 'pending'),
+                    'animal_id': task.get('animal_id', ''),
+                    'strain': task.get('strain', ''),
+                    'sex': task.get('sex', ''),
+                    'power': task.get('power', ''),
+                    'stim_type': task.get('stim_type', ''),
+                    'sweeps': task.get('sweeps', task.get('sweep_count', '')),
+                    'keywords': task.get('keywords', ''),
+                    'notes': task.get('notes', ''),
+                    'exports': {},
+                    'export_path': '',
+                    'channels': [],
+                }
+
+            info = file_info_map[file_path]
+
+            # Track channels (from sub-rows)
+            channel = task.get('channel', '')
+            if channel and channel not in info['channels']:
+                info['channels'].append(channel)
+
+            # Aggregate exports from all rows (sub-rows have the actual export data)
+            task_exports = task.get('exports', {})
+            if isinstance(task_exports, dict):
+                for key, val in task_exports.items():
+                    if val is True or val == 'true' or val == 'True' or val == 1:
+                        info['exports'][key] = True
+
+            # Update export_path if this row has one
+            if task.get('export_path') and not info['export_path']:
+                info['export_path'] = task.get('export_path')
+
+            # Update status if any row is completed
+            if task.get('status') == 'completed':
+                info['status'] = 'completed'
+
+            # Aggregate metadata (prefer non-empty values)
+            for field in ['animal_id', 'strain', 'sex', 'power', 'stim_type']:
+                if task.get(field) and not info.get(field):
+                    info[field] = task.get(field)
+
+        # Now search the aggregated file info
+        matches = []
+        for file_path, info in file_info_map.items():
+            match = True
+
+            # Protocol filter (partial match, case-insensitive)
+            if 'protocol' in kwargs and kwargs['protocol']:
+                proto = str(info.get('protocol', '')).lower()
+                if kwargs['protocol'].lower() not in proto:
+                    match = False
+
+            # Animal ID filter
+            if 'animal_id' in kwargs and kwargs['animal_id']:
+                animal = str(info.get('animal_id', '')).lower()
+                if kwargs['animal_id'].lower() not in animal:
+                    match = False
+
+            # Strain filter
+            if 'strain' in kwargs and kwargs['strain']:
+                strain = str(info.get('strain', '')).lower()
+                if kwargs['strain'].lower() not in strain:
+                    match = False
+
+            # Sex filter
+            if 'sex' in kwargs and kwargs['sex']:
+                sex = str(info.get('sex', '')).lower()
+                if kwargs['sex'].lower() != sex:
+                    match = False
+
+            # Status filter - flexible matching for "completed"
+            if 'status' in kwargs and kwargs['status']:
+                status_val = str(info.get('status', '')).lower().strip()
+                search_status = kwargs['status'].lower().strip()
+                # Treat various values as "completed"
+                completed_values = {'completed', 'complete', 'done', '✓', 'true', 'yes', '1', 'checked'}
+                pending_values = {'pending', 'incomplete', '', 'false', 'no', '0', 'unchecked'}
+
+                if search_status in completed_values or search_status == 'completed':
+                    # User wants completed files
+                    if status_val not in completed_values:
+                        match = False
+                elif search_status in pending_values or search_status == 'pending':
+                    # User wants pending files
+                    if status_val not in pending_values:
+                        match = False
+                else:
+                    # Exact/partial match for other values
+                    if search_status not in status_val:
+                        match = False
+
+            # Has exports filter - check aggregated exports
+            if 'has_exports' in kwargs and kwargs['has_exports']:
+                exports = info.get('exports', {})
+                export_path = info.get('export_path', '')
+
+                # Check if exports dict has any truthy values
+                has_export_data = any(
+                    val is True or val == 'true' or val == 'True' or val == 1
+                    for val in exports.values()
+                ) if isinstance(exports, dict) else False
+
+                # Check if export_path exists
+                has_export_path = bool(export_path)
+
+                if not (has_export_data or has_export_path):
+                    match = False
+
+            # Min sweeps filter
+            if 'min_sweeps' in kwargs and kwargs['min_sweeps']:
+                sweeps = info.get('sweeps', 0)
+                # Handle string or int sweep counts
+                try:
+                    sweep_count = int(sweeps) if sweeps else 0
+                except (ValueError, TypeError):
+                    sweep_count = 0
+                if sweep_count < int(kwargs['min_sweeps']):
+                    match = False
+
+            # Stim type filter
+            if 'stim_type' in kwargs and kwargs['stim_type']:
+                stim = str(info.get('stim_type', '')).lower()
+                if kwargs['stim_type'].lower() not in stim:
+                    match = False
+
+            # Power filter
+            if 'power' in kwargs and kwargs['power']:
+                power = str(info.get('power', '')).lower()
+                if kwargs['power'].lower() not in power:
+                    match = False
+
+            # Keyword filter (searches file name, protocol, notes)
+            if 'keyword' in kwargs and kwargs['keyword']:
+                kw = kwargs['keyword'].lower()
+                searchable = ' '.join([
+                    str(info.get('file_name', '')),
+                    str(info.get('protocol', '')),
+                    str(info.get('notes', '')),
+                    str(info.get('keywords', ''))
+                ]).lower()
+                if kw not in searchable:
+                    match = False
+
+            if match:
+                # Build compact file info for output
+                file_info = {
+                    'file_name': info.get('file_name', ''),
+                    'file_path': info.get('file_path', ''),
+                    'protocol': info.get('protocol', ''),
+                    'status': info.get('status', 'pending'),
+                }
+                # Add channels if present
+                if info.get('channels'):
+                    file_info['channels'] = info['channels']
+                # Add export info if present
+                if info.get('exports'):
+                    file_info['exports'] = info['exports']
+                    file_info['export_path'] = info.get('export_path', '')
+                # Add other metadata if present
+                for field in ['animal_id', 'strain', 'sex', 'power', 'stim_type', 'sweeps']:
+                    if info.get(field):
+                        file_info[field] = info.get(field)
+                matches.append(file_info)
+
+        return {
+            "matches": matches[:20],  # Limit results
+            "count": len(matches),
+            "truncated": len(matches) > 20
+        }
+
+    def _ai_tool_get_csv_columns(self, file_path: str = None, export_path: str = None) -> dict:
+        """Get CSV column headers for a specific file or export directory."""
+        from pathlib import Path
+
+        if export_path:
+            search_path = Path(export_path)
+        elif file_path:
+            # Find export path for this file
+            for task in self._master_file_list:
+                if task.get('file_path') == file_path or task.get('file_name') == file_path:
+                    search_path = Path(task.get('export_path', ''))
+                    break
+            else:
+                return {"error": f"File not found: {file_path}"}
+        else:
+            return {"error": "Provide file_path or export_path"}
+
+        if not search_path.exists():
+            return {"error": f"Path not found: {search_path}"}
+
+        csv_info = []
+        for csv_file in list(search_path.glob("*.csv"))[:5]:
+            try:
+                with open(csv_file, 'r') as f:
+                    header = f.readline().strip()
+                columns = [c.strip() for c in header.split(',')]
+                csv_info.append({
+                    "file": csv_file.name,
+                    "path": str(csv_file),
+                    "columns": columns
+                })
+            except Exception as e:
+                csv_info.append({"file": csv_file.name, "error": str(e)})
+
+        return {"csv_files": csv_info, "count": len(csv_info)}
+
+    def _ai_tool_list_protocols(self) -> dict:
+        """List all unique protocols in the project."""
+        if not self._master_file_list:
+            return {"protocols": [], "message": "No files loaded"}
+
+        protocols = {}
+        for task in self._master_file_list:
+            if task.get('is_sub_row'):
+                continue
+            proto = task.get('protocol', '')
+            if proto:
+                protocols[proto] = protocols.get(proto, 0) + 1
+
+        return {
+            "protocols": [{"name": k, "count": v} for k, v in sorted(protocols.items())],
+            "total": len(protocols)
+        }
+
+    def _ai_tool_list_animals(self) -> dict:
+        """List all unique animal IDs in the project."""
+        if not self._master_file_list:
+            return {"animals": [], "message": "No files loaded"}
+
+        animals = {}
+        for task in self._master_file_list:
+            if task.get('is_sub_row'):
+                continue
+            animal = task.get('animal_id', '')
+            if animal:
+                animals[animal] = animals.get(animal, 0) + 1
+
+        return {
+            "animals": [{"id": k, "count": v} for k, v in sorted(animals.items())],
+            "total": len(animals)
+        }
+
+    def _ai_tool_project_summary(self) -> dict:
+        """Get a summary of the current project without full file list."""
+        if not self._master_file_list:
+            return {"message": "No files loaded", "file_count": 0}
+
+        # Aggregate data from all rows (parent + sub-rows) by file_path
+        file_info_map = {}
+        for task in self._master_file_list:
+            file_path = str(task.get('file_path', ''))
+            if not file_path:
+                continue
+
+            if file_path not in file_info_map:
+                file_info_map[file_path] = {
+                    'status': task.get('status', 'pending'),
+                    'protocol': task.get('protocol', ''),
+                    'animal_id': task.get('animal_id', ''),
+                    'has_exports': False,
+                    'has_export_path': False,
+                }
+
+            info = file_info_map[file_path]
+
+            # Aggregate exports from sub-rows
+            task_exports = task.get('exports', {})
+            if isinstance(task_exports, dict):
+                for val in task_exports.values():
+                    if val is True or val == 'true' or val == 'True' or val == 1:
+                        info['has_exports'] = True
+                        break
+
+            # Update export_path if this row has one
+            if task.get('export_path'):
+                info['has_export_path'] = True
+
+            # Update status if any row is completed
+            if task.get('status') == 'completed':
+                info['status'] = 'completed'
+
+        file_count = len(file_info_map)
+
+        # Count status values
+        status_counts = {}
+        for info in file_info_map.values():
+            status = str(info.get('status', 'none')).strip()
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        # Count files with exports
+        with_exports = sum(1 for info in file_info_map.values() if info['has_exports'])
+        with_export_path = sum(1 for info in file_info_map.values() if info['has_export_path'])
+
+        protocols = set(info.get('protocol', '') for info in file_info_map.values() if info.get('protocol'))
+        animals = set(info.get('animal_id', '') for info in file_info_map.values() if info.get('animal_id'))
+
+        return {
+            "file_count": file_count,
+            "status_breakdown": status_counts,  # Shows actual status values
+            "with_exports": with_exports,
+            "with_export_path": with_export_path,
+            "protocols": list(protocols)[:10],
+            "animals": list(animals)[:10],
+            "project_dir": str(getattr(self, '_project_directory', 'Not set'))
+        }
+
+    def _ai_tool_list_all_files(self, include_exports: bool = True, limit: int = 50) -> dict:
+        """
+        FALLBACK: List all files in the project with compact info.
+        Use when search isn't working or to see everything.
+        """
+        if not self._master_file_list:
+            return {"files": [], "count": 0, "message": "No files loaded"}
+
+        # Clamp limit
+        limit = min(max(1, limit), 100)
+
+        # Aggregate data from all rows by file_path (same as search)
+        file_info_map = {}
+        for task in self._master_file_list:
+            file_path = str(task.get('file_path', ''))
+            if not file_path:
+                continue
+
+            if file_path not in file_info_map:
+                file_info_map[file_path] = {
+                    'file_name': task.get('file_name', ''),
+                    'protocol': task.get('protocol', ''),
+                    'sweeps': task.get('sweeps', task.get('sweep_count', '')),
+                    'status': task.get('status', 'pending'),
+                    'channels': [],
+                    'exports': {},
+                    'export_path': '',
+                }
+
+            info = file_info_map[file_path]
+
+            # Track channels
+            channel = task.get('channel', '')
+            if channel and channel not in info['channels']:
+                info['channels'].append(channel)
+
+            # Aggregate exports
+            task_exports = task.get('exports', {})
+            if isinstance(task_exports, dict):
+                for key, val in task_exports.items():
+                    if val is True or val == 'true' or val == 'True' or val == 1:
+                        info['exports'][key] = True
+
+            if task.get('export_path') and not info['export_path']:
+                info['export_path'] = task.get('export_path')
+
+            if task.get('status') == 'completed':
+                info['status'] = 'completed'
+
+        # Build compact file list
+        files = []
+        for file_path, info in list(file_info_map.items())[:limit]:
+            file_entry = {
+                'name': info['file_name'],
+                'protocol': info['protocol'],
+                'sweeps': info['sweeps'],
+                'status': info['status'],
+            }
+            if info['channels']:
+                file_entry['channels'] = info['channels']
+            if include_exports and info['exports']:
+                # Format exports compactly
+                export_types = [k for k, v in info['exports'].items() if v]
+                if export_types:
+                    file_entry['exports'] = export_types
+                    file_entry['export_path'] = info['export_path']
+            files.append(file_entry)
+
+        return {
+            "files": files,
+            "count": len(file_info_map),
+            "showing": len(files),
+            "truncated": len(file_info_map) > limit
+        }
+
+    def _ai_tool_get_searchable_values(self) -> dict:
+        """
+        Get all unique values for each searchable field.
+        This helps the AI know exactly what terms to search for.
+        """
+        if not self._master_file_list:
+            return {"message": "No files loaded", "values": {}}
+
+        # Collect unique values for each searchable field
+        values = {
+            "protocols": set(),
+            "statuses": set(),
+            "animal_ids": set(),
+            "strains": set(),
+            "sexes": set(),
+            "stim_types": set(),
+            "powers": set(),
+            "channels": set(),
+        }
+
+        # Aggregate data from all rows (parent + sub-rows) by file_path
+        file_info_map = {}
+        for task in self._master_file_list:
+            file_path = str(task.get('file_path', ''))
+            if not file_path:
+                continue
+
+            if file_path not in file_info_map:
+                file_info_map[file_path] = {
+                    'file_name': task.get('file_name', ''),
+                    'has_exports': False,
+                }
+
+            info = file_info_map[file_path]
+
+            # Collect each field from all rows (parent and sub-rows)
+            if task.get('protocol'):
+                values['protocols'].add(str(task['protocol']))
+            if task.get('status'):
+                values['statuses'].add(str(task['status']))
+            if task.get('animal_id'):
+                values['animal_ids'].add(str(task['animal_id']))
+            if task.get('strain'):
+                values['strains'].add(str(task['strain']))
+            if task.get('sex'):
+                values['sexes'].add(str(task['sex']))
+            if task.get('stim_type'):
+                values['stim_types'].add(str(task['stim_type']))
+            if task.get('power'):
+                values['powers'].add(str(task['power']))
+            if task.get('channel'):
+                values['channels'].add(str(task['channel']))
+
+            # Track files with exports (aggregate from all rows including sub-rows)
+            task_exports = task.get('exports', {})
+            if isinstance(task_exports, dict):
+                for val in task_exports.values():
+                    if val is True or val == 'true' or val == 'True' or val == 1:
+                        info['has_exports'] = True
+                        break
+            if task.get('export_path'):
+                info['has_exports'] = True
+
+        # Build list of files with exports
+        files_with_exports = [
+            info['file_name'] for info in file_info_map.values()
+            if info['has_exports']
+        ]
+
+        # Convert sets to sorted lists
+        result = {}
+        for key, val_set in values.items():
+            sorted_vals = sorted([v for v in val_set if v])  # Remove empty strings
+            if sorted_vals:
+                result[key] = sorted_vals
+
+        # Add export info
+        result['files_with_exports'] = files_with_exports[:20]  # Limit to 20
+        result['total_files'] = len(file_info_map)
+        result['total_with_exports'] = len(files_with_exports)
+
+        return result
+
+    # ==================== END LOCAL AI TOOLS ====================
+
+    def _execute_ai_commands(self, response: str) -> list:
+        """
+        Parse AI response for commands and execute them.
+        Returns list of executed command results.
+        """
+        import re
+        results = []
+
+        # PROJECT MANAGEMENT COMMANDS
+
+        # [NEW_PROJECT: project_name]
+        new_proj_pattern = r'\[NEW_PROJECT:\s*([^\]]+)\]'
+        for match in re.findall(new_proj_pattern, response, re.IGNORECASE):
+            result = self._ai_new_project(match.strip())
+            results.append(result)
+
+        # [SAVE_PROJECT]
+        if re.search(r'\[SAVE_PROJECT\]', response, re.IGNORECASE):
+            result = self._ai_save_project()
+            results.append(result)
+
+        # [RENAME_PROJECT: new_name]
+        rename_pattern = r'\[RENAME_PROJECT:\s*([^\]]+)\]'
+        for match in re.findall(rename_pattern, response, re.IGNORECASE):
+            result = self._ai_rename_project(match.strip())
+            results.append(result)
+
+        # [LOAD_PROJECT: project_name]
+        load_pattern = r'\[LOAD_PROJECT:\s*([^\]]+)\]'
+        for match in re.findall(load_pattern, response, re.IGNORECASE):
+            result = self._ai_load_project(match.strip())
+            results.append(result)
+
+        # FILE SCANNING COMMANDS
+
+        # [SCAN_DIRECTORY: path]
+        scan_dir_pattern = r'\[SCAN_DIRECTORY:\s*([^\]]+)\]'
+        for match in re.findall(scan_dir_pattern, response, re.IGNORECASE):
+            result = self._ai_scan_directory(match.strip())
+            results.append(result)
+
+        # [SCAN_SAVED_DATA]
+        if re.search(r'\[SCAN_SAVED_DATA\]', response, re.IGNORECASE):
+            result = self._ai_scan_saved_data()
+            results.append(result)
+
+        # [SET_FILE_TYPES: abf,smrx,edf]
+        file_types_pattern = r'\[SET_FILE_TYPES:\s*([^\]]+)\]'
+        for match in re.findall(file_types_pattern, response, re.IGNORECASE):
+            result = self._ai_set_file_types(match.strip())
+            results.append(result)
+
+        # TABLE FILTERING COMMANDS
+
+        # [FILTER_ROWS: search_text]
+        filter_pattern = r'\[FILTER_ROWS:\s*([^\]]+)\]'
+        for match in re.findall(filter_pattern, response, re.IGNORECASE):
+            result = self._ai_filter_rows(match.strip())
+            results.append(result)
+
+        # [CLEAR_FILTER]
+        if re.search(r'\[CLEAR_FILTER\]', response, re.IGNORECASE):
+            result = self._ai_clear_filter()
+            results.append(result)
+
+        # [SET_FILTER_COLUMN: column_name]
+        filter_col_pattern = r'\[SET_FILTER_COLUMN:\s*([^\]]+)\]'
+        for match in re.findall(filter_col_pattern, response, re.IGNORECASE):
+            result = self._ai_set_filter_column(match.strip())
+            results.append(result)
+
+        # METADATA COMMANDS
+
+        # [UPDATE_META: filename | field=value, field2=value2]
+        meta_pattern = r'\[UPDATE_META:\s*([^|]+)\s*\|\s*([^\]]+)\]'
+        for filename, fields_str in re.findall(meta_pattern, response, re.IGNORECASE):
+            result = self._ai_update_metadata(filename.strip(), fields_str.strip())
+            results.append(result)
+
+        return results
+
+    def _ai_load_project(self, project_name: str) -> dict:
+        """Load a project by name (called by AI command)."""
+        try:
+            recent_projects = self.project_manager.get_recent_projects()
+            matching_project = None
+
+            # Find project by name (case-insensitive partial match)
+            for proj in recent_projects:
+                if project_name.lower() in proj['name'].lower():
+                    matching_project = proj
+                    break
+
+            if not matching_project:
+                return {
+                    'command': 'LOAD_PROJECT',
+                    'success': False,
+                    'message': f"Project '{project_name}' not found in recent projects."
+                }
+
+            # Load the project
+            from pathlib import Path
+            project_path = Path(matching_project['path'])
+            project_data = self.project_manager.load_project(project_path)
+
+            # Populate UI with loaded data (this handles master_file_list, table refresh, etc.)
+            self._populate_ui_from_project(project_data)
+
+            # Update status
+            self._log_status_message(f"✓ Loaded project: {matching_project['name']}", 3000)
+
+            return {
+                'command': 'LOAD_PROJECT',
+                'success': True,
+                'message': f"Successfully loaded project '{matching_project['name']}' with {len(self._master_file_list)} files."
+            }
+
+        except Exception as e:
+            return {
+                'command': 'LOAD_PROJECT',
+                'success': False,
+                'message': f"Error loading project: {str(e)}"
+            }
+
+    def _ai_update_metadata(self, filename: str, fields_str: str) -> dict:
+        """Update metadata for a file (called by AI command)."""
+        try:
+            # Valid metadata fields
+            valid_fields = {'animal_id', 'strain', 'sex', 'power', 'stim_type', 'experiment'}
+
+            # Parse field=value pairs
+            updates = {}
+            for pair in fields_str.split(','):
+                pair = pair.strip()
+                if '=' in pair:
+                    field, value = pair.split('=', 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+                    if field in valid_fields:
+                        updates[field] = value
+
+            if not updates:
+                return {
+                    'command': 'UPDATE_META',
+                    'success': False,
+                    'message': f"No valid fields to update. Valid fields: {', '.join(valid_fields)}"
+                }
+
+            # Find the file(s) matching the filename
+            matched_rows = []
+            for i, task in enumerate(self._master_file_list):
+                task_filename = task.get('file_name', '')
+                if filename.lower() in task_filename.lower():
+                    matched_rows.append(i)
+
+            if not matched_rows:
+                return {
+                    'command': 'UPDATE_META',
+                    'success': False,
+                    'message': f"No file matching '{filename}' found in current project."
+                }
+
+            # Apply updates to all matched rows
+            for row in matched_rows:
+                for field, value in updates.items():
+                    self._set_table_cell_value(row, field, value)
+
+            # Report success
+            fields_updated = ', '.join([f"{k}={v}" for k, v in updates.items()])
+            return {
+                'command': 'UPDATE_META',
+                'success': True,
+                'message': f"Updated {len(matched_rows)} file(s) matching '{filename}': {fields_updated}"
+            }
+
+        except Exception as e:
+            return {
+                'command': 'UPDATE_META',
+                'success': False,
+                'message': f"Error updating metadata: {str(e)}"
+            }
+
+    def _ai_new_project(self, project_name: str) -> dict:
+        """Create a new project with the given name (called by AI command)."""
+        try:
+            from pathlib import Path
+
+            # Clear existing data first
+            self._master_file_list = []
+            self._discovered_files_data = []
+            self._file_table_model.clear()
+
+            # Set the project name in the UI
+            self._current_project_name = project_name
+            if hasattr(self, 'projectNameCombo'):
+                self.projectNameCombo.setCurrentText(project_name)
+
+            # Create a default project directory (user can change it later)
+            default_dir = Path.home() / "PhysioMetrics" / project_name
+            default_dir.mkdir(parents=True, exist_ok=True)
+            self._project_directory = str(default_dir)
+
+            if hasattr(self, 'directoryPathEdit'):
+                self.directoryPathEdit.setText(str(default_dir))
+
+            self._log_status_message(f"✓ Created new project: {project_name}", 3000)
+
+            return {
+                'command': 'NEW_PROJECT',
+                'success': True,
+                'message': f"Created new project '{project_name}' with directory: {default_dir}"
+            }
+
+        except Exception as e:
+            return {
+                'command': 'NEW_PROJECT',
+                'success': False,
+                'message': f"Error creating project: {str(e)}"
+            }
+
+    def _ai_save_project(self) -> dict:
+        """Save the current project (called by AI command)."""
+        try:
+            # Call the existing save method
+            self.on_project_save()
+
+            return {
+                'command': 'SAVE_PROJECT',
+                'success': True,
+                'message': "Project saved successfully."
+            }
+
+        except Exception as e:
+            return {
+                'command': 'SAVE_PROJECT',
+                'success': False,
+                'message': f"Error saving project: {str(e)}"
+            }
+
+    def _ai_rename_project(self, new_name: str) -> dict:
+        """Rename the current project (called by AI command)."""
+        try:
+            old_name = getattr(self, '_current_project_name', '') or ''
+            self._current_project_name = new_name
+            if hasattr(self, 'projectNameCombo'):
+                self.projectNameCombo.setCurrentText(new_name)
+
+            self._log_status_message(f"✓ Renamed project to: {new_name}", 3000)
+
+            return {
+                'command': 'RENAME_PROJECT',
+                'success': True,
+                'message': f"Renamed project from '{old_name}' to '{new_name}'"
+            }
+
+        except Exception as e:
+            return {
+                'command': 'RENAME_PROJECT',
+                'success': False,
+                'message': f"Error renaming project: {str(e)}"
+            }
+
+    def _ai_scan_directory(self, directory_path: str) -> dict:
+        """Scan a directory for data files (called by AI command)."""
+        try:
+            from pathlib import Path
+
+            dir_path = Path(directory_path)
+            if not dir_path.exists():
+                return {
+                    'command': 'SCAN_DIRECTORY',
+                    'success': False,
+                    'message': f"Directory does not exist: {directory_path}"
+                }
+
+            # Update the directory path in UI
+            if hasattr(self, 'directoryPathEdit'):
+                self.directoryPathEdit.setText(directory_path)
+
+            self._project_directory = directory_path
+
+            # Trigger the scan (this runs async)
+            self.on_project_scan_files()
+
+            return {
+                'command': 'SCAN_DIRECTORY',
+                'success': True,
+                'message': f"Started scanning directory: {directory_path}"
+            }
+
+        except Exception as e:
+            return {
+                'command': 'SCAN_DIRECTORY',
+                'success': False,
+                'message': f"Error scanning directory: {str(e)}"
+            }
+
+    def _ai_scan_saved_data(self) -> dict:
+        """Scan for existing exported CSV/NPZ files (called by AI command)."""
+        try:
+            # Trigger the saved data scan
+            self.on_project_scan_saved_data()
+
+            return {
+                'command': 'SCAN_SAVED_DATA',
+                'success': True,
+                'message': "Started scanning for saved data files."
+            }
+
+        except Exception as e:
+            return {
+                'command': 'SCAN_SAVED_DATA',
+                'success': False,
+                'message': f"Error scanning saved data: {str(e)}"
+            }
+
+    def _ai_set_file_types(self, types_str: str) -> dict:
+        """Set which file types to scan for (called by AI command)."""
+        try:
+            # Parse the comma-separated file types
+            file_types = [t.strip().lower() for t in types_str.split(',')]
+
+            # Update checkboxes based on file types
+            changed = []
+            if hasattr(self, 'scanAbfCheckbox'):
+                state = 'abf' in file_types
+                self.scanAbfCheckbox.setChecked(state)
+                if state:
+                    changed.append('ABF')
+
+            if hasattr(self, 'scanSmrxCheckbox'):
+                state = 'smrx' in file_types
+                self.scanSmrxCheckbox.setChecked(state)
+                if state:
+                    changed.append('SMRX')
+
+            if hasattr(self, 'scanEdfCheckbox'):
+                state = 'edf' in file_types
+                self.scanEdfCheckbox.setChecked(state)
+                if state:
+                    changed.append('EDF')
+
+            if hasattr(self, 'scanNotesCheckbox'):
+                state = 'notes' in file_types or 'xlsx' in file_types or 'txt' in file_types
+                self.scanNotesCheckbox.setChecked(state)
+                if state:
+                    changed.append('Notes')
+
+            return {
+                'command': 'SET_FILE_TYPES',
+                'success': True,
+                'message': f"Set file types to scan: {', '.join(changed) if changed else 'None'}"
+            }
+
+        except Exception as e:
+            return {
+                'command': 'SET_FILE_TYPES',
+                'success': False,
+                'message': f"Error setting file types: {str(e)}"
+            }
+
+    def _ai_filter_rows(self, search_text: str) -> dict:
+        """Filter table rows by search text (called by AI command)."""
+        try:
+            if hasattr(self, 'tableFilterEdit'):
+                self.tableFilterEdit.setText(search_text)
+                # Trigger the filter
+                self._on_table_filter_changed()
+
+            # Count visible rows
+            visible_count = 0
+            total_count = self._file_table_model.rowCount()
+            table = self.discoveredFilesTable
+            for row in range(total_count):
+                if not table.isRowHidden(row):
+                    visible_count += 1
+
+            return {
+                'command': 'FILTER_ROWS',
+                'success': True,
+                'message': f"Filtered table with '{search_text}': showing {visible_count} of {total_count} rows"
+            }
+
+        except Exception as e:
+            return {
+                'command': 'FILTER_ROWS',
+                'success': False,
+                'message': f"Error filtering rows: {str(e)}"
+            }
+
+    def _ai_clear_filter(self) -> dict:
+        """Clear the table filter to show all rows (called by AI command)."""
+        try:
+            if hasattr(self, 'tableFilterEdit'):
+                self.tableFilterEdit.clear()
+                # Trigger the filter update
+                self._on_table_filter_changed()
+
+            total_count = self._file_table_model.rowCount()
+
+            return {
+                'command': 'CLEAR_FILTER',
+                'success': True,
+                'message': f"Cleared filter. Showing all {total_count} rows."
+            }
+
+        except Exception as e:
+            return {
+                'command': 'CLEAR_FILTER',
+                'success': False,
+                'message': f"Error clearing filter: {str(e)}"
+            }
+
+    def _ai_set_filter_column(self, column_name: str) -> dict:
+        """Set which column to filter (called by AI command)."""
+        try:
+            if not hasattr(self, 'filterColumnCombo'):
+                return {
+                    'command': 'SET_FILTER_COLUMN',
+                    'success': False,
+                    'message': "Filter column selector not available."
+                }
+
+            # Map column names to combo box indices
+            column_map = {
+                'all': 0,
+                'file name': 1,
+                'filename': 1,
+                'protocol': 2,
+                'animal id': 3,
+                'animal_id': 3,
+                'strain': 4,
+                'keywords': 5
+            }
+
+            col_lower = column_name.lower().strip()
+            if col_lower in column_map:
+                self.filterColumnCombo.setCurrentIndex(column_map[col_lower])
+
+                return {
+                    'command': 'SET_FILTER_COLUMN',
+                    'success': True,
+                    'message': f"Set filter column to: {column_name}"
+                }
+            else:
+                available = "All, File Name, Protocol, Animal ID, Strain, Keywords"
+                return {
+                    'command': 'SET_FILTER_COLUMN',
+                    'success': False,
+                    'message': f"Unknown column '{column_name}'. Available: {available}"
+                }
+
+        except Exception as e:
+            return {
+                'command': 'SET_FILTER_COLUMN',
+                'success': False,
+                'message': f"Error setting filter column: {str(e)}"
+            }
+
+    def _process_chat_message_local(self, message: str) -> str:
+        """Process chat message locally (no API) based on keyword matching."""
+        msg_lower = message.lower()
+
+        # Get current data state
+        num_data_files = len(self._master_file_list) if self._master_file_list else 0
+        notes_files = getattr(self, '_discovered_notes_files', [])
+        num_notes = len(notes_files) if notes_files else 0
+
+        # Check for file-related queries
+        if any(word in msg_lower for word in ['file', 'files', 'data', 'see', 'list', 'show', 'what']):
+            if 'note' in msg_lower:
+                # Query about notes files
+                if num_notes == 0:
+                    return ("I don't see any notes files yet. Please scan a directory first using "
+                            "'Scan for New Files' with the 'Notes' checkbox enabled.")
+                else:
+                    notes_list = "<br>".join([f"• {f.name}" for f in notes_files[:10]])
+                    extra = f"<br>... and {num_notes - 10} more" if num_notes > 10 else ""
+                    return (f"I can see <b>{num_notes} notes file(s)</b>:<br>{notes_list}{extra}<br><br>"
+                            "Once AI integration is configured (click ⚙), I'll be able to read and "
+                            "extract metadata from these files!")
+
+            elif any(word in msg_lower for word in ['data', 'abf', 'smrx', 'edf', 'file']):
+                # Query about data files
+                if num_data_files == 0:
+                    return ("I don't see any data files yet. Please scan a directory first using "
+                            "'Scan for New Files'.")
+                else:
+                    # Summarize by file type
+                    abf_count = sum(1 for f in self._master_file_list if str(f.get('file_path', '')).lower().endswith('.abf'))
+                    smrx_count = sum(1 for f in self._master_file_list if str(f.get('file_path', '')).lower().endswith('.smrx'))
+                    edf_count = sum(1 for f in self._master_file_list if str(f.get('file_path', '')).lower().endswith('.edf'))
+
+                    # Get unique protocols
+                    protocols = set(f.get('protocol', 'Unknown') for f in self._master_file_list)
+                    protocols_str = ", ".join(sorted(protocols)[:5])
+                    if len(protocols) > 5:
+                        protocols_str += f" (+{len(protocols)-5} more)"
+
+                    # Sample file names
+                    sample_files = [f.get('file_name', 'Unknown') for f in self._master_file_list[:5]]
+                    samples_str = "<br>".join([f"• {name}" for name in sample_files])
+                    extra = f"<br>... and {num_data_files - 5} more" if num_data_files > 5 else ""
+
+                    return (f"I can see <b>{num_data_files} data file(s)</b>:<br>"
+                            f"• ABF: {abf_count}<br>• SMRX: {smrx_count}<br>• EDF: {edf_count}<br><br>"
+                            f"<b>Protocols found:</b> {protocols_str}<br><br>"
+                            f"<b>Sample files:</b><br>{samples_str}{extra}")
+
+        # Check for plot requests
+        if any(word in msg_lower for word in ['plot', 'graph', 'chart', 'visualize', 'draw']):
+            if num_data_files == 0:
+                return "I'd love to help you plot data, but no files are loaded yet. Please scan a directory first."
+
+            # Generate sample code in the notebook
+            sample_code = '''# Example: Load and plot data from first file
+from pathlib import Path
+import pyabf
+import matplotlib.pyplot as plt
+
+# Get the first file path
+file_path = master_file_list[0]['file_path']
+print(f"Loading: {file_path}")
+
+# Load and plot (for ABF files)
+if str(file_path).lower().endswith('.abf'):
+    abf = pyabf.ABF(str(file_path))
+    abf.setSweep(0)
+    plt.figure(figsize=(10, 4))
+    plt.plot(abf.sweepX, abf.sweepY)
+    plt.xlabel('Time (s)')
+    plt.ylabel(abf.sweepLabelY)
+    plt.title(f'{Path(file_path).name}')
+    plt.tight_layout()
+    plt.show()
+'''
+            if hasattr(self, 'codeInputEdit'):
+                self.codeInputEdit.setPlainText(sample_code)
+
+            return ("I've generated sample plotting code in the Code Notebook below! "
+                    "Click <b>▶ Run</b> to execute it.<br><br>"
+                    "The code will load and plot the first file in your list. "
+                    "You can modify it to plot different files or customize the visualization.")
+
+        # Check for help queries
+        if any(word in msg_lower for word in ['help', 'can you', 'what can', 'how']):
+            return (f"<b>What I can see right now:</b><br>"
+                    f"• Data files: {num_data_files}<br>"
+                    f"• Notes files: {num_notes}<br><br>"
+                    "<b>What I can do:</b><br>"
+                    "• Tell you about loaded files (ask: 'what files do you see?')<br>"
+                    "• List notes files (ask: 'show me the notes files')<br>"
+                    "• Generate plotting code (ask: 'plot the data')<br><br>"
+                    "<b>Coming soon</b> (configure API key via ⚙):<br>"
+                    "• Read and summarize notes files<br>"
+                    "• Extract metadata automatically<br>"
+                    "• Generate custom analysis code<br>"
+                    "• Answer questions about your data")
+
+        # Default response
+        return (f"I'm here to help! I can currently see {num_data_files} data file(s) and {num_notes} notes file(s).<br><br>"
+                "Try asking me:<br>"
+                "• 'What files do you see?'<br>"
+                "• 'Show me the notes files'<br>"
+                "• 'Plot the data'<br>"
+                "• 'Help'<br><br>"
+                "For full AI capabilities, click the ⚙ button to configure your API key.")
+
+    def _check_code_safety(self, code: str) -> tuple:
+        """
+        Check code for dangerous operations using AST parsing.
+
+        RELAXED POLICY: Allows file reading and plotting, blocks only destructive operations.
+
+        Returns:
+            (is_safe, blocked_reasons, warnings)
+            - is_safe: True if code passes all checks
+            - blocked_reasons: List of reasons code was blocked (hard reject)
+            - warnings: List of warnings (user can override)
+        """
+        import ast
+
+        blocked_reasons = []
+        warnings = []
+
+        # Blocked imports - only truly dangerous ones (system manipulation, network, code execution)
+        blocked_imports = {
+            'subprocess',  # Running shell commands
+            'shutil',      # File deletion/moving
+            'ctypes',      # Low-level memory access
+            'multiprocessing',  # Process spawning
+            'socket',      # Network connections
+            'ftplib', 'smtplib',  # Network protocols
+            'pty', 'pipes',  # Terminal/process control
+            'signal',      # Signal handling
+        }
+
+        # Allowed imports (explicitly safe for data analysis)
+        # os - needed for os.path operations (reading paths)
+        # sys - may be needed for some libraries
+        # pickle - needed to load saved data
+        # tempfile - harmless for temp files
+
+        # Blocked function calls - only destructive ones
+        blocked_calls = {
+            'eval', 'exec', '__import__', 'compile',  # Code execution
+            'breakpoint',  # Debugger
+            'exit', 'quit',  # Exit handlers
+        }
+
+        # Warning patterns (user can proceed with confirmation)
+        warning_patterns = ['.to_csv', '.to_excel', '.to_parquet', '.to_json']
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            return False, [f"Syntax error: {e}"], []
+
+        class SafetyVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.blocked = []
+                self.warned = []
+
+            def visit_Import(self, node):
+                for alias in node.names:
+                    module_name = alias.name.split('.')[0]
+                    if module_name in blocked_imports:
+                        self.blocked.append(f"Blocked import: '{alias.name}' (system/network access)")
+                self.generic_visit(node)
+
+            def visit_ImportFrom(self, node):
+                if node.module:
+                    module_name = node.module.split('.')[0]
+                    if module_name in blocked_imports:
+                        self.blocked.append(f"Blocked import: 'from {node.module}' (system/network access)")
+                self.generic_visit(node)
+
+            def visit_Call(self, node):
+                # Check for blocked function calls
+                if isinstance(node.func, ast.Name):
+                    if node.func.id in blocked_calls:
+                        self.blocked.append(f"Blocked call: '{node.func.id}()' (code execution)")
+                elif isinstance(node.func, ast.Attribute):
+                    # Check for dangerous/destructive method calls
+                    attr = node.func.attr
+                    if attr in ['unlink', 'rmdir', 'remove', 'rmtree']:
+                        self.blocked.append(f"Blocked method: '.{attr}()' (file deletion)")
+                    elif attr == 'system':
+                        self.blocked.append(f"Blocked method: '.system()' (shell command)")
+                    # Check for warning patterns (writing files)
+                    for pattern in warning_patterns:
+                        if pattern.lstrip('.') == attr:
+                            self.warned.append(f"File write operation: '.{attr}()'")
+                self.generic_visit(node)
+
+        visitor = SafetyVisitor()
+        visitor.visit(tree)
+
+        blocked_reasons = visitor.blocked
+        warnings = visitor.warned
+
+        # Warn (but don't block) on file writes
+        code_str = code.lower()
+        if 'open(' in code_str and ("'w'" in code_str or '"w"' in code_str or "'a'" in code_str or '"a"' in code_str):
+            warnings.append("File open with write/append mode detected")
+
+        is_safe = len(blocked_reasons) == 0
+        return is_safe, blocked_reasons, warnings
+
+    def _get_sandbox_directory(self) -> str:
+        """Get or create the sandbox directory for code execution file operations."""
+        from pathlib import Path
+        import os
+
+        # Use a sandbox folder in user's app data
+        if os.name == 'nt':  # Windows
+            base = Path(os.environ.get('LOCALAPPDATA', Path.home()))
+        else:  # Linux/Mac
+            base = Path.home() / '.local' / 'share'
+
+        sandbox = base / 'PhysioMetrics' / 'code_sandbox'
+        sandbox.mkdir(parents=True, exist_ok=True)
+        return str(sandbox)
+
+    def _on_run_code(self):
+        """Execute code from the notebook code input with safety checks and timeout."""
+        if not hasattr(self, 'codeInputEdit') or not hasattr(self, 'codeOutputText'):
+            return
+
+        code = self.codeInputEdit.toPlainText().strip()
+        if not code:
+            self.codeOutputText.append("<span style='color: #f48771;'>No code to execute.</span>")
+            return
+
+        # AST-based security check
+        is_safe, blocked_reasons, warnings = self._check_code_safety(code)
+
+        # Hard reject if blocked operations found
+        if not is_safe:
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+
+            # Check if it's a syntax error vs security block
+            is_syntax_error = any("Syntax error" in r for r in blocked_reasons)
+
+            if is_syntax_error:
+                msg.setIcon(QMessageBox.Icon.Warning)
+                msg.setWindowTitle("Code Syntax Error")
+                msg.setText("The code has a syntax error and cannot be executed:")
+                msg.setInformativeText("\n".join(f"  ✗ {r}" for r in blocked_reasons[:5]))
+                msg.setDetailedText(
+                    "Check the code for:\n"
+                    "• Missing colons after def/if/for/while\n"
+                    "• Unmatched parentheses or brackets\n"
+                    "• Incorrect indentation\n"
+                    "• Missing quotes in strings\n\n"
+                    "Try fixing the syntax error and running again."
+                )
+            else:
+                msg.setIcon(QMessageBox.Icon.Critical)
+                msg.setWindowTitle("Code Blocked - Security Violation")
+                msg.setText("This code contains blocked operations and cannot be executed:")
+                msg.setInformativeText("\n".join(f"  ✗ {r}" for r in blocked_reasons[:5]))
+                msg.setDetailedText(
+                    "For security, the following are blocked:\n"
+                    "• Imports: subprocess, shutil, ctypes, socket, multiprocessing\n"
+                    "• Calls: eval(), exec(), __import__(), compile()\n"
+                    "• Methods: .unlink(), .rmdir(), .remove(), .rmtree(), .system()\n\n"
+                    "ALLOWED: os, sys, pandas, numpy, scipy, matplotlib, open() for reading\n\n"
+                    "The code notebook is for data analysis.\n"
+                    "Use built-in Export functions to save results."
+                )
+            msg.exec()
+            error_type = "syntax error" if is_syntax_error else "prohibited operations"
+            self.codeOutputText.append(f"<span style='color: #f48771;'>⛔ Code blocked - {error_type}.</span>")
+            return
+
+        # Warn if potentially risky operations found (user can proceed)
+        if warnings:
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Potentially Risky Code")
+            msg.setText("This code contains operations that may write files:")
+            msg.setInformativeText("\n".join(f"  ⚠ {w}" for w in warnings[:5]))
+            msg.setDetailedText(
+                "These operations can create files but are sandboxed.\n"
+                "Any files created will be in the sandbox directory.\n\n"
+                "Are you sure you want to run this code?"
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.setDefaultButton(QMessageBox.StandardButton.No)
+
+            if msg.exec() != QMessageBox.StandardButton.Yes:
+                self.codeOutputText.append("<span style='color: #f48771;'>Execution cancelled by user.</span>")
+                return
+
+        self.codeOutputText.append("<span style='color: #569cd6;'>>>> Running code...</span>")
+
+        # Set up execution namespace
+        import numpy as np
+        import matplotlib
+        import matplotlib.pyplot as plt
+        import io
+        import base64
+        from contextlib import redirect_stdout, redirect_stderr
+
+        # Use non-interactive backend to prevent external windows
+        original_backend = matplotlib.get_backend()
+        matplotlib.use('Agg')
+        plt.close('all')  # Close any existing figures
+
+        # Try to import pandas
+        pd = None
+        try:
+            import pandas as pd
+        except ImportError:
+            pass
+
+        # Helper functions for data access
+        def _normalize_search_term(filename_contains):
+            """Extract clean search term from path, filename, or fragment."""
+            if not filename_contains:
+                return None
+            # Handle full paths - extract just the base name
+            search_term = Path(filename_contains).stem.lower()
+            # Remove common suffixes like _bundle, _means_by_time, etc.
+            for suffix in ['_bundle', '_means_by_time', '_breaths', '_pleth']:
+                if search_term.endswith(suffix):
+                    search_term = search_term[:-len(suffix)]
+            return search_term
+
+        def get_export_paths(filename_contains=None):
+            """Get export paths for files. Returns dict of {filename: export_path}.
+
+            Args:
+                filename_contains: Can be full path, filename, or partial name to match
+            """
+            result = {}
+            search_term = _normalize_search_term(filename_contains)
+
+            for f in self._master_file_list or []:
+                fn = f.get('file_name', '')
+                export_path = f.get('export_path', '')
+                if export_path:
+                    fn_stem = Path(fn).stem.lower()
+                    if search_term is None or search_term in fn.lower() or search_term in fn_stem:
+                        result[fn] = export_path
+            return result
+
+        def load_means_csv(filename_contains):
+            """Load _means_by_time.csv for a file. Returns DataFrame.
+
+            Args:
+                filename_contains: Filename, partial name, or full path to match
+            """
+            # If it's a direct path to a CSV, load it
+            p = Path(filename_contains)
+            if p.suffix.lower() == '.csv' and p.exists():
+                return pd.read_csv(p)
+
+            paths = get_export_paths(filename_contains)
+            if not paths:
+                raise FileNotFoundError(f"No exports found matching '{_normalize_search_term(filename_contains)}'")
+            export_dir = list(paths.values())[0]
+            csv_files = list(Path(export_dir).glob('*_means_by_time.csv'))
+            if not csv_files:
+                raise FileNotFoundError(f"No _means_by_time.csv in {export_dir}")
+            return pd.read_csv(csv_files[0])
+
+        def load_breaths_csv(filename_contains):
+            """Load _breaths.csv for a file. Returns DataFrame.
+
+            Args:
+                filename_contains: Filename, partial name, or full path to match
+            """
+            p = Path(filename_contains)
+            if p.suffix.lower() == '.csv' and p.exists():
+                return pd.read_csv(p)
+
+            paths = get_export_paths(filename_contains)
+            if not paths:
+                raise FileNotFoundError(f"No exports found matching '{_normalize_search_term(filename_contains)}'")
+            export_dir = list(paths.values())[0]
+            csv_files = list(Path(export_dir).glob('*_breaths.csv'))
+            if not csv_files:
+                raise FileNotFoundError(f"No _breaths.csv in {export_dir}")
+            return pd.read_csv(csv_files[0])
+
+        def load_bundle_npz(filename_contains):
+            """Load _bundle.npz for a file. Returns numpy NpzFile object.
+
+            Args:
+                filename_contains: Filename, partial name, or full path to match
+            """
+            p = Path(filename_contains)
+            if p.suffix.lower() == '.npz' and p.exists():
+                return np.load(p, allow_pickle=True)
+
+            paths = get_export_paths(filename_contains)
+            if not paths:
+                raise FileNotFoundError(f"No exports found matching '{_normalize_search_term(filename_contains)}'")
+            export_dir = list(paths.values())[0]
+            npz_files = list(Path(export_dir).glob('*_bundle.npz'))
+            if not npz_files:
+                raise FileNotFoundError(f"No _bundle.npz in {export_dir}")
+            return np.load(npz_files[0], allow_pickle=True)
+
+        def get_stim_spans(bundle_data):
+            """Extract stim spans from bundle.npz data. Returns dict {sweep_idx: [(start, end), ...]}."""
+            import json as _json
+            if 'stim_spans_json' in bundle_data:
+                spans_str = str(bundle_data['stim_spans_json'])
+                return {int(k): v for k, v in _json.loads(spans_str).items()}
+            return {}
+
+        def add_stim_shading(ax, stim_spans, sweep_idx=0, color='blue', alpha=0.2, label='Stim'):
+            """Add blue shading for stimulation periods."""
+            spans = stim_spans.get(sweep_idx, [])
+            for i, (start, end) in enumerate(spans):
+                ax.axvspan(start, end, alpha=alpha, color=color,
+                          label=label if i == 0 else None)
+
+        def list_available_files():
+            """List files with exports available."""
+            result = []
+            for f in self._master_file_list or []:
+                fn = f.get('file_name', '')
+                export_path = f.get('export_path', '')
+                if export_path:
+                    result.append(f"{fn} -> {export_path}")
+            return result
+
+        # Create namespace with common data science imports and helpers
+        exec_namespace = {
+            'np': np,
+            'plt': plt,
+            'pd': pd,
+            'Path': Path,
+            'json': __import__('json'),
+            'master_file_list': self._master_file_list,
+            # Helper functions
+            'get_export_paths': get_export_paths,
+            'load_means_csv': load_means_csv,
+            'load_breaths_csv': load_breaths_csv,
+            'load_bundle_npz': load_bundle_npz,
+            'get_stim_spans': get_stim_spans,
+            'add_stim_shading': add_stim_shading,
+            'list_available_files': list_available_files,
+        }
+
+        # Capture stdout
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+
+        # Disable run button during execution
+        if hasattr(self, 'runCodeButton'):
+            self.runCodeButton.setEnabled(False)
+
+        # Process events to update UI before potentially long execution
+        QApplication.processEvents()
+
+        # Execute directly on main thread
+        success = True
+        try:
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                exec(code, exec_namespace)
+        except Exception as e:
+            stderr_capture.write(f"{type(e).__name__}: {e}")
+            success = False
+
+        # Display text results
+        stdout = stdout_capture.getvalue()
+        stderr = stderr_capture.getvalue()
+
+        if stdout:
+            self.codeOutputText.append(f"<pre style='color: #d4d4d4;'>{stdout}</pre>")
+        if stderr:
+            color = '#f48771' if not success else '#dcdcaa'
+            self.codeOutputText.append(f"<pre style='color: {color};'>{stderr}</pre>")
+
+        # Capture and embed any matplotlib figures inline
+        figs = [plt.figure(i) for i in plt.get_fignums()]
+        if figs:
+            # Initialize figure storage if needed
+            if not hasattr(self, '_notebook_figures'):
+                self._notebook_figures = []
+
+            self.codeOutputText.append(f"<span style='color: #569cd6;'>📊 {len(figs)} figure(s) generated:</span>")
+            for i, fig in enumerate(figs):
+                # Save figure to bytes buffer
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=100, facecolor='#1e1e1e',
+                           edgecolor='none', bbox_inches='tight')
+                buf.seek(0)
+                fig_bytes = buf.read()
+                buf.close()
+
+                # Store figure data for Pop Out / Save functionality
+                self._notebook_figures.append({
+                    'bytes': fig_bytes,
+                    'figsize': fig.get_size_inches().tolist(),
+                    'index': len(self._notebook_figures) + 1
+                })
+
+                # Convert to base64 for embedding in HTML
+                img_data = base64.b64encode(fig_bytes).decode('utf-8')
+
+                # Embed as inline image
+                img_html = f'''
+                <div style="margin: 8px 0; padding: 4px; border: 1px solid #3e3e42; border-radius: 4px; background: #252526;">
+                    <img src="data:image/png;base64,{img_data}" style="max-width: 100%; height: auto;" />
+                    <div style="color: #808080; font-size: 9pt; margin-top: 4px;">Figure {i+1} - Use "Pop Out" to view larger or "Save" to export</div>
+                </div>
+                '''
+                self.codeOutputText.append(img_html)
+
+            plt.close('all')
+        elif success and not stdout and not stderr:
+            self.codeOutputText.append("<span style='color: #4ec9b0;'>✓ Code executed successfully (no output).</span>")
+
+        # Restore original matplotlib backend
+        try:
+            matplotlib.use(original_backend)
+        except Exception:
+            pass  # May fail if backend doesn't support switching
+
+        # Scroll to bottom
+        scrollbar = self.codeOutputText.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+        # Re-enable run button
+        if hasattr(self, 'runCodeButton'):
+            self.runCodeButton.setEnabled(True)
+
+    def _on_clear_code_output(self):
+        """Clear the notebook output area."""
+        if hasattr(self, 'codeOutputText'):
+            self.codeOutputText.clear()
+        # Also clear stored figures
+        self._notebook_figures = []
+
+    def _add_notebook_extra_buttons(self):
+        """Add Pop Out and Save buttons to the notebook header."""
+        from PyQt6.QtWidgets import QPushButton
+
+        # Store figures for pop-out functionality
+        self._notebook_figures = []
+
+        # Find the header layout (where Run and Clear buttons are)
+        if not hasattr(self, 'clearOutputButton') or not self.clearOutputButton.parent():
+            return
+
+        parent_layout = self.clearOutputButton.parent().layout()
+        if not parent_layout:
+            return
+
+        # Button style matching existing buttons
+        button_style = """
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+            QPushButton:pressed {
+                background-color: #545b62;
+            }
+        """
+
+        # Pop Out button - opens figures in external windows
+        self.popOutFigureButton = QPushButton("🪟 Pop Out")
+        self.popOutFigureButton.setToolTip("Open the last figure in an external window")
+        self.popOutFigureButton.setMinimumSize(80, 24)
+        self.popOutFigureButton.setStyleSheet(button_style)
+        self.popOutFigureButton.clicked.connect(self._on_pop_out_figure)
+        parent_layout.addWidget(self.popOutFigureButton)
+
+        # Save Figure button
+        self.saveFigureButton = QPushButton("💾 Save")
+        self.saveFigureButton.setToolTip("Save the last figure to a file")
+        self.saveFigureButton.setMinimumSize(70, 24)
+        self.saveFigureButton.setStyleSheet(button_style)
+        self.saveFigureButton.clicked.connect(self._on_save_figure)
+        parent_layout.addWidget(self.saveFigureButton)
+
+        print("[notebook] Added Pop Out and Save Figure buttons")
+
+    def _on_pop_out_figure(self):
+        """Open the last generated figure in an external matplotlib window."""
+        import matplotlib
+        import matplotlib.pyplot as plt
+
+        if not hasattr(self, '_notebook_figures') or not self._notebook_figures:
+            self._log_status_message("No figures to pop out. Run code that generates a plot first.", 2000)
+            return
+
+        # Temporarily switch to interactive backend
+        try:
+            matplotlib.use('TkAgg')  # Or 'Qt5Agg' depending on system
+        except Exception:
+            pass
+
+        # Recreate the last figure
+        fig_data = self._notebook_figures[-1]
+        fig, ax = plt.subplots(figsize=fig_data.get('figsize', (8, 6)))
+
+        # If we stored the figure bytes, display it
+        if 'bytes' in fig_data:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(fig_data['bytes']))
+            ax.imshow(img)
+            ax.axis('off')
+            ax.set_title(f"Figure {len(self._notebook_figures)}")
+
+        plt.show()
+        self._log_status_message("Figure opened in external window", 2000)
+
+    def _on_save_figure(self):
+        """Save the last generated figure to a file."""
+        from PyQt6.QtWidgets import QFileDialog
+
+        if not hasattr(self, '_notebook_figures') or not self._notebook_figures:
+            self._log_status_message("No figures to save. Run code that generates a plot first.", 2000)
+            return
+
+        # Get save path from user
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Figure",
+            "figure.png",
+            "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        # Write the figure bytes
+        fig_data = self._notebook_figures[-1]
+        if 'bytes' in fig_data:
+            try:
+                with open(file_path, 'wb') as f:
+                    f.write(fig_data['bytes'])
+                self._log_status_message(f"Figure saved to {file_path}", 2000)
+            except Exception as e:
+                self._log_status_message(f"Error saving figure: {e}", 3000)
+        else:
+            self._log_status_message("No figure data to save", 2000)
+
+    def _get_selected_file_types(self) -> list:
+        """Get list of file types to scan based on checkbox states."""
+        file_types = []
+        if hasattr(self, 'scanAbfCheckbox') and self.scanAbfCheckbox.isChecked():
+            file_types.append('abf')
+        if hasattr(self, 'scanSmrxCheckbox') and self.scanSmrxCheckbox.isChecked():
+            file_types.append('smrx')
+        if hasattr(self, 'scanEdfCheckbox') and self.scanEdfCheckbox.isChecked():
+            file_types.append('edf')
+        if hasattr(self, 'scanNotesCheckbox') and self.scanNotesCheckbox.isChecked():
+            file_types.append('notes')
+        return file_types if file_types else None  # None means scan all types
 
     def _open_ai_settings(self):
         """Open the AI Settings dialog for configuring AI integration."""
         try:
             from dialogs.ai_settings_dialog import AISettingsDialog
 
-            # Gather file metadata from the table to pass to the dialog
+            # With Model/View, get data directly from model or master list
             files_metadata = []
-            table = self.discoveredFilesTable
-            for row in range(table.rowCount()):
-                metadata = {}
-                # Get file name (column 0)
-                item = table.item(row, 0)
-                metadata['file_name'] = item.text() if item else ''
-
-                # Get protocol (column 1)
-                item = table.item(row, 1)
-                metadata['protocol'] = item.text() if item else ''
-
-                # Get keywords (column 4)
-                item = table.item(row, 4)
-                metadata['keywords_display'] = item.text() if item else ''
-
-                # Get experiment (column 5)
-                item = table.item(row, 5)
-                metadata['experiment'] = item.text() if item else ''
-
-                # Get file path from master list if available
-                if row < len(self._master_file_list):
-                    file_data = self._master_file_list[row]
-                    if isinstance(file_data, dict):
-                        metadata['file_path'] = str(file_data.get('file_path', ''))
-                    else:
-                        metadata['file_path'] = str(file_data)
-
+            for task in self._master_file_list:
+                metadata = {
+                    'file_name': task.get('file_name', ''),
+                    'protocol': task.get('protocol', ''),
+                    'keywords_display': task.get('keywords_display', ''),
+                    'experiment': task.get('experiment', ''),
+                    'file_path': str(task.get('file_path', '')),
+                }
                 files_metadata.append(metadata)
 
             dialog = AISettingsDialog(self, files_metadata=files_metadata)
@@ -7933,39 +13712,58 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._show_error("Error", f"Failed to open AI settings:\n{e}")
 
-    def on_project_scan_saved_data(self):
-        """Scan for existing saved data files and auto-populate the table."""
+    def on_project_scan_saved_data(self, scan_folder: Path = None, silent: bool = False):
+        """
+        Scan for existing saved data files and auto-populate the table.
+
+        Args:
+            scan_folder: If provided, only scan this specific folder (faster).
+                        If None, scan all Pleth_App_analysis folders in project.
+            silent: If True, don't show progress dialog (for quick rescans after save).
+        """
         if not self._master_file_list:
-            self._show_warning("No Files", "Please scan for ABF files first.")
+            if not silent:
+                self._show_warning("No Files", "Please scan for ABF files first.")
             return
 
         from PyQt6.QtWidgets import QProgressDialog
         import re
 
-        # Show progress dialog
-        progress = QProgressDialog("Scanning for saved data...", "Cancel", 0, 100, self)
-        progress.setWindowTitle("Scanning Saved Data")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
-        QApplication.processEvents()
+        # Show progress dialog (unless silent mode)
+        progress = None
+        if not silent:
+            progress = QProgressDialog("Scanning for saved data...", "Cancel", 0, 100, self)
+            progress.setWindowTitle("Scanning Saved Data")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            progress.show()
+            QApplication.processEvents()
 
         # Look for Pleth_App_analysis folders
-        base_dir = Path(self._project_directory) if self._project_directory else Path.cwd()
-        analysis_folders = list(base_dir.glob("**/Pleth_App_analysis"))
+        if scan_folder:
+            # Focused scan: just use the provided folder
+            analysis_folders = [scan_folder] if scan_folder.exists() else []
+            print(f"[scan-saved] Focused scan of: {scan_folder}")
+        else:
+            # Full scan: search all folders
+            base_dir = Path(self._project_directory) if self._project_directory else Path.cwd()
+            analysis_folders = list(base_dir.glob("**/Pleth_App_analysis"))
 
         if not analysis_folders:
-            progress.close()
-            self._show_info("No Saved Data", "No 'Pleth_App_analysis' folders found.\n\nAnalyzed data is saved to this folder.")
+            if progress:
+                progress.close()
+            if not silent:
+                self._show_info("No Saved Data", "No 'Pleth_App_analysis' folders found.\n\nAnalyzed data is saved to this folder.")
             return
 
         # Build a mapping of ABF names to their saved data
         saved_data_map = {}  # abf_stem -> {channel -> export_info}
 
-        progress.setLabelText(f"Scanning {len(analysis_folders)} analysis folders...")
-        progress.setValue(10)
-        QApplication.processEvents()
+        if progress:
+            progress.setLabelText(f"Scanning {len(analysis_folders)} analysis folders...")
+            progress.setValue(10)
+            QApplication.processEvents()
 
         # Collect ALL NPZ files first, then sort by modification time (newest first)
         # This ensures newer files take priority over older ones in subfolders
@@ -8011,86 +13809,104 @@ class MainWindow(QMainWindow):
                 print(f"[scan-saved] Could not read metadata from {npz_file.name}: {e}")
 
             # Try to match to an ABF file using multiple methods
-            for task in self._master_file_list:
-                abf_path = Path(task.get('file_path', ''))
-                abf_name = abf_path.stem
-                if not abf_name:
-                    continue
+            # First, try exact metadata match (most reliable) across ALL tasks
+            matched_task = None
+            match_method = None
 
-                # Method 1: Exact match from NPZ metadata (most reliable)
-                matched = False
-                if source_file_from_npz:
-                    source_stem = Path(source_file_from_npz).stem
-                    if source_stem == abf_name:
-                        matched = True
-                        print(f"[scan-saved] Matched {npz_file.name} to {abf_name} via NPZ metadata")
-
-                # Method 2: ABF name appears anywhere in the filename
-                if not matched and abf_name in stem:
-                    matched = True
-                    print(f"[scan-saved] Matched {npz_file.name} to {abf_name} via substring")
-
-                if matched:
-                    # Found a match - extract more info
-                    key = str(task.get('file_path'))
-
-                    # Determine channel - prefer NPZ metadata, fall back to filename regex
-                    channel = channel_from_npz or ''
-                    if not channel:
-                        channel_match = re.search(r'_(AD\d+)_', stem) or re.search(r'_(AD\d+)$', stem)
-                        channel = channel_match.group(1) if channel_match else ''
-
-                    if key not in saved_data_map:
-                        saved_data_map[key] = {}
-
-                    # Skip if we already have data for this file+channel (since we're processing newest first)
-                    if channel in saved_data_map[key]:
-                        # Track this as an older/duplicate NPZ file
-                        if 'older_npz_files' not in saved_data_map[key][channel]:
-                            saved_data_map[key][channel]['older_npz_files'] = []
-                        saved_data_map[key][channel]['older_npz_files'].append({
-                            'file': str(npz_file),
-                            'date': datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M'),
-                        })
-                        print(f"[scan-saved] Skipping older {npz_file.name} - already have newer data for {abf_name} {channel}")
+            if source_file_from_npz:
+                source_stem = Path(source_file_from_npz).stem
+                for task in self._master_file_list:
+                    if task.get('is_sub_row'):
+                        continue  # Only match to parent rows
+                    abf_path = Path(task.get('file_path', ''))
+                    if abf_path.stem == source_stem:
+                        matched_task = task
+                        match_method = "NPZ metadata"
                         break
 
-                    export_info = {
-                        'export_path': str(folder),
-                        'export_date': '',
-                        'npz': True,
-                        'timeseries_csv': (folder / f"{stem}_means_by_time.csv").exists(),
-                        'breaths_csv': (folder / f"{stem}_breaths.csv").exists(),
-                        'events_csv': (folder / f"{stem}_events.csv").exists(),
-                        'pdf': (folder / f"{stem}_summary.pdf").exists(),
-                        'session_state': (folder / f"{stem}_session.npz").exists(),
-                        'ml_training': False,  # Would need to check ML folder
-                        'npz_metadata': npz_metadata,  # Store for later use
-                    }
+            # Fallback: Pattern match - ABF name as distinct segment (not just substring)
+            # Only use if no metadata match found
+            if not matched_task:
+                for task in self._master_file_list:
+                    if task.get('is_sub_row'):
+                        continue  # Only match to parent rows
+                    abf_path = Path(task.get('file_path', ''))
+                    abf_name = abf_path.stem
+                    if not abf_name:
+                        continue
 
-                    # Use the mtime we already collected during sorting
-                    from datetime import datetime
-                    export_info['export_date'] = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+                    # Check for ABF name as a distinct segment (bounded by _ or start/end)
+                    # This prevents "580" matching "580_10mw" when we want "2024_03_21_0018"
+                    pattern = r'(^|_)' + re.escape(abf_name) + r'(_|$)'
+                    if re.search(pattern, stem):
+                        matched_task = task
+                        match_method = "pattern"
+                        break
 
-                    # Extract additional metadata from ui_meta if available
-                    if npz_metadata:
-                        ui_meta = npz_metadata.get('ui_meta', {})
-                        if isinstance(ui_meta, dict):
-                            export_info['strain'] = ui_meta.get('strain', '')
-                            export_info['stim_type'] = ui_meta.get('stim', '')  # Dialog saves as 'stim'
-                            export_info['power'] = ui_meta.get('power', '')
-                            export_info['sex'] = ui_meta.get('sex', '')
-                            export_info['animal_id'] = ui_meta.get('animal', '')  # Dialog saves as 'animal', not 'animal_id'
-                            # Also get stim and events channels from NPZ metadata (not ui_meta)
-                            export_info['stim_channel'] = npz_metadata.get('stim_chan', '')
-                            export_info['events_channel'] = npz_metadata.get('event_channel', '')
+            if matched_task:
+                abf_name = Path(matched_task.get('file_path', '')).stem
+                print(f"[scan-saved] Matched {npz_file.name} to {abf_name} via {match_method}")
 
-                    saved_data_map[key][channel] = export_info
-                    print(f"[scan-saved] Using {npz_file.name} (newest) for {abf_name} {channel}")
-                    break
+                # Found a match - extract more info
+                key = str(matched_task.get('file_path'))
 
-        progress.setValue(50)
-        QApplication.processEvents()
+                # Determine channel - prefer NPZ metadata, fall back to filename regex
+                channel = channel_from_npz or ''
+                if not channel:
+                    channel_match = re.search(r'_(AD\d+)_', stem) or re.search(r'_(AD\d+)$', stem)
+                    channel = channel_match.group(1) if channel_match else ''
+
+                if key not in saved_data_map:
+                    saved_data_map[key] = {}
+
+                # Skip if we already have data for this file+channel (since we're processing newest first)
+                if channel in saved_data_map[key]:
+                    # Track this as an older/duplicate NPZ file
+                    if 'older_npz_files' not in saved_data_map[key][channel]:
+                        saved_data_map[key][channel]['older_npz_files'] = []
+                    saved_data_map[key][channel]['older_npz_files'].append({
+                        'file': str(npz_file),
+                        'date': datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M'),
+                    })
+                    print(f"[scan-saved] Skipping older {npz_file.name} - already have newer data for {abf_name} {channel}")
+                    continue  # Skip to next NPZ file
+
+                export_info = {
+                    'export_path': str(folder),
+                    'export_date': '',
+                    'npz': True,
+                    'timeseries_csv': (folder / f"{stem}_means_by_time.csv").exists(),
+                    'breaths_csv': (folder / f"{stem}_breaths.csv").exists(),
+                    'events_csv': (folder / f"{stem}_events.csv").exists(),
+                    'pdf': (folder / f"{stem}_summary.pdf").exists(),
+                    'session_state': (folder / f"{stem}_session.npz").exists(),
+                    'ml_training': False,  # Would need to check ML folder
+                    'npz_metadata': npz_metadata,  # Store for later use
+                }
+
+                # Use the mtime we already collected during sorting
+                from datetime import datetime
+                export_info['export_date'] = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+
+                # Extract additional metadata from ui_meta if available
+                if npz_metadata:
+                    ui_meta = npz_metadata.get('ui_meta', {})
+                    if isinstance(ui_meta, dict):
+                        export_info['strain'] = ui_meta.get('strain', '')
+                        export_info['stim_type'] = ui_meta.get('stim', '')  # Dialog saves as 'stim'
+                        export_info['power'] = ui_meta.get('power', '')
+                        export_info['sex'] = ui_meta.get('sex', '')
+                        export_info['animal_id'] = ui_meta.get('animal', '')  # Dialog saves as 'animal', not 'animal_id'
+                        # Also get stim and events channels from NPZ metadata (not ui_meta)
+                        export_info['stim_channel'] = npz_metadata.get('stim_chan', '')
+                        export_info['events_channel'] = npz_metadata.get('event_channel', '')
+
+                saved_data_map[key][channel] = export_info
+                print(f"[scan-saved] Using {npz_file.name} (newest) for {abf_name} {channel}")
+
+        if progress:
+            progress.setValue(50)
+            QApplication.processEvents()
 
         # Debug: Print what was matched
         print(f"[scan-saved] saved_data_map summary:")
@@ -8100,16 +13916,16 @@ class MainWindow(QMainWindow):
             print(f"  {file_name}: {channel_list}")
 
         if not saved_data_map:
-            progress.close()
-            self._show_info("No Matches", "No saved data files matched the current ABF files.")
+            if progress:
+                progress.close()
+            if not silent:
+                self._show_info("No Matches", "No saved data files matched the current ABF files.")
             return
 
-        # Update the master list and table with found saved data
+        # Update the master list with found saved data
         # We need to handle multiple channels per file by creating sub-rows
         updated_count = 0
         new_rows_created = 0
-        table = self.discoveredFilesTable
-        table.blockSignals(True)
 
         # Track which file+channel combinations already exist in the master list
         existing_file_channels = set()
@@ -8134,7 +13950,7 @@ class MainWindow(QMainWindow):
             # Only update if this is a sub-row with a matching channel
             if is_sub_row and existing_channel and existing_channel in export_data:
                 info = export_data[existing_channel]
-                self._update_task_with_export_info(task, info, row, table)
+                self._update_task_with_export_info(task, info, row)
                 updated_count += 1
                 processed_files.add(file_key)
                 print(f"[scan-saved] Updated sub-row {row}: {task.get('file_name')} channel {existing_channel}")
@@ -8144,7 +13960,7 @@ class MainWindow(QMainWindow):
                 processed_files.add(file_key)  # Mark as processed so we know to create sub-rows
 
             # Update progress
-            if row % 10 == 0:
+            if progress and row % 10 == 0:
                 progress.setValue(50 + int(25 * row / len(self._master_file_list)))
                 QApplication.processEvents()
 
@@ -8188,16 +14004,15 @@ class MainWindow(QMainWindow):
             else:
                 print(f"[scan-saved] WARNING: Could not find source task for {file_key}")
 
-        progress.setValue(90)
-        QApplication.processEvents()
+        if progress:
+            progress.setValue(90)
+            QApplication.processEvents()
 
-        table.blockSignals(False)
+        # Rebuild table from updated master list
+        self._rebuild_table_from_master_list()
 
-        # Auto-fit columns and apply row styling
-        self._auto_fit_table_columns()
-        self._apply_all_row_styling()
-
-        progress.close()
+        if progress:
+            progress.close()
 
         # Count warnings
         warnings_count = 0
@@ -8274,12 +14089,10 @@ class MainWindow(QMainWindow):
     # on_project_export_experiment). These buttons are hidden and we now use the master file list.
 
     def on_edit_project_name(self):
-        """Edit the current project name."""
+        """Edit the current project name (legacy - combo is now directly editable)."""
         from PyQt6.QtWidgets import QInputDialog
 
-        current_name = self.projectNameEdit.text().strip()
-        if not current_name:
-            current_name = "Untitled Project"
+        current_name = getattr(self, '_current_project_name', '') or "Untitled Project"
 
         new_name, ok = QInputDialog.getText(
             self, "Edit Project Name", "Enter project name:",
@@ -8287,7 +14100,9 @@ class MainWindow(QMainWindow):
         )
 
         if ok and new_name.strip():
-            self.projectNameEdit.setText(new_name.strip())
+            self._current_project_name = new_name.strip()
+            if hasattr(self, 'projectNameCombo'):
+                self.projectNameCombo.setCurrentText(new_name.strip())
             self._log_status_message(f"Project renamed to: {new_name.strip()}", 2000)
 
     def on_project_new(self):
@@ -8361,17 +14176,68 @@ class MainWindow(QMainWindow):
                 return
 
             # Clear everything
-            self.discoveredFilesTable.setRowCount(0)
+            self._file_table_model.clear()
             self._discovered_files_data = []
             self._master_file_list = []
 
             # Set new project info
             self._project_directory = directory
             self.directoryPathEdit.setText(directory)
-            self.projectNameEdit.setText(project_name)
+            self._current_project_name = project_name
+            if hasattr(self, 'projectNameCombo'):
+                self.projectNameCombo.setCurrentText(project_name)
             self.summaryLabel.setText("Summary: No files scanned")
 
             self._log_status_message(f"✓ New project created: {project_name}", 2000)
+
+    def _cancel_pending_autosave(self):
+        """Cancel any pending autosave operation."""
+        if hasattr(self, '_autosave_timer') and self._autosave_timer:
+            self._autosave_timer.stop()
+            print("[autosave] Cancelled pending autosave")
+
+    def _project_autosave(self):
+        """Silently autosave the project if it has a name and directory."""
+        if not self._project_directory or not self._master_file_list:
+            return
+
+        project_name = getattr(self, '_current_project_name', '') or ''
+        if not project_name.strip():
+            return  # Don't autosave unnamed projects
+
+        try:
+            # Debounce autosave - use a timer to avoid saving on every keystroke
+            if not hasattr(self, '_autosave_timer'):
+                self._autosave_timer = QTimer()
+                self._autosave_timer.setSingleShot(True)
+                self._autosave_timer.timeout.connect(self._do_autosave)
+
+            # Reset timer - will save 1 second after last change
+            self._autosave_timer.start(1000)
+        except Exception as e:
+            print(f"[autosave] Error setting up autosave: {e}")
+
+    def _do_autosave(self):
+        """Actually perform the autosave."""
+        if not self._project_directory or not self._master_file_list:
+            return
+
+        project_name = getattr(self, '_current_project_name', '') or ''
+        if not project_name.strip():
+            return
+
+        try:
+            self.project_manager.save_project(
+                project_name,
+                Path(self._project_directory),
+                self._master_file_list,
+                [],  # No experiments in new workflow
+                notes_directory=self._notes_directory,
+                notes_files=self._notes_files_data
+            )
+            print(f"[autosave] Project autosaved: {project_name}")
+        except Exception as e:
+            print(f"[autosave] Error: {e}")
 
     def on_project_save(self):
         """Save current project to data directory."""
@@ -8384,8 +14250,8 @@ class MainWindow(QMainWindow):
             return
 
         # Get project name
-        project_name = self.projectNameEdit.text().strip()
-        if not project_name:
+        project_name = getattr(self, '_current_project_name', '') or ''
+        if not project_name.strip():
             # Prompt for project name
             from PyQt6.QtWidgets import QInputDialog
             project_name, ok = QInputDialog.getText(
@@ -8395,7 +14261,9 @@ class MainWindow(QMainWindow):
             if not ok or not project_name.strip():
                 return
             project_name = project_name.strip()
-            self.projectNameEdit.setText(project_name)
+            self._current_project_name = project_name
+            if hasattr(self, 'projectNameCombo'):
+                self.projectNameCombo.setCurrentText(project_name)
 
         try:
             # Use master file list as the source of truth
@@ -8408,7 +14276,9 @@ class MainWindow(QMainWindow):
                 project_name,
                 Path(self._project_directory),
                 files_to_save,
-                []  # No experiments in new workflow
+                [],  # No experiments in new workflow
+                notes_directory=self._notes_directory,
+                notes_files=self._notes_files_data
             )
 
             self._show_info("Project Saved", f"Project saved to:\n{project_path}")
@@ -8424,98 +14294,1068 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
 
     def on_project_load(self, index):
-        """Load a project from recent projects list."""
-        if index <= 0:  # Skip the "Load Project..." placeholder
-            return
+        """Load a project from recent projects list (legacy - now handled by _on_project_combo_selected)."""
+        # This method is kept for backward compatibility but is no longer connected
+        # Project loading is now handled by _on_project_combo_selected via projectNameCombo
+        pass
 
-        recent_projects = self.project_manager.get_recent_projects()
-        if index - 1 >= len(recent_projects):
-            return
+    def _apply_recovered_metadata(self):
+        """Apply recovered metadata from corrupted file to rescanned files. Returns count of applied fields."""
+        if not hasattr(self, '_pending_recovery_metadata') or not self._pending_recovery_metadata:
+            return 0
 
-        project_info = recent_projects[index - 1]
-        project_path = Path(project_info['path'])
+        recovered = self._pending_recovery_metadata
+        applied_count = 0
+        fields_applied = 0
 
+        for task in self._master_file_list:
+            file_path = task.get('file_path')
+            if not file_path:
+                continue
+
+            # Try to match by filename or relative path
+            file_name = Path(file_path).name
+
+            # Look for a match in recovered metadata
+            matched_meta = None
+            for recovered_path, meta in recovered.items():
+                if recovered_path.endswith(file_name) or file_name in recovered_path:
+                    matched_meta = meta
+                    break
+
+            if matched_meta:
+                file_updated = False
+                # Apply recovered metadata (only if not already set)
+                for key in ['strain', 'animal_id', 'power', 'sex', 'channel', 'channels']:
+                    if matched_meta.get(key) and not task.get(key):
+                        task[key] = matched_meta[key]
+                        fields_applied += 1
+                        file_updated = True
+                if file_updated:
+                    applied_count += 1
+
+        # Clear pending metadata
+        self._pending_recovery_metadata = None
+
+        if applied_count > 0:
+            # Refresh the table to show recovered data
+            self._rebuild_table_from_master_list()
+            self._log_status_message(f"✓ Recovered metadata for {applied_count} files", 3000)
+            print(f"[recovery] Applied {fields_applied} metadata fields to {applied_count} files")
+
+        return fields_applied
+
+    def _apply_recovered_metadata_and_show_summary(self):
+        """Apply recovered metadata and show summary dialog."""
+        fields_applied = self._apply_recovered_metadata()
+
+        # Get recovery stats
+        stats = getattr(self, '_pending_recovery_stats', {
+            'method': 'rescan',
+            'files_recovered': len(self._master_file_list),
+            'metadata_fields_recovered': fields_applied,
+            'ai_tokens_used': 0,
+            'errors': [],
+        })
+        stats['metadata_fields_recovered'] = fields_applied
+        stats['files_recovered'] = len(self._master_file_list)
+
+        # Get project name
+        project_name = getattr(self, '_current_project_name', '') or "Unknown"
+
+        # Clear pending stats
+        self._pending_recovery_stats = None
+
+        # Show summary
+        self._show_recovery_summary(stats, project_name)
+
+    def _show_recovery_summary(self, stats: dict, project_name: str):
+        """Show a summary dialog after project recovery."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit, QPushButton, QHBoxLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Recovery Complete")
+        dialog.setMinimumSize(450, 300)
+        layout = QVBoxLayout(dialog)
+
+        # Header
+        header = QLabel(f"<b>Project '{project_name}' recovered successfully!</b>")
+        layout.addWidget(header)
+
+        # Build summary text
+        summary_lines = []
+
+        # Method used
+        method_names = {
+            'backup_merge': 'Backup restore with change merge',
+            'rescan': 'Directory rescan with metadata recovery',
+            'unknown': 'Recovery',
+        }
+        summary_lines.append(f"<b>Recovery method:</b> {method_names.get(stats.get('method', 'unknown'), 'Unknown')}")
+        summary_lines.append("")
+
+        # Stats
+        summary_lines.append("<b>Results:</b>")
+        summary_lines.append(f"  • Files in project: {stats.get('files_recovered', 0)}")
+        summary_lines.append(f"  • Metadata fields recovered: {stats.get('metadata_fields_recovered', 0)}")
+
+        if stats.get('ai_tokens_used', 0) > 0:
+            summary_lines.append(f"  • AI tokens used: {stats['ai_tokens_used']}")
+
+        # Errors
+        if stats.get('errors'):
+            summary_lines.append("")
+            summary_lines.append("<b>Warnings/Errors:</b>")
+            for error in stats['errors']:
+                summary_lines.append(f"  ⚠ {error}")
+
+        # What was lost (if rescan method)
+        if stats.get('method') == 'rescan':
+            summary_lines.append("")
+            summary_lines.append("<b>Note:</b> Recovery via rescan may have lost some metadata")
+            summary_lines.append("(channels, custom fields) that wasn't in the corrupted portion.")
+            summary_lines.append("Check your project and re-enter any missing information.")
+
+        summary_text = QTextEdit()
+        summary_text.setReadOnly(True)
+        summary_text.setHtml("<br>".join(summary_lines))
+        layout.addWidget(summary_text)
+
+        # OK button
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(ok_btn)
+        layout.addLayout(button_layout)
+
+        dialog.exec()
+
+    def _get_configured_ai_client(self):
+        """Get AI client if configured, or None if not set up."""
         try:
-            # Try to load project
-            project_data = self.project_manager.load_project(project_path)
+            settings = QSettings("PhysioMetrics", "BreathAnalysis")
+            provider = settings.value("ai/provider", "claude")
+            api_key = settings.value(f"ai/{provider}_api_key", "")
 
-        except FileNotFoundError:
-            # Project file was moved or deleted
-            response = self._ask_locate_project(project_info['name'], project_path)
-            if response == "locate":
-                # Ask user to locate the file
-                from PyQt6.QtWidgets import QFileDialog
-                new_path, _ = QFileDialog.getOpenFileName(
-                    self, "Locate Project File",
-                    str(project_path.parent),
-                    "PhysioMetrics Project (*.physiometrics)"
-                )
-                if not new_path:
-                    # Reset combo to placeholder
-                    self.loadProjectCombo.setCurrentIndex(0)
-                    return
+            if not api_key:
+                return None
 
-                new_path = Path(new_path)
-                try:
-                    # Load from new location
-                    project_data = self.project_manager.load_project(new_path)
-                    # Update path in recent projects
-                    self.project_manager.update_recent_project_path(project_path, new_path)
-                    self._populate_load_project_combo()
-                except Exception as e:
-                    self._show_error("Load Failed", f"Failed to load project:\n{e}")
-                    self.loadProjectCombo.setCurrentIndex(0)
-                    return
-            else:
-                # User cancelled
-                self.loadProjectCombo.setCurrentIndex(0)
-                return
+            from core.ai_client import AIClient
+            return AIClient(provider=provider, api_key=api_key)
+        except Exception as e:
+            print(f"[ai] Could not initialize AI client: {e}")
+            return None
+
+    def _extract_metadata_from_corrupted(self, project_path: Path) -> dict:
+        """Extract whatever metadata we can from a corrupted JSON file."""
+        try:
+            with open(project_path, 'r', encoding='utf-8', errors='ignore') as f:
+                corrupted_content = f.read()
+
+            import re
+            recovered_metadata = {}
+
+            # First, try to find file_path entries
+            file_path_pattern = r'"file_path"\s*:\s*"([^"]+)"'
+            file_paths = re.findall(file_path_pattern, corrupted_content)
+
+            for fp in set(file_paths):  # dedupe
+                if fp:
+                    recovered_metadata[fp] = {}
+
+            # Now extract individual fields for each file
+            # We search for each field near its file_path
+            field_patterns = {
+                'strain': r'"strain"\s*:\s*"([^"]*)"',
+                'animal_id': r'"animal_id"\s*:\s*"([^"]*)"',
+                'power': r'"power"\s*:\s*"([^"]*)"',
+                'sex': r'"sex"\s*:\s*"([^"]*)"',
+                'channel': r'"channel"\s*:\s*"([^"]*)"',
+                'channels': r'"channels"\s*:\s*"([^"]*)"',
+                'notes': r'"notes"\s*:\s*"([^"]*)"',
+            }
+
+            # Find each file entry block and extract fields
+            # Look for blocks that start with file_path
+            entry_pattern = r'\{\s*"file_path"\s*:\s*"([^"]+)"([^}]*)\}'
+            entry_matches = re.findall(entry_pattern, corrupted_content, re.DOTALL)
+
+            for file_path, entry_content in entry_matches:
+                if file_path not in recovered_metadata:
+                    recovered_metadata[file_path] = {}
+
+                # Extract each field from this entry's content
+                for field_name, field_pattern in field_patterns.items():
+                    match = re.search(field_pattern, entry_content)
+                    if match and match.group(1):
+                        recovered_metadata[file_path][field_name] = match.group(1)
+
+            # Count how many entries have actual metadata
+            entries_with_data = sum(1 for meta in recovered_metadata.values() if any(meta.values()))
+
+            print(f"[recovery] Extracted {len(recovered_metadata)} file entries ({entries_with_data} with metadata)")
+            return recovered_metadata
 
         except Exception as e:
-            self._show_error("Load Failed", f"Failed to load project:\n{e}")
-            self.loadProjectCombo.setCurrentIndex(0)
-            print(f"[project] Error loading: {e}")
+            print(f"[recovery] Failed to extract data: {e}")
+            return {}
+
+    def _perform_project_recovery(self, project_path: Path, project_name: str,
+                                   data_directory: Path, recovered_metadata: dict,
+                                   use_ai: bool = False):
+        """Perform the actual project recovery with optional AI enhancement."""
+
+        backup_path = project_path.with_suffix('.physiometrics.bak')
+        backup_data = None
+
+        # First, try to load the backup file as our baseline
+        if backup_path.exists():
+            try:
+                with open(backup_path, 'r') as f:
+                    backup_data = json.load(f)
+                print(f"[recovery] Loaded backup file with {len(backup_data.get('files', []))} files")
+                self._log_status_message("Found valid backup - comparing with corrupted file...", 2000)
+            except Exception as e:
+                print(f"[recovery] Backup file also corrupted: {e}")
+                backup_data = None
+
+        # If we have both backup and AI, do smart diff-based recovery
+        if use_ai and backup_data and recovered_metadata:
+            self._log_status_message("Using AI to recover changes since last save...", 3000)
+            ai_client = self._get_configured_ai_client()
+            if ai_client:
+                try:
+                    # Build a map of backup file metadata for comparison
+                    backup_files = {f.get('file_path', ''): f for f in backup_data.get('files', [])}
+
+                    # Find what's different in corrupted vs backup
+                    changes = []
+                    for file_path, meta in recovered_metadata.items():
+                        backup_entry = backup_files.get(file_path, {})
+                        # Check if this file has different metadata than backup
+                        if meta != {k: backup_entry.get(k, '') for k in ['strain', 'animal_id', 'power', 'sex']}:
+                            changes.append({
+                                'file': file_path,
+                                'backup_had': {k: backup_entry.get(k, '') for k in ['strain', 'animal_id', 'power', 'sex'] if backup_entry.get(k)},
+                                'corrupted_has': {k: v for k, v in meta.items() if v}
+                            })
+
+                    if changes:
+                        # Read the corrupted section for context
+                        try:
+                            with open(project_path, 'r', errors='ignore') as f:
+                                corrupted_content = f.read()
+                            # Find where corruption likely occurred (truncated JSON)
+                            last_complete = corrupted_content.rfind('},')
+                            corrupted_tail = corrupted_content[last_complete:] if last_complete > 0 else corrupted_content[-500:]
+                        except:
+                            corrupted_tail = "(could not read)"
+
+                        prompt = f"""A JSON project file was corrupted during save. I have:
+1. A valid backup from before the corruption
+2. The corrupted file with partial data
+
+The user was editing {len(changes)} file entries when corruption occurred.
+
+Files that changed (comparing backup vs corrupted):
+{json.dumps(changes[:10], indent=2)}  # Limit to 10 for token efficiency
+
+The corrupted section ends with:
+{corrupted_tail[:500]}
+
+Based on the partial data in 'corrupted_has', what were the likely intended values?
+Return ONLY a JSON object mapping file_path to the corrected metadata fields.
+Only include fields you can confidently infer from the partial data."""
+
+                        response = ai_client.complete(prompt)
+
+                        # Parse AI suggestions
+                        try:
+                            content = response.content
+                            json_start = content.find('{')
+                            json_end = content.rfind('}') + 1
+                            if json_start >= 0 and json_end > json_start:
+                                ai_fixes = json.loads(content[json_start:json_end])
+                                ai_fixed = 0
+                                for fp, meta in ai_fixes.items():
+                                    if fp in recovered_metadata:
+                                        for key, value in meta.items():
+                                            if value:
+                                                recovered_metadata[fp][key] = value
+                                                ai_fixed += 1
+                                print(f"[recovery] AI repaired {ai_fixed} fields from diff analysis")
+                        except json.JSONDecodeError:
+                            print("[recovery] Could not parse AI diff-repair response")
+                    else:
+                        print("[recovery] No changes detected between backup and corrupted file")
+
+                except Exception as e:
+                    print(f"[recovery] AI diff-based recovery failed: {e}")
+
+        # If we have backup data but no AI, merge backup metadata into recovered
+        elif backup_data and not use_ai:
+            backup_files = {f.get('file_path', ''): f for f in backup_data.get('files', [])}
+            merged_count = 0
+            for file_path in recovered_metadata:
+                if file_path in backup_files:
+                    backup_entry = backup_files[file_path]
+                    # Use backup values for any missing fields
+                    for key in ['strain', 'animal_id', 'power', 'sex']:
+                        if backup_entry.get(key) and not recovered_metadata[file_path].get(key):
+                            recovered_metadata[file_path][key] = backup_entry[key]
+                            merged_count += 1
+            if merged_count > 0:
+                print(f"[recovery] Merged {merged_count} fields from backup file")
+
+        # Fallback: AI without backup - just analyze file paths for patterns
+        elif use_ai and recovered_metadata and not backup_data:
+            self._log_status_message("No backup available - AI analyzing file patterns...", 3000)
+            ai_client = self._get_configured_ai_client()
+            if ai_client:
+                try:
+                    # Only send file paths (not full metadata) for efficiency
+                    file_paths = list(recovered_metadata.keys())[:20]  # Limit for tokens
+                    prompt = f"""Analyze these file paths from a neuroscience experiment and suggest metadata.
+
+File paths:
+{json.dumps(file_paths, indent=2)}
+
+Look for patterns like:
+- Animal IDs (numbers like 25729)
+- Power levels (e.g., "10mW")
+- Strain names (e.g., "VgatCre", "C57")
+
+Return ONLY a JSON object mapping file_path to suggested {{strain, animal_id, power}} fields.
+Only include fields where you're confident."""
+
+                    response = ai_client.complete(prompt)
+                    content = response.content
+                    json_start = content.find('{')
+                    json_end = content.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        ai_suggestions = json.loads(content[json_start:json_end])
+                        for fp, meta in ai_suggestions.items():
+                            if fp in recovered_metadata:
+                                for key, value in meta.items():
+                                    if value and not recovered_metadata[fp].get(key):
+                                        recovered_metadata[fp][key] = value
+                except Exception as e:
+                    print(f"[recovery] AI pattern analysis failed: {e}")
+
+        # Track recovery stats for summary
+        recovery_stats = {
+            'method': 'unknown',
+            'files_recovered': 0,
+            'metadata_fields_recovered': 0,
+            'ai_tokens_used': getattr(self, '_last_ai_tokens', 0),
+            'errors': [],
+        }
+
+        # STRATEGY 1: If we have valid backup data, use it directly (preserves ALL metadata)
+        if backup_data:
+            self._log_status_message("Restoring from backup with recovered changes...", 2000)
+            recovery_stats['method'] = 'backup_merge'
+
+            try:
+                # Start with backup data as our base
+                # Deep copy to avoid modifying original
+                import copy
+                project_data = copy.deepcopy(backup_data)
+
+                # Build filename-based map for matching (backup has relative paths, recovered has absolute)
+                # Map filename -> index in project_data['files']
+                backup_by_filename = {}
+                for i, f in enumerate(project_data.get('files', [])):
+                    fp = f.get('file_path', '')
+                    if fp:
+                        filename = Path(fp).name
+                        backup_by_filename[filename] = i
+
+                # Merge any recovered metadata changes from corrupted file
+                # recovered_metadata has absolute paths as keys
+                for recovered_path, meta in recovered_metadata.items():
+                    filename = Path(recovered_path).name
+                    if filename in backup_by_filename:
+                        idx = backup_by_filename[filename]
+                        # Only update fields that have values in recovered data
+                        # AND are different from backup (these are the user's recent changes)
+                        for key, value in meta.items():
+                            if value:  # Only apply non-empty values
+                                old_value = project_data['files'][idx].get(key, '')
+                                if value != old_value:
+                                    project_data['files'][idx][key] = value
+                                    recovery_stats['metadata_fields_recovered'] += 1
+                                    print(f"[recovery] Merged change: {filename}.{key} = '{value}'")
+
+                recovery_stats['files_recovered'] = len(project_data.get('files', []))
+
+                # Convert relative paths back to absolute for save_project
+                # (save_project expects absolute paths and converts them to relative)
+                for file_entry in project_data.get('files', []):
+                    fp = file_entry.get('file_path', '')
+                    if fp and not Path(fp).is_absolute():
+                        abs_path = (data_directory / fp).resolve()
+                        file_entry['file_path'] = abs_path
+
+                # Save the merged data
+                self.project_manager.save_project(
+                    project_name=project_name,
+                    data_directory=data_directory,
+                    files_data=project_data.get('files', []),
+                    experiments=project_data.get('experiments', []),
+                    notes_directory=project_data.get('notes_directory'),
+                    notes_files=project_data.get('notes_files', [])
+                )
+
+                # Load the recovered project
+                saved_data = self.project_manager.load_project(project_path)
+                self._populate_ui_from_project(saved_data)
+
+                print(f"[recovery] Restored from backup with {recovery_stats['metadata_fields_recovered']} field updates")
+                print(f"[recovery] Total files in project: {recovery_stats['files_recovered']}")
+
+            except Exception as e:
+                recovery_stats['errors'].append(f"Backup merge failed: {e}")
+                print(f"[recovery] Backup merge failed, falling back to rescan: {e}")
+                import traceback
+                traceback.print_exc()
+                backup_data = None  # Fall through to rescan
+
+        # STRATEGY 2: No valid backup - must rescan and apply recovered metadata
+        if not backup_data:
+            recovery_stats['method'] = 'rescan'
+
+            # Delete the corrupted file
+            try:
+                project_path.unlink()
+                print(f"[recovery] Deleted corrupted file: {project_path}")
+            except Exception as e:
+                print(f"[recovery] Could not delete corrupted file: {e}")
+                recovery_stats['errors'].append(f"Could not delete corrupted file: {e}")
+
+            # Set up the project
+            self._current_project_name = project_name
+            if hasattr(self, 'projectNameCombo'):
+                self.projectNameCombo.setCurrentText(project_name)
+            self._project_directory = str(data_directory)
+            self.directoryPathEdit.setText(self._project_directory)
+            self._master_file_list = []
+            self._discovered_files_data = []
+
+            # Store recovered metadata and stats to apply after rescan
+            self._pending_recovery_metadata = recovered_metadata
+            self._pending_recovery_stats = recovery_stats
+
+            # Trigger rescan
+            self._log_status_message(f"Rescanning '{project_name}'...", 3000)
+            self.on_project_scan_files()
+
+            # Apply recovered metadata after scan completes (with callback for summary)
+            if recovered_metadata:
+                QTimer.singleShot(3000, self._apply_recovered_metadata_and_show_summary)
+            return  # Summary will be shown after rescan completes
+
+        # Show recovery summary for backup-based recovery
+        self._show_recovery_summary(recovery_stats, project_name)
+
+    def _get_text_diff(self, backup_path: Path, corrupted_path: Path) -> dict:
+        """Get a proper text diff between backup and corrupted file."""
+        import difflib
+
+        result = {
+            'has_diff': False,
+            'diff_lines': [],
+            'diff_summary': '',
+            'additions': [],      # Lines added in corrupted
+            'deletions': [],      # Lines removed from backup
+            'backup_content': '',
+            'corrupted_content': '',
+        }
+
+        try:
+            with open(backup_path, 'r', encoding='utf-8', errors='ignore') as f:
+                backup_lines = f.readlines()
+                result['backup_content'] = ''.join(backup_lines)
+
+            with open(corrupted_path, 'r', encoding='utf-8', errors='ignore') as f:
+                corrupted_lines = f.readlines()
+                result['corrupted_content'] = ''.join(corrupted_lines)
+
+            # Generate unified diff
+            diff = list(difflib.unified_diff(
+                backup_lines, corrupted_lines,
+                fromfile='backup', tofile='corrupted',
+                lineterm=''
+            ))
+
+            result['diff_lines'] = diff
+            result['has_diff'] = len(diff) > 0
+
+            # Categorize changes
+            for line in diff:
+                if line.startswith('+') and not line.startswith('+++'):
+                    result['additions'].append(line[1:].strip())
+                elif line.startswith('-') and not line.startswith('---'):
+                    result['deletions'].append(line[1:].strip())
+
+            # Create human-readable summary
+            result['diff_summary'] = '\n'.join(diff[:50])  # First 50 lines of diff
+
+            print(f"[diff] Found {len(result['additions'])} additions, {len(result['deletions'])} deletions")
+
+        except Exception as e:
+            print(f"[diff] Error comparing files: {e}")
+
+        return result
+
+    def _ai_smart_repair(self, backup_path: Path, corrupted_path: Path,
+                         diff_info: dict, error_msg: str) -> tuple:
+        """
+        Use AI to intelligently repair a corrupted JSON file.
+
+        Strategy: Start with backup (valid JSON), have AI identify valid new data
+        from the diff, then merge those changes into the backup.
+
+        Returns (repaired_content, explanation) or (None, error_message).
+        """
+        ai_client = self._get_configured_ai_client()
+        if not ai_client:
+            return None, "AI not configured"
+
+        # Load the backup as our base (it's valid JSON)
+        try:
+            backup_data = json.loads(diff_info['backup_content'])
+        except:
+            return None, "Backup file is not valid JSON"
+
+        # Extract just the additions from the diff (new data in corrupted file)
+        additions = diff_info.get('additions', [])
+        if not additions:
+            return None, "No additions found in diff"
+
+        # Format additions for AI analysis
+        additions_text = '\n'.join(additions[:100])  # Limit for tokens
+
+        prompt = f"""Analyze changes made to a JSON project file that caused corruption.
+
+## JSON Parse Error:
+{error_msg}
+
+## Lines ADDED to the file (these are the changes since last backup):
+```
+{additions_text}
+```
+
+## Your Task:
+These additions contain BOTH:
+1. **VALID NEW DATA** - intentional edits like strain="VgatCre", animal_id="25729", etc.
+2. **CORRUPTION** - accidental changes that broke the JSON (extra newlines, broken paths, typos)
+
+Analyze each addition and categorize it:
+- VALID: Looks like intentional metadata (field values, new entries)
+- CORRUPT: Looks like an error (broken syntax, truncated text, random characters)
+
+## Output Format:
+Return a JSON object with this structure:
+```json
+{{
+  "analysis": "Brief explanation of what you found",
+  "valid_changes": [
+    {{"file_pattern": "filename or pattern", "field": "strain", "value": "VgatCre"}},
+    {{"file_pattern": "filename", "field": "animal_id", "value": "25729"}}
+  ],
+  "corrupted_changes": [
+    {{"description": "what was corrupted and why"}}
+  ]
+}}
+```
+
+Only include changes you're confident about. For valid_changes, use file_pattern to match which file entry should be updated (can be partial filename)."""
+
+        try:
+            self._log_status_message("AI analyzing changes...", 5000)
+            response = ai_client.complete(prompt)
+            content = response.content.strip()
+
+            # Extract JSON from response
+            json_content = None
+            if '```json' in content:
+                start = content.find('```json') + 7
+                end = content.rfind('```')
+                json_content = content[start:end].strip()
+            elif '```' in content:
+                start = content.find('```') + 3
+                end = content.rfind('```')
+                json_content = content[start:end].strip()
+            else:
+                json_start = content.find('{')
+                if json_start >= 0:
+                    json_content = content[json_start:]
+
+            if not json_content:
+                return None, "AI did not return analysis"
+
+            # Parse AI's analysis
+            try:
+                ai_analysis = json.loads(json_content)
+            except json.JSONDecodeError as e:
+                print(f"[ai-repair] Could not parse AI analysis: {e}")
+                return None, f"Could not parse AI analysis: {e}"
+
+            explanation = ai_analysis.get('analysis', 'AI analyzed the changes')
+            valid_changes = ai_analysis.get('valid_changes', [])
+            corrupted_changes = ai_analysis.get('corrupted_changes', [])
+
+            if not valid_changes:
+                explanation += "\n\nNo valid changes identified - restoring from backup only."
+                repaired_json = json.dumps(backup_data, indent=2)
+                return repaired_json, explanation
+
+            # Record original file count to ensure we don't accidentally change structure
+            original_file_count = len(backup_data.get('files', []))
+
+            # Group changes by file pattern to apply consistently to multi-channel files
+            changes_by_pattern = {}
+            for change in valid_changes:
+                file_pattern = change.get('file_pattern', '')
+                field = change.get('field', '')
+                value = change.get('value', '')
+                channel = change.get('channel', None)  # Optional channel specifier
+
+                if not file_pattern or not field:
+                    continue
+
+                if file_pattern not in changes_by_pattern:
+                    changes_by_pattern[file_pattern] = []
+                changes_by_pattern[file_pattern].append({
+                    'field': field,
+                    'value': value,
+                    'channel': channel
+                })
+
+            # Apply changes to backup data
+            applied_count = 0
+            files_updated = set()
+
+            for file_pattern, changes in changes_by_pattern.items():
+                # Find ALL matching file entries (handles multi-channel files)
+                matching_indices = []
+                for i, file_entry in enumerate(backup_data.get('files', [])):
+                    file_path = file_entry.get('file_path', '')
+                    filename = Path(file_path).name.lower()
+                    pattern_lower = file_pattern.lower()
+
+                    # Match by filename (more precise than substring)
+                    if filename == pattern_lower or pattern_lower in filename:
+                        matching_indices.append(i)
+
+                if not matching_indices:
+                    print(f"[ai-repair] No match found for pattern: {file_pattern}")
+                    continue
+
+                # Apply changes to matching entries
+                for change in changes:
+                    field = change['field']
+                    value = change['value']
+                    channel = change.get('channel')
+
+                    for idx in matching_indices:
+                        file_entry = backup_data['files'][idx]
+                        entry_channel = file_entry.get('channel', file_entry.get('channels', ''))
+
+                        # If channel specified, only update matching channel
+                        if channel and str(channel) not in str(entry_channel):
+                            continue
+
+                        # Apply the change
+                        file_entry[field] = value
+                        applied_count += 1
+                        files_updated.add(Path(file_entry.get('file_path', '')).name)
+                        print(f"[ai-repair] Applied: {Path(file_entry.get('file_path', '')).name}[{entry_channel}].{field} = '{value}'")
+
+            # Verify we haven't changed the file structure
+            final_file_count = len(backup_data.get('files', []))
+            if final_file_count != original_file_count:
+                print(f"[ai-repair] WARNING: File count changed from {original_file_count} to {final_file_count}")
+                return None, f"Repair would change file count from {original_file_count} to {final_file_count} - aborting"
+
+            explanation += f"\n\nApplied {applied_count} changes to {len(files_updated)} files."
+            if corrupted_changes:
+                explanation += f"\nIgnored {len(corrupted_changes)} corrupted changes."
+            explanation += f"\nFile structure preserved ({original_file_count} entries)."
+
+            # Generate repaired JSON
+            repaired_json = json.dumps(backup_data, indent=2)
+
+            # Validate it
+            try:
+                json.loads(repaired_json)
+                file_count = len(backup_data.get('files', []))
+                print(f"[ai-repair] Produced valid JSON with {file_count} files, {applied_count} changes applied")
+                return repaired_json, explanation
+            except json.JSONDecodeError as e:
+                return None, f"Generated invalid JSON: {e}"
+
+        except Exception as e:
+            print(f"[ai-repair] AI repair failed: {e}")
             import traceback
             traceback.print_exc()
-            return
+            return None, f"AI repair failed: {e}"
 
-        # Populate UI with loaded data
-        self._populate_ui_from_project(project_data)
-        self._log_status_message(f"✓ Loaded project: {project_data['project_name']}", 3000)
+    def _analyze_corruption_cause(self, project_path: Path, error_msg: str) -> dict:
+        """Analyze the corrupted file to determine the likely cause of corruption."""
+        result = {
+            'type': 'unknown',
+            'description': 'Unknown corruption',
+            'likely_cause': 'Unable to determine cause',
+            'corrupted_section': '',
+        }
 
-        # Reset combo to placeholder after loading
-        self.loadProjectCombo.setCurrentIndex(0)
+        try:
+            with open(project_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+
+            file_size = len(content)
+
+            # Check for truncation (file ends abruptly)
+            content_stripped = content.rstrip()
+            if not content_stripped.endswith('}'):
+                result['type'] = 'truncation'
+                result['description'] = 'File appears truncated (incomplete JSON)'
+                result['likely_cause'] = 'Save operation was interrupted (app crash, power loss, or switching projects during autosave)'
+                # Get the last 200 chars to show where it cut off
+                result['corrupted_section'] = content_stripped[-200:] if len(content_stripped) > 200 else content_stripped
+
+            # Check for invalid control characters
+            elif 'invalid control character' in error_msg.lower():
+                result['type'] = 'invalid_chars'
+                result['description'] = 'File contains invalid control characters'
+                result['likely_cause'] = 'Binary data or encoding issue during save (possibly disk error or memory corruption)'
+                # Find the problematic area
+                import re
+                bad_chars = re.findall(r'[\x00-\x1f]', content)
+                if bad_chars:
+                    result['corrupted_section'] = f"Found {len(bad_chars)} invalid characters"
+
+            # Check for missing brackets/braces
+            elif content.count('{') != content.count('}'):
+                result['type'] = 'unbalanced_braces'
+                open_count = content.count('{')
+                close_count = content.count('}')
+                result['description'] = f'Unbalanced braces ({{ {open_count} vs }} {close_count})'
+                result['likely_cause'] = 'Partial write - save was interrupted before completion'
+                result['corrupted_section'] = content[-200:] if len(content) > 200 else content
+
+            # Check for duplicate keys or malformed structure
+            elif 'expecting' in error_msg.lower():
+                result['type'] = 'malformed_json'
+                result['description'] = 'Malformed JSON structure'
+                result['likely_cause'] = 'Data serialization error or concurrent write conflict'
+                # Extract line number from error if available
+                import re
+                line_match = re.search(r'line (\d+)', error_msg)
+                if line_match:
+                    line_num = int(line_match.group(1))
+                    lines = content.split('\n')
+                    if line_num <= len(lines):
+                        start = max(0, line_num - 3)
+                        end = min(len(lines), line_num + 2)
+                        result['corrupted_section'] = '\n'.join(f"{i+1}: {lines[i]}" for i in range(start, end))
+
+            else:
+                # Generic corruption
+                result['type'] = 'generic'
+                result['description'] = 'JSON parsing error'
+                result['likely_cause'] = 'File was modified or corrupted'
+                result['corrupted_section'] = content[-200:] if len(content) > 200 else content
+
+        except Exception as e:
+            result['likely_cause'] = f'Could not analyze file: {e}'
+
+        return result
+
+    def _handle_corrupted_project(self, project_path: Path, project_name: str, error_msg: str):
+        """Handle a corrupted project file with a recovery preview dialog."""
+        from PyQt6.QtWidgets import QMessageBox, QDialog, QVBoxLayout, QLabel, QTextEdit, QPushButton, QHBoxLayout, QGroupBox
+
+        data_directory = project_path.parent
+        backup_path = project_path.with_suffix('.physiometrics.bak')
+        has_backup = backup_path.exists()
+
+        # First, analyze what can be recovered
+        self._log_status_message("Analyzing corrupted file...", 2000)
+
+        # Analyze the corruption cause
+        corruption_info = self._analyze_corruption_cause(project_path, error_msg)
+
+        # Get proper text diff if backup exists
+        diff_info = None
+        if has_backup:
+            diff_info = self._get_text_diff(backup_path, project_path)
+
+        # Extract metadata from corrupted file
+        recovered_metadata = self._extract_metadata_from_corrupted(project_path)
+
+        # Check if AI is configured
+        has_ai = self._get_configured_ai_client() is not None
+
+        # Build recovery preview dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Project Recovery")
+        dialog.setMinimumSize(600, 500)
+        layout = QVBoxLayout(dialog)
+
+        # Header
+        header = QLabel(f"<b>The project '{project_name}' is corrupted.</b>")
+        layout.addWidget(header)
+
+        # Check if backup is valid (can be loaded as JSON)
+        backup_valid = False
+        backup_file_count = 0
+        backup_data = None
+        if has_backup:
+            try:
+                with open(backup_path, 'r') as f:
+                    backup_data = json.load(f)
+                backup_valid = True
+                backup_file_count = len(backup_data.get('files', []))
+            except:
+                backup_valid = False
+
+        # Show corruption diagnosis
+        summary_parts = []
+        summary_parts.append(f"<b>Corruption type:</b> {corruption_info['description']}")
+        summary_parts.append(f"<b>Likely cause:</b> {corruption_info['likely_cause']}")
+        summary_parts.append("")
+
+        # Recovery options summary
+        if has_backup and backup_valid:
+            summary_parts.append(f"✓ Valid backup found ({backup_file_count} files)")
+        elif has_backup:
+            summary_parts.append("⚠ Backup file exists but is also corrupted")
+        else:
+            summary_parts.append("✗ No backup file found")
+
+        summary_parts.append(f"✓ Found {len(recovered_metadata)} file entries in corrupted data")
+
+        if has_ai:
+            if backup_valid:
+                summary_parts.append("✓ AI configured (will compare backup vs corrupted to find changes)")
+            else:
+                summary_parts.append("✓ AI configured (will analyze file patterns)")
+        else:
+            summary_parts.append("○ AI not configured (optional)")
+
+        # Explain recovery strategy
+        summary_parts.append("")
+        summary_parts.append("<b>Recovery strategy:</b>")
+        if backup_valid and has_ai:
+            summary_parts.append("1. Load backup as baseline")
+            summary_parts.append("2. Find changes in corrupted file")
+            summary_parts.append("3. AI repairs corrupted changes (token-efficient)")
+            summary_parts.append("4. Merge with backup data")
+        elif backup_valid:
+            summary_parts.append("1. Load backup as baseline")
+            summary_parts.append("2. Merge any recoverable changes from corrupted file")
+        elif has_ai:
+            summary_parts.append("1. Rescan directory for files")
+            summary_parts.append("2. AI analyzes file paths for metadata patterns")
+        else:
+            summary_parts.append("1. Rescan directory for files")
+            summary_parts.append("2. Apply any metadata found in corrupted file")
+
+        summary_label = QLabel("\n".join(summary_parts))
+        layout.addWidget(summary_label)
+
+        # Show REAL text diff between backup and corrupted
+        if diff_info and diff_info['has_diff']:
+            preview_group = QGroupBox(f"Text Diff: {len(diff_info['additions'])} additions, {len(diff_info['deletions'])} deletions")
+        elif has_backup:
+            preview_group = QGroupBox("Detected Changes (Backup → Corrupted)")
+        else:
+            preview_group = QGroupBox("Recovered Data Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        preview_text = QTextEdit()
+        preview_text.setReadOnly(True)
+        preview_text.setMaximumHeight(200)
+        preview_text.setStyleSheet("font-family: Consolas, monospace; font-size: 9pt;")
+
+        preview_lines = []
+
+        # Use actual text diff if available
+        if diff_info and diff_info['has_diff']:
+            preview_lines.append("Changes detected (- = backup, + = corrupted):")
+            preview_lines.append("")
+            # Show first 30 diff lines
+            for line in diff_info['diff_lines'][:30]:
+                preview_lines.append(line.rstrip())
+            if len(diff_info['diff_lines']) > 30:
+                preview_lines.append(f"... and {len(diff_info['diff_lines']) - 30} more lines")
+
+        elif diff_info and not diff_info['has_diff']:
+            preview_lines.append("✓ No text differences between backup and corrupted file.")
+            preview_lines.append("  This shouldn't happen - the files appear identical.")
+
+        elif has_backup and not diff_info:
+            preview_lines.append("Could not compute diff between files.")
+
+        elif recovered_metadata:
+            # No backup - just show what we extracted
+            preview_lines.append("No backup available for comparison.")
+            preview_lines.append(f"Extracted {len(recovered_metadata)} file entries from corrupted data:")
+            preview_lines.append("")
+            for file_path, meta in list(recovered_metadata.items())[:8]:
+                meta_str = ", ".join(f"{k}={v}" for k, v in meta.items() if v)
+                preview_lines.append(f"• {Path(file_path).name}: {meta_str or '(no metadata)'}")
+            if len(recovered_metadata) > 8:
+                preview_lines.append(f"... and {len(recovered_metadata) - 8} more files")
+        else:
+            preview_lines.append("No metadata could be extracted from the corrupted file.")
+            preview_lines.append("A fresh scan will discover all files but user-entered data will be lost.")
+
+        preview_text.setPlainText("\n".join(preview_lines))
+        preview_layout.addWidget(preview_text)
+        layout.addWidget(preview_group)
+
+        # AI enhancement option (if not configured)
+        if not has_ai and recovered_metadata:
+            ai_note = QLabel(
+                "<i>Tip: Configure an AI API key in Settings → AI Integration to help\n"
+                "recover additional metadata from file path patterns.</i>"
+            )
+            ai_note.setStyleSheet("color: #888;")
+            layout.addWidget(ai_note)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        # AI Smart Repair button - most powerful option when AI + backup are available
+        ai_repair_btn = None
+        if has_ai and has_backup and diff_info and diff_info['has_diff']:
+            ai_repair_btn = QPushButton("AI Smart Repair")
+            ai_repair_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 8px 16px;")
+            ai_repair_btn.setToolTip("AI analyzes the diff to fix corruption while preserving your new data")
+            button_layout.addWidget(ai_repair_btn)
+
+        recover_btn = QPushButton("Recover Project")
+        recover_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px 16px;")
+        if has_ai and has_backup:
+            recover_btn.setToolTip("Restore from backup and merge any recoverable changes")
+
+        # Only show backup restore option if backup exists AND is valid
+        if backup_valid:
+            backup_btn = QPushButton("Restore Backup Only")
+            backup_btn.setToolTip(f"Restore from backup ({backup_file_count} files, loses ALL recent changes)")
+            button_layout.addWidget(backup_btn)
+
+        cancel_btn = QPushButton("Cancel")
+
+        button_layout.addStretch()
+        button_layout.addWidget(recover_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        # Button handlers
+        result = {'action': None}
+
+        def on_ai_repair():
+            result['action'] = 'ai_repair'
+            dialog.accept()
+
+        def on_recover():
+            result['action'] = 'recover'
+            dialog.accept()
+
+        def on_backup():
+            result['action'] = 'backup'
+            dialog.accept()
+
+        def on_cancel():
+            result['action'] = 'cancel'
+            dialog.reject()
+
+        if ai_repair_btn:
+            ai_repair_btn.clicked.connect(on_ai_repair)
+        recover_btn.clicked.connect(on_recover)
+        cancel_btn.clicked.connect(on_cancel)
+        if backup_valid:
+            backup_btn.clicked.connect(on_backup)
+
+        dialog.exec()
+
+        # Handle result
+        if result['action'] == 'ai_repair' and diff_info:
+            # AI Smart Repair - let AI analyze diff and fix the file
+            repaired_json, explanation = self._ai_smart_repair(
+                backup_path, project_path, diff_info, error_msg
+            )
+
+            if repaired_json:
+                # Show what AI found and ask for confirmation
+                confirm = QMessageBox.question(
+                    self, "AI Repair Complete",
+                    f"AI Analysis:\n{explanation}\n\nApply this repair?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+
+                if confirm == QMessageBox.StandardButton.Yes:
+                    try:
+                        # Write the repaired JSON
+                        with open(project_path, 'w') as f:
+                            f.write(repaired_json)
+                        print(f"[ai-repair] Wrote repaired file: {project_path}")
+
+                        # Load it
+                        project_data = self.project_manager.load_project(project_path)
+                        self._populate_ui_from_project(project_data)
+                        self._log_status_message(f"✓ AI repaired project '{project_name}'", 3000)
+                    except Exception as e:
+                        self._show_error("Repair Failed", f"Could not apply AI repair:\n{e}")
+            else:
+                self._show_error("AI Repair Failed", f"AI could not repair the file:\n{explanation}")
+
+        elif result['action'] == 'recover':
+            self._perform_project_recovery(
+                project_path, project_name, data_directory,
+                recovered_metadata, use_ai=has_ai
+            )
+
+        elif result['action'] == 'backup' and backup_valid:
+            # Restore from backup file (we already validated it can be loaded)
+            try:
+                import shutil
+                shutil.copy2(backup_path, project_path)
+                print(f"[recovery] Restored from backup: {backup_path}")
+
+                # Load the restored file (should work since we validated it)
+                project_data = self.project_manager.load_project(project_path)
+                self._populate_ui_from_project(project_data)
+                self._log_status_message(f"✓ Restored project '{project_name}' from backup ({backup_file_count} files)", 3000)
+            except Exception as e:
+                self._show_error("Restore Failed", f"Could not restore from backup:\n{e}")
+
+        # else: Cancel - do nothing
 
     def _populate_load_project_combo(self):
-        """Populate the Load Project dropdown with recent projects."""
-        combo = self.loadProjectCombo
-        combo.blockSignals(True)  # Prevent triggering load during population
-        combo.clear()
-
-        # Add placeholder
-        combo.addItem("Load Project...")
-
-        # Add recent projects
-        recent_projects = self.project_manager.get_recent_projects()
-        for project_info in recent_projects:
-            combo.addItem(f"{project_info['name']}")
-
-        combo.blockSignals(False)
+        """Populate the project name combo (legacy wrapper)."""
+        # Use the new unified method
+        current_name = getattr(self, '_current_project_name', None)
+        self._populate_project_name_combo(current_name)
 
     def _populate_ui_from_project(self, project_data):
         """Populate UI with loaded project data."""
         # Set project name and directory
-        self.projectNameEdit.setText(project_data['project_name'])
+        project_name = project_data['project_name']
+        self._current_project_name = project_name
+        if hasattr(self, 'projectNameCombo'):
+            self.projectNameCombo.setCurrentText(project_name)
         self._project_directory = str(project_data['data_directory'])
         self.directoryPathEdit.setText(self._project_directory)
 
-        # Populate discovered files table
+        # Populate discovered files data
         self._discovered_files_data = project_data['files']
-        table = self.discoveredFilesTable
-
-        # Disable updates for faster population
-        table.setUpdatesEnabled(False)
-        table.setRowCount(0)
 
         # Count protocols and check if keywords need extraction
         protocols = set()
@@ -8545,14 +15385,21 @@ class MainWindow(QMainWindow):
                     if file_path:
                         path_info = extract_path_keywords(Path(file_path), base_dir)
 
-                        # Format keywords for display
+                        # Format keywords for display - show relative path as the primary keyword
                         keywords_display = []
+
+                        # Add relative path (the main keyword showing file location)
+                        if path_info.get('relative_path'):
+                            keywords_display.append(path_info['relative_path'])
+                        elif path_info['subdirs']:
+                            # Fallback to subdirs if relative_path not available
+                            keywords_display.append('/'.join(path_info['subdirs']))
+
+                        # Also add power levels and animal IDs if detected
                         if path_info['power_levels']:
                             keywords_display.extend(path_info['power_levels'])
                         if path_info['animal_ids']:
                             keywords_display.extend([f"ID:{id}" for id in path_info['animal_ids']])
-                        if path_info['keywords']:
-                            keywords_display.extend(path_info['keywords'])
 
                         file_data['path_keywords'] = path_info
                         file_data['keywords_display'] = ', '.join(keywords_display) if keywords_display else ''
@@ -8564,14 +15411,14 @@ class MainWindow(QMainWindow):
                     self.projectProgressBar.setFormat(f"Extracting keywords: {idx + 1}/{total_files} ({progress_pct}%)")
                     QApplication.processEvents()
 
-        # Show progress for table population
+        # Show progress for data preparation
         total_files = len(self._discovered_files_data)
         self.projectProgressBar.setVisible(True)
         self.projectProgressBar.setValue(0)
         self.projectProgressBar.setFormat(f"Loading files: 0/{total_files} (0%)")
         QApplication.processEvents()
 
-        # Populate table with 15-column structure
+        # Ensure all files have required fields
         for i, file_data in enumerate(self._discovered_files_data):
             # Ensure file has all needed fields
             if 'channel' not in file_data:
@@ -8618,29 +15465,6 @@ class MainWindow(QMainWindow):
                     'ml_training': False,
                 }
 
-            table.insertRow(i)
-            table.setItem(i, 0, QTableWidgetItem(file_data.get('file_name', '')))  # File Name
-            table.setItem(i, 1, QTableWidgetItem(file_data.get('protocol', '')))  # Protocol
-            table.setItem(i, 2, QTableWidgetItem(str(file_data.get('channel_count', ''))))  # Avail Ch
-            table.setItem(i, 3, QTableWidgetItem(str(file_data.get('sweep_count', ''))))  # Sweeps
-            table.setItem(i, 4, QTableWidgetItem(file_data.get('keywords_display', '')))  # Keywords
-            table.setItem(i, 5, QTableWidgetItem(file_data.get('channel', '')))  # Channel
-            table.setItem(i, 6, QTableWidgetItem(file_data.get('stim_channel', '')))  # Stim Ch
-            table.setItem(i, 7, QTableWidgetItem(file_data.get('events_channel', '')))  # Events Ch
-            table.setItem(i, 8, QTableWidgetItem(file_data.get('strain', '')))  # Strain
-            table.setItem(i, 9, QTableWidgetItem(file_data.get('stim_type', '')))  # Stim Type
-            table.setItem(i, 10, QTableWidgetItem(file_data.get('power', '')))  # Power
-            table.setItem(i, 11, QTableWidgetItem(file_data.get('sex', '')))  # Sex
-            table.setItem(i, 12, QTableWidgetItem(file_data.get('animal_id', '')))  # Animal ID
-            # Status icon based on status field
-            status = file_data.get('status', 'pending')
-            status_icon = '●' if status == 'completed' else ('◐' if status == 'in_progress' else '○')
-            table.setItem(i, 13, QTableWidgetItem(status_icon))  # Status
-            # Add action buttons (column 14)
-            self._add_row_action_button(i)
-            # Column 15: Exports
-            table.setItem(i, 15, self._create_exports_table_item(file_data))
-
             if file_data.get('protocol'):
                 protocols.add(file_data['protocol'])
 
@@ -8651,9 +15475,14 @@ class MainWindow(QMainWindow):
                 self.projectProgressBar.setFormat(f"Loading files: {i + 1}/{total_files} ({progress_pct}%)")
                 QApplication.processEvents()
 
-        # Re-enable updates and resize
-        table.setUpdatesEnabled(True)
-        table.resizeColumnsToContents()
+        # Sync master file list with discovered files
+        self._master_file_list = [dict(f) for f in self._discovered_files_data]
+
+        # Rebuild the table using the model
+        self._rebuild_table_from_master_list()
+
+        # Auto-fit columns
+        self._auto_fit_table_columns()
 
         # Hide progress bar
         self.projectProgressBar.setVisible(False)
@@ -8663,11 +15492,55 @@ class MainWindow(QMainWindow):
         summary_text = f"Summary: {len(self._discovered_files_data)} ABF files | {len(protocols)} protocols"
         self.summaryLabel.setText(summary_text)
 
-        # Sync master file list with discovered files
-        self._master_file_list = self._discovered_files_data.copy()
+        # Restore notes data if available
+        if project_data.get('notes_directory'):
+            self._notes_directory = project_data['notes_directory']
+            if hasattr(self, 'notesFolderEdit'):
+                self.notesFolderEdit.setText(self._notes_directory)
+        if project_data.get('notes_files'):
+            self._notes_files_data = project_data['notes_files']
+            # Populate notes table
+            self._populate_notes_table_from_data()
+
+        # Populate consolidation source list with analyzed files from project
+        self._populate_consolidation_source_list()
 
         # Note: Old experiment structure is ignored - we now use the flat master file list
         # If old project had experiments, their task data could be migrated here if needed
+
+    def _populate_notes_table_from_data(self):
+        """Populate notes table from stored notes files data."""
+        if not hasattr(self, '_notes_model') or not self._notes_files_data:
+            return
+
+        self._notes_model.removeRows(0, self._notes_model.rowCount())
+
+        from PyQt6.QtGui import QStandardItem
+        from PyQt6.QtCore import Qt
+
+        for file_info in self._notes_files_data:
+            # Create checkbox item for "Use" column
+            use_item = QStandardItem()
+            use_item.setCheckable(True)
+            use_as_notes = file_info.get('use_as_notes', True)
+            use_item.setCheckState(Qt.CheckState.Checked if use_as_notes else Qt.CheckState.Unchecked)
+            use_item.setEditable(False)
+
+            # File name with path stored
+            name_item = QStandardItem(file_info.get('name', ''))
+            name_item.setData(file_info.get('path', ''), Qt.ItemDataRole.UserRole)
+
+            # Matches column
+            match_count = file_info.get('match_count', 0)
+            matches_item = QStandardItem(str(match_count) if match_count > 0 else "—")
+            matches_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            type_item = QStandardItem(file_info.get('type', ''))
+            location_item = QStandardItem(file_info.get('location', ''))
+            size_item = QStandardItem(file_info.get('size', ''))
+            modified_item = QStandardItem(file_info.get('modified', ''))
+
+            self._notes_model.appendRow([use_item, name_item, matches_item, type_item, location_item, size_item, modified_item])
 
     # NOTE: _load_experiments_from_project method removed - no longer using experiment tree
 

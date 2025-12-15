@@ -44,12 +44,37 @@ import json
 import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import os
 
 
 # Project file format version
 PROJECT_FORMAT_VERSION = 2
+
+
+def _make_json_serializable(obj: Any) -> Any:
+    """
+    Recursively convert an object to be JSON serializable.
+
+    Handles:
+    - Path objects -> str
+    - datetime objects -> ISO format string
+    - sets -> lists
+    - nested dicts and lists
+    """
+    if isinstance(obj, Path):
+        return str(obj)
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, set):
+        return list(obj)
+    elif isinstance(obj, dict):
+        return {k: _make_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_make_json_serializable(item) for item in obj]
+    else:
+        # Return as-is for basic types (str, int, float, bool, None)
+        return obj
 
 
 class ProjectManager:
@@ -188,7 +213,8 @@ class ProjectManager:
         return new_exp
 
     def save_project(self, project_name: str, data_directory: Path,
-                     files_data: List[Dict], experiments: List[Dict] = None) -> Path:
+                     files_data: List[Dict], experiments: List[Dict] = None,
+                     notes_directory: str = None, notes_files: List[Dict] = None) -> Path:
         """
         Save project file to data directory.
 
@@ -197,22 +223,28 @@ class ProjectManager:
             data_directory: Root directory containing the data
             files_data: List of file metadata dicts (with 'file_path', 'protocol', etc.)
             experiments: List of experiment definitions (optional)
+            notes_directory: Path to notes folder (optional)
+            notes_files: List of notes file metadata dicts (optional)
 
         Returns:
             Path to saved project file
         """
         if experiments is None:
             experiments = []
+        if notes_files is None:
+            notes_files = []
 
         # Create project file path
         project_filename = f"{self._sanitize_filename(project_name)}.physiometrics"
         project_path = data_directory / project_filename
 
-        # Convert file paths to relative paths
+        # Convert file paths to relative paths and ensure JSON serializable
         files_relative = []
         for file_data in files_data:
-            file_data_copy = file_data.copy()
-            if 'file_path' in file_data_copy:
+            # Deep copy and convert all non-serializable types (Path, datetime, set, etc.)
+            file_data_copy = _make_json_serializable(file_data)
+
+            if 'file_path' in file_data_copy and file_data_copy['file_path']:
                 # Convert absolute path to relative path from data_directory
                 abs_path = Path(file_data_copy['file_path'])
                 try:
@@ -223,14 +255,14 @@ class ProjectManager:
                     file_data_copy['file_path'] = str(abs_path)
             files_relative.append(file_data_copy)
 
-        # Convert experiment task file paths to relative
+        # Convert experiment task file paths to relative and ensure JSON serializable
         experiments_relative = []
         for exp in experiments:
-            exp_copy = exp.copy()
+            # Deep copy and convert all non-serializable types
+            exp_copy = _make_json_serializable(exp)
+
             if 'tasks' in exp_copy:
-                tasks_relative = []
-                for task in exp_copy['tasks']:
-                    task_copy = task.copy()
+                for task_copy in exp_copy['tasks']:
                     if 'file_path' in task_copy and task_copy['file_path']:
                         abs_path = Path(task_copy['file_path'])
                         try:
@@ -238,9 +270,10 @@ class ProjectManager:
                             task_copy['file_path'] = str(rel_path)
                         except ValueError:
                             task_copy['file_path'] = str(abs_path)
-                    tasks_relative.append(task_copy)
-                exp_copy['tasks'] = tasks_relative
             experiments_relative.append(exp_copy)
+
+        # Process notes files - make JSON serializable
+        notes_files_serializable = _make_json_serializable(notes_files)
 
         # Create project data structure
         project_data = {
@@ -251,14 +284,47 @@ class ProjectManager:
             "last_modified": datetime.now().isoformat(),
             "file_count": len(files_data),
             "files": files_relative,
-            "experiments": experiments_relative
+            "experiments": experiments_relative,
+            "notes_directory": str(notes_directory) if notes_directory else None,
+            "notes_files": notes_files_serializable
         }
 
-        # Save to JSON
+        # Create backup of existing file before saving
+        # This provides a "one undo" safety net - if current file corrupts, .bak has previous version
+        import shutil
+        backup_path = project_path.with_suffix('.physiometrics.bak')
+        if project_path.exists():
+            try:
+                shutil.copy2(project_path, backup_path)  # copy2 preserves metadata
+                print(f"[project-manager] Created backup: {backup_path.name}")
+            except Exception as e:
+                print(f"[project-manager] Warning: Could not create backup: {e}")
+
+        # Save to JSON atomically (write to temp file, then rename)
+        # This prevents corruption if the write is interrupted
+        import tempfile
         try:
-            with open(project_path, 'w') as f:
-                json.dump(project_data, f, indent=2)
-            print(f"[project-manager] Saved project to: {project_path}")
+            # Write to temp file in same directory (ensures same filesystem for atomic rename)
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix='.tmp',
+                prefix='physiometrics_',
+                dir=data_directory
+            )
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(project_data, f, indent=2)
+
+                # Atomic rename (replace existing file)
+                temp_path = Path(temp_path)
+                temp_path.replace(project_path)
+                print(f"[project-manager] Saved project to: {project_path}")
+            except:
+                # Clean up temp file on error
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             raise Exception(f"Failed to save project: {e}")
 
@@ -345,11 +411,17 @@ class ProjectManager:
         project_data['files'] = files_absolute
         project_data['experiments'] = experiments_processed
 
+        # Include notes data
+        project_data['notes_directory'] = project_data.get('notes_directory', None)
+        project_data['notes_files'] = project_data.get('notes_files', [])
+
         # Update recent projects
         self._add_to_recent_projects(project_data['project_name'], project_path)
 
         print(f"[project-manager] Loaded project: {project_data['project_name']}")
         print(f"[project-manager] Files: {len(files_absolute)}, Experiments: {len(experiments_processed)}")
+        if project_data['notes_directory']:
+            print(f"[project-manager] Notes directory: {project_data['notes_directory']}")
 
         return project_data
 

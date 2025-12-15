@@ -151,8 +151,8 @@ class AnalysisOptionsDialog(QDialog):
             if self.settings.contains("analysis_dialog_size"):
                 size = self.settings.value("analysis_dialog_size")
                 self.resize(size)
-            # Restore training data path
-            self.last_training_data_dir = self.settings.value("ml_training_data_path", "")
+            # Restore training data path (use ml_training_folder for consistency with export_manager)
+            self.last_training_data_dir = self.settings.value("ml_training_folder", "")
             # Restore models directory path
             self.last_models_dir = self.settings.value("ml_models_path", "")
         else:
@@ -240,16 +240,10 @@ class AnalysisOptionsDialog(QDialog):
             traceback.print_exc()
 
     def showEvent(self, event):
-        """Refresh tabs when dialog is shown."""
+        """Handle dialog show - tabs are already initialized in __init__."""
         super().showEvent(event)
-        # Refresh the currently active tab
-        current_index = self.tabWidget.currentIndex()
-        print(f"[AnalysisOptions] showEvent - current tab index: {current_index}")
-        if current_index == 0:
-            self._refresh_peak_detection_tab()
-        elif current_index == 1:
-            self._refresh_breath_classification_tab()
-        # Note: ML settings tab doesn't need refreshing
+        # Tabs are initialized in __init__, no need to refresh here
+        # The refresh methods have early-return checks for existing dialogs anyway
 
     def closeEvent(self, event):
         """Save position and size when dialog is closed."""
@@ -325,37 +319,21 @@ class AnalysisOptionsDialog(QDialog):
         if hasattr(self.parent_window, 'all_peak_heights') and self.parent_window.all_peak_heights is not None:
             print(f"[AnalysisOptions] Creating prominence dialog using cached peak heights ({len(self.parent_window.all_peak_heights)} peaks)")
 
-            # Concatenate all sweeps (needed for ProminenceThresholdDialog)
-            all_sweeps_data = []
-            n_sweeps = st.sweeps[st.analyze_chan].shape[1]
-            for sweep_idx in range(n_sweeps):
-                if sweep_idx in st.omitted_sweeps:
-                    continue
-                y_sweep = self.parent_window._get_processed_for(st.analyze_chan, sweep_idx)
-                all_sweeps_data.append(y_sweep)
-
-            if not all_sweeps_data:
-                label = QLabel("All sweeps are omitted.")
-                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                layout.addWidget(label)
-                return
-
-            y_data = np.concatenate(all_sweeps_data)
-
             # Get current prominence
             try:
                 current_prom = self.parent_window.PeakPromValueSpinBox.value() if self.parent_window.PeakPromValueSpinBox.value() > 0 else None
             except:
                 current_prom = None
 
-            # Create dialog with cached peak data to avoid re-detection
-            # Get cached peaks from main window if available
+            # Get cached peaks from main window
             cached_peaks = getattr(self.parent_window, 'all_peaks', None)
             cached_heights = self.parent_window.all_peak_heights
 
+            # Create dialog with cached peak data - y_data not needed since we have cached heights
+            # (y_data is only used for peak detection, which is skipped when cached data is provided)
             self.prominence_dialog = ProminenceThresholdDialog(
                 parent=container,  # Set container as parent for proper embedding
-                y_data=y_data,
+                y_data=None,  # Not needed - peak detection skipped with cached data
                 sr_hz=st.sr_hz,
                 current_prom=current_prom,
                 current_min_dist=self.parent_window.peak_min_dist,
@@ -488,34 +466,41 @@ class AnalysisOptionsDialog(QDialog):
         """Initialize Breath Classification tab with GMMClusteringDialog content."""
         self._refresh_breath_classification_tab()
 
-    def _refresh_breath_classification_tab(self):
-        """Refresh the Breath Classification (GMM) tab with current data."""
-        print("[AnalysisOptions] _refresh_breath_classification_tab() called - ENTRY")
+    def _refresh_breath_classification_tab(self, force=False):
+        """Refresh the Breath Classification (GMM) tab with current data.
 
+        Args:
+            force: If True, recreate the dialog even if it already exists.
+        """
         from dialogs.gmm_clustering_dialog import GMMClusteringDialog
         from PyQt6.QtWidgets import QLabel, QApplication, QSizePolicy
         from PyQt6.QtCore import Qt
 
-        print("[AnalysisOptions] Imports complete")
-
         container = self.breath_classification_container
-        print(f"[AnalysisOptions] Container widget: {container}, visible: {container.isVisible()}, size: {container.size()}")
 
         # Get or create layout
         layout = container.layout()
         if layout is None:
             layout = QVBoxLayout(container)
             layout.setContentsMargins(0, 0, 0, 0)
-            print("[AnalysisOptions] Created new layout for container")
-        else:
-            # Clear existing widgets
-            print(f"[AnalysisOptions] Clearing existing layout (has {layout.count()} items)")
-            while layout.count():
-                child = layout.takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
-            # Process events to ensure widgets are actually deleted
-            QApplication.processEvents()
+
+        # Check if we already have a valid GMM dialog (don't recreate unless forced)
+        if not force and hasattr(self, 'gmm_dialog') and self.gmm_dialog is not None:
+            try:
+                # Verify it's still valid
+                _ = self.gmm_dialog.isVisible()
+                print("[AnalysisOptions] Reusing existing GMM dialog (already in layout)")
+                return
+            except RuntimeError:
+                # Dialog was deleted, create new one
+                self.gmm_dialog = None
+
+        # Clear existing widgets only when recreating
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        QApplication.processEvents()
 
         # Check if we have data
         st = self.state
@@ -1366,9 +1351,9 @@ class AnalysisOptionsDialog(QDialog):
         if data_dir:
             self.last_training_data_dir = data_dir
             self.training_data_path_edit.setText(data_dir)
-            # Save to settings
+            # Save to settings (use ml_training_folder for consistency with export_manager)
             if self.settings:
-                self.settings.setValue("ml_training_data_path", data_dir)
+                self.settings.setValue("ml_training_folder", data_dir)
             # Scan directory for files
             self._scan_training_files(data_dir)
 

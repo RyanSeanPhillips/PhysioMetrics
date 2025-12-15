@@ -2,6 +2,7 @@
 AI Settings Dialog - Configure and test AI integration.
 
 Allows users to:
+- Use Ollama for FREE local AI (no API key needed!)
 - Enter API keys for Claude, OpenAI, or Gemini
 - Test connection
 - Try simple AI features (file grouping suggestions, trace analysis)
@@ -109,15 +110,37 @@ class AISettingsDialog(QDialog):
         provider_row = QHBoxLayout()
         provider_row.addWidget(QLabel("Provider:"))
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["Claude (Anthropic)", "GPT (OpenAI)", "Gemini (Google)"])
+        self.provider_combo.addItems([
+            "🆓 Ollama (Local - FREE!)",
+            "Claude (Anthropic)",
+            "GPT (OpenAI)",
+            "Gemini (Google)"
+        ])
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         provider_row.addWidget(self.provider_combo)
         provider_row.addStretch()
         provider_layout.addLayout(provider_row)
 
+        # Model selection (for Ollama)
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setMinimumWidth(200)
+        model_row.addWidget(self.model_combo)
+
+        self.refresh_models_btn = QPushButton("↻")
+        self.refresh_models_btn.setMaximumWidth(30)
+        self.refresh_models_btn.setToolTip("Refresh available models from Ollama")
+        self.refresh_models_btn.clicked.connect(self._refresh_ollama_models)
+        model_row.addWidget(self.refresh_models_btn)
+        model_row.addStretch()
+        provider_layout.addLayout(model_row)
+
         # API Key input
         key_row = QHBoxLayout()
-        key_row.addWidget(QLabel("API Key:"))
+        self.api_key_label = QLabel("API Key:")
+        key_row.addWidget(self.api_key_label)
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_input.setPlaceholderText("Enter your API key...")
@@ -151,16 +174,19 @@ class AISettingsDialog(QDialog):
 
         layout.addLayout(test_row)
 
-        # Info about API keys
-        info_group = QGroupBox("About API Keys")
+        # Info about providers
+        info_group = QGroupBox("About AI Providers")
         info_layout = QVBoxLayout(info_group)
         info_text = QLabel(
-            "API keys are stored locally on your computer (in QSettings).<br>"
-            "They are never sent anywhere except to the AI provider you select.<br><br>"
-            "Get your API keys from:<br>"
+            "<b>🆓 FREE Option - Ollama (Recommended to start!):</b><br>"
+            "• Runs entirely on your computer - no API key needed!<br>"
+            "• Download: <a href='https://ollama.com/download'>https://ollama.com/download</a><br>"
+            "• After installing, run: <code>ollama pull llama3.2</code><br><br>"
+            "<b>Paid Cloud Options (require API keys):</b><br>"
             "• Claude: <a href='https://console.anthropic.com/'>https://console.anthropic.com/</a><br>"
             "• GPT: <a href='https://platform.openai.com/api-keys'>https://platform.openai.com/api-keys</a><br>"
-            "• Gemini: <a href='https://aistudio.google.com/app/apikey'>https://aistudio.google.com/app/apikey</a>"
+            "• Gemini: <a href='https://aistudio.google.com/app/apikey'>https://aistudio.google.com/app/apikey</a><br><br>"
+            "<i>API keys are stored locally on your computer and never shared.</i>"
         )
         info_text.setWordWrap(True)
         info_text.setStyleSheet("font-size: 11px;")
@@ -265,35 +291,86 @@ class AISettingsDialog(QDialog):
 
     def _on_provider_changed(self, index: int):
         """Handle provider selection change."""
-        providers = ["claude", "openai", "gemini"]
+        providers = ["ollama", "claude", "openai", "gemini"]
         provider = providers[index]
 
-        # Check if SDK is available
+        is_ollama = (provider == "ollama")
+
+        # Show/hide API key input based on provider
+        self.api_key_label.setVisible(not is_ollama)
+        self.api_key_input.setVisible(not is_ollama)
+        self.show_key_checkbox.setVisible(not is_ollama)
+
+        # Show/hide model selection and refresh button
+        self.model_combo.setVisible(is_ollama)
+        self.refresh_models_btn.setVisible(is_ollama)
+
+        # Check if SDK/server is available
         try:
-            from core.ai_client import check_provider_available
+            from core.ai_client import check_provider_available, get_ollama_models
             status = check_provider_available(provider)
 
-            if not status["sdk_installed"]:
-                sdk_names = {
-                    "claude": "anthropic",
-                    "openai": "openai",
-                    "gemini": "google-generativeai"
-                }
-                self.provider_status.setText(
-                    f"⚠️ SDK not installed. Run: pip install {sdk_names[provider]}"
-                )
-                self.provider_status.setStyleSheet("color: orange; font-size: 11px;")
+            if provider == "ollama":
+                if not status["sdk_installed"]:
+                    self.provider_status.setText(
+                        "⚠️ OpenAI SDK needed. Run: pip install openai"
+                    )
+                    self.provider_status.setStyleSheet("color: orange; font-size: 11px;")
+                elif not status["server_running"]:
+                    self.provider_status.setText(
+                        "⚠️ Ollama not running. Download from https://ollama.com/download\n"
+                        "Then run: ollama pull llama3.2"
+                    )
+                    self.provider_status.setStyleSheet("color: orange; font-size: 11px;")
+                else:
+                    self.provider_status.setText("✓ Ollama is running (FREE!)")
+                    self.provider_status.setStyleSheet("color: green; font-size: 11px;")
+                    # Load available models
+                    self._refresh_ollama_models()
             else:
-                self.provider_status.setText("✓ SDK installed")
-                self.provider_status.setStyleSheet("color: green; font-size: 11px;")
+                if not status["sdk_installed"]:
+                    sdk_names = {
+                        "claude": "anthropic",
+                        "openai": "openai",
+                        "gemini": "google-generativeai"
+                    }
+                    self.provider_status.setText(
+                        f"⚠️ SDK not installed. Run: pip install {sdk_names[provider]}"
+                    )
+                    self.provider_status.setStyleSheet("color: orange; font-size: 11px;")
+                else:
+                    self.provider_status.setText("✓ SDK installed")
+                    self.provider_status.setStyleSheet("color: green; font-size: 11px;")
+
+                # Load saved API key for this provider
+                settings = QSettings("PhysioMetrics", "BreathAnalysis")
+                key = settings.value(f"ai/{provider}_api_key", "")
+                self.api_key_input.setText(key if key else "")
+
         except ImportError:
             self.provider_status.setText("AI client module not found")
             self.provider_status.setStyleSheet("color: red; font-size: 11px;")
 
-        # Load saved API key for this provider
-        settings = QSettings("PhysioMetrics", "BreathAnalysis")
-        key = settings.value(f"ai/{provider}_api_key", "")
-        self.api_key_input.setText(key if key else "")
+    def _refresh_ollama_models(self):
+        """Refresh the list of available Ollama models."""
+        try:
+            from core.ai_client import get_ollama_models
+            models = get_ollama_models()
+
+            self.model_combo.clear()
+            if models:
+                self.model_combo.addItems(models)
+            else:
+                # Add default suggestions if no models found
+                self.model_combo.addItems(["llama3.2", "llama3.2:1b", "mistral", "codellama"])
+                self.provider_status.setText(
+                    "⚠️ No models found. Run: ollama pull llama3.2"
+                )
+                self.provider_status.setStyleSheet("color: orange; font-size: 11px;")
+        except Exception as e:
+            self.model_combo.clear()
+            self.model_combo.addItems(["llama3.2", "llama3.2:1b", "mistral"])
+            print(f"[ai-settings] Error fetching Ollama models: {e}")
 
     def _toggle_key_visibility(self, show: bool):
         """Toggle API key visibility."""
@@ -304,30 +381,62 @@ class AISettingsDialog(QDialog):
 
     def _get_current_provider(self) -> str:
         """Get currently selected provider name."""
-        providers = ["claude", "openai", "gemini"]
+        providers = ["ollama", "claude", "openai", "gemini"]
         return providers[self.provider_combo.currentIndex()]
+
+    def _get_current_model(self) -> Optional[str]:
+        """Get currently selected model (for Ollama)."""
+        if self._get_current_provider() == "ollama":
+            return self.model_combo.currentText().strip() or None
+        return None
 
     def _init_client(self) -> bool:
         """Initialize AI client with current settings. Returns True if successful."""
         provider = self._get_current_provider()
-        api_key = self.api_key_input.text().strip()
 
-        if not api_key:
-            QMessageBox.warning(self, "Missing API Key", "Please enter an API key.")
-            return False
+        if provider == "ollama":
+            # Ollama doesn't need API key
+            model = self._get_current_model()
+            try:
+                from core.ai_client import AIClient, check_ollama_running
+                if not check_ollama_running():
+                    QMessageBox.warning(self, "Ollama Not Running",
+                        "Ollama server is not running.\n\n"
+                        "1. Download Ollama (FREE): https://ollama.com/download\n"
+                        "2. Install and run it\n"
+                        "3. Run: ollama pull llama3.2\n"
+                        "4. Try again")
+                    return False
+                self.ai_client = AIClient(provider="ollama", model=model)
+                return True
+            except ImportError as e:
+                QMessageBox.critical(self, "Import Error",
+                                   f"Could not import AI client:\n{e}\n\n"
+                                   "Run: pip install openai")
+                return False
+            except Exception as e:
+                QMessageBox.critical(self, "Connection Error", f"Failed to connect to Ollama:\n{e}")
+                return False
+        else:
+            # Cloud providers need API key
+            api_key = self.api_key_input.text().strip()
 
-        try:
-            from core.ai_client import AIClient
-            self.ai_client = AIClient(provider=provider, api_key=api_key)
-            return True
-        except ImportError as e:
-            QMessageBox.critical(self, "Import Error",
-                               f"Could not import AI client:\n{e}\n\n"
-                               f"Make sure the required SDK is installed.")
-            return False
-        except Exception as e:
-            QMessageBox.critical(self, "Connection Error", f"Failed to initialize AI client:\n{e}")
-            return False
+            if not api_key:
+                QMessageBox.warning(self, "Missing API Key", "Please enter an API key.")
+                return False
+
+            try:
+                from core.ai_client import AIClient
+                self.ai_client = AIClient(provider=provider, api_key=api_key)
+                return True
+            except ImportError as e:
+                QMessageBox.critical(self, "Import Error",
+                                   f"Could not import AI client:\n{e}\n\n"
+                                   f"Make sure the required SDK is installed.")
+                return False
+            except Exception as e:
+                QMessageBox.critical(self, "Connection Error", f"Failed to initialize AI client:\n{e}")
+                return False
 
     def _test_connection(self):
         """Test the AI connection with a simple prompt."""
@@ -478,14 +587,20 @@ class AISettingsDialog(QDialog):
         settings = QSettings("PhysioMetrics", "BreathAnalysis")
 
         provider = self._get_current_provider()
-        api_key = self.api_key_input.text().strip()
 
         # Save provider preference
         settings.setValue("ai/provider", provider)
 
-        # Save API key for this provider
-        if api_key:
-            settings.setValue(f"ai/{provider}_api_key", api_key)
+        if provider == "ollama":
+            # Save selected model for Ollama
+            model = self.model_combo.currentText().strip()
+            if model:
+                settings.setValue("ai/ollama_model", model)
+        else:
+            # Save API key for cloud providers
+            api_key = self.api_key_input.text().strip()
+            if api_key:
+                settings.setValue(f"ai/{provider}_api_key", api_key)
 
         self.connection_status.setText("Settings saved")
         self.connection_status.setStyleSheet("color: green;")
@@ -494,12 +609,21 @@ class AISettingsDialog(QDialog):
         """Load settings from QSettings."""
         settings = QSettings("PhysioMetrics", "BreathAnalysis")
 
-        # Load provider preference
-        provider = settings.value("ai/provider", "claude")
-        provider_index = {"claude": 0, "openai": 1, "gemini": 2}.get(provider, 0)
+        # Load provider preference (default to ollama since it's free)
+        provider = settings.value("ai/provider", "ollama")
+        provider_index = {"ollama": 0, "claude": 1, "openai": 2, "gemini": 3}.get(provider, 0)
         self.provider_combo.setCurrentIndex(provider_index)
 
-        # Trigger provider change to load API key
+        # Load saved Ollama model
+        if provider == "ollama":
+            saved_model = settings.value("ai/ollama_model", "llama3.2")
+            idx = self.model_combo.findText(saved_model)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                self.model_combo.setCurrentText(saved_model)
+
+        # Trigger provider change to load API key / check status
         self._on_provider_changed(provider_index)
 
 

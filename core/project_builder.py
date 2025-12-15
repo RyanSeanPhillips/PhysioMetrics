@@ -14,18 +14,25 @@ from typing import Dict, List, Tuple, Optional
 import pyabf
 
 
-def discover_files(directory: str, recursive: bool = True) -> Dict[str, List[Path]]:
+def discover_files(directory: str, recursive: bool = True,
+                   file_types: List[str] = None) -> Dict[str, List[Path]]:
     """
-    Discover all ABF and Excel files in a directory.
+    Discover data files and notes files in a directory.
 
     Args:
         directory: Path to directory to search
         recursive: If True, search subdirectories recursively
+        file_types: Optional list of file types to scan for.
+                    Options: 'abf', 'smrx', 'edf', 'notes'
+                    If None, scans for all types.
 
     Returns:
         Dictionary with keys:
             'abf_files': List of Path objects for .abf files
-            'excel_files': List of Path objects for .xlsx and .xls files
+            'smrx_files': List of Path objects for .smrx files
+            'edf_files': List of Path objects for .edf files
+            'notes_files': List of Path objects for notes (.xlsx, .xls, .docx, .doc, .txt)
+            'excel_files': Legacy alias for notes_files (for backward compatibility)
     """
     directory_path = Path(directory)
 
@@ -35,34 +42,71 @@ def discover_files(directory: str, recursive: bool = True) -> Dict[str, List[Pat
     if not directory_path.is_dir():
         raise ValueError(f"Path is not a directory: {directory}")
 
+    # Default to all types if none specified
+    if file_types is None:
+        file_types = ['abf', 'smrx', 'edf', 'notes']
+
     abf_files = []
-    excel_files = []
+    smrx_files = []
+    edf_files = []
+    notes_files = []
 
-    # Search pattern
-    if recursive:
-        # Recursively search all subdirectories
-        search_pattern = "**/*"
-    else:
-        # Only search immediate directory
-        search_pattern = "*"
+    # Define extensions for each category
+    data_extensions = {
+        'abf': ['.abf'],
+        'smrx': ['.smrx'],
+        'edf': ['.edf'],
+    }
+    notes_extensions = ['.xlsx', '.xls', '.docx', '.doc', '.txt']
 
-    # Find ABF files
-    for file_path in directory_path.glob(search_pattern):
-        if file_path.is_file():
+    # Build list of extensions to search for
+    target_extensions = set()
+    if 'abf' in file_types:
+        target_extensions.update(data_extensions['abf'])
+    if 'smrx' in file_types:
+        target_extensions.update(data_extensions['smrx'])
+    if 'edf' in file_types:
+        target_extensions.update(data_extensions['edf'])
+    if 'notes' in file_types:
+        target_extensions.update(notes_extensions)
+
+    # Use extension-specific glob patterns to avoid stat() calls on non-target files
+    # This is much faster on network drives
+    for ext in target_extensions:
+        if recursive:
+            pattern = f"**/*{ext}"
+        else:
+            pattern = f"*{ext}"
+
+        # glob() with extension pattern is faster than checking is_file() on every file
+        for file_path in directory_path.glob(pattern):
+            # Only check is_file() if there's ambiguity (some systems allow dirs with extensions)
+            # Skip this check for performance on network drives - glob with extension is reliable
             suffix_lower = file_path.suffix.lower()
 
-            if suffix_lower == '.abf':
+            # Data files
+            if suffix_lower in data_extensions.get('abf', []):
                 abf_files.append(file_path)
-            elif suffix_lower in ['.xlsx', '.xls']:
-                excel_files.append(file_path)
+            elif suffix_lower in data_extensions.get('smrx', []):
+                smrx_files.append(file_path)
+            elif suffix_lower in data_extensions.get('edf', []):
+                edf_files.append(file_path)
+            # Notes files
+            elif suffix_lower in notes_extensions:
+                notes_files.append(file_path)
 
     # Sort files by name for consistent ordering
     abf_files.sort()
-    excel_files.sort()
+    smrx_files.sort()
+    edf_files.sort()
+    notes_files.sort()
 
     return {
         'abf_files': abf_files,
-        'excel_files': excel_files
+        'smrx_files': smrx_files,
+        'edf_files': edf_files,
+        'notes_files': notes_files,
+        'excel_files': notes_files,  # Legacy alias for backward compatibility
     }
 
 

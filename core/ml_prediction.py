@@ -40,39 +40,78 @@ def load_model(filepath: Path) -> Tuple[any, Dict]:
     return data.get('model'), data.get('metadata', {})
 
 
-def extract_features_for_prediction(peak_metrics: List[Dict], feature_names: List[str]) -> pd.DataFrame:
+def extract_features_for_prediction(peak_metrics: List[Dict], feature_names: List[str], debug: bool = False) -> pd.DataFrame:
     """
     Extract features from peak metrics for ML prediction.
 
     Args:
         peak_metrics: List of metric dictionaries (one per peak)
         feature_names: List of feature names expected by the model
+        debug: If True, print debug information about feature extraction
 
     Returns:
         DataFrame with features in correct order
     """
     if not peak_metrics:
+        if debug:
+            print(f"[ML Feature Extract] WARNING: Empty peak_metrics list")
+        return pd.DataFrame()
+
+    if not feature_names:
+        if debug:
+            print(f"[ML Feature Extract] WARNING: Empty feature_names list")
         return pd.DataFrame()
 
     # Convert to DataFrame
     df = pd.DataFrame(peak_metrics)
 
+    if debug:
+        print(f"[ML Feature Extract] Got {len(peak_metrics)} peaks, {len(df.columns)} columns in metrics")
+        print(f"[ML Feature Extract] Expected {len(feature_names)} features: {feature_names[:5]}...")
+
+    # Track missing features
+    missing_features = []
+
     # Ensure all required features exist, fill missing with 0
     for feat in feature_names:
         if feat not in df.columns:
             df[feat] = 0.0
+            missing_features.append(feat)
+
+    if missing_features and debug:
+        print(f"[ML Feature Extract] WARNING: {len(missing_features)} missing features filled with 0: {missing_features[:5]}...")
 
     # Return features in the order expected by model
     X = df[feature_names].copy()  # .copy() to avoid SettingWithCopyWarning
 
     # Handle NaN values (critical for MLP which doesn't handle them natively)
     # Replace NaN with column median, or 0 if entire column is NaN
-    if X.isna().any().any():
-        for col in X.columns:
-            if X[col].isna().any():
-                median_val = X[col].median()
-                fill_val = median_val if not pd.isna(median_val) else 0.0
-                X.loc[:, col] = X[col].fillna(fill_val)
+    # Suppress numpy warnings during median computation
+    nan_cols = []
+    all_nan_cols = []
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # Suppress "Mean of empty slice"
+        warnings.simplefilter("ignore", category=FutureWarning)   # Suppress fillna downcasting warning
+
+        if X.isna().any().any():
+            for col in X.columns:
+                if X[col].isna().any():
+                    nan_cols.append(col)
+                    # Count non-NaN values to detect all-NaN columns
+                    non_nan_count = X[col].notna().sum()
+                    if non_nan_count == 0:
+                        all_nan_cols.append(col)
+                        fill_val = 0.0
+                    else:
+                        median_val = X[col].median()
+                        fill_val = median_val if not pd.isna(median_val) else 0.0
+                    X[col] = X[col].fillna(fill_val)
+
+    if debug and nan_cols:
+        print(f"[ML Feature Extract] Filled NaN in {len(nan_cols)} columns: {nan_cols[:5]}...")
+        if all_nan_cols:
+            print(f"[ML Feature Extract] WARNING: {len(all_nan_cols)} columns were ALL NaN (filled with 0): {all_nan_cols}")
 
     return X
 
@@ -80,7 +119,8 @@ def extract_features_for_prediction(peak_metrics: List[Dict], feature_names: Lis
 def predict_with_cascade(
     peak_metrics: List[Dict],
     models: Dict[str, Dict],
-    algorithm: str = 'xgboost'
+    algorithm: str = 'xgboost',
+    debug: bool = False
 ) -> Dict[str, np.ndarray]:
     """
     Run 3-model cascade prediction on peaks.
@@ -89,6 +129,7 @@ def predict_with_cascade(
         peak_metrics: List of metric dictionaries (one per peak)
         models: Dict of loaded models {'model1_xgboost': {'model': ..., 'metadata': ...}, ...}
         algorithm: Which algorithm to use ('xgboost', 'rf', or 'mlp')
+        debug: If True, print debug information about predictions
 
     Returns:
         Dictionary with prediction results:
@@ -98,6 +139,10 @@ def predict_with_cascade(
             'final_labels': Integer array (1 = breath, 0 = noise) for display
     """
     n_peaks = len(peak_metrics)
+
+    if debug:
+        print(f"[ML Cascade] predict_with_cascade called: {n_peaks} peaks, algorithm={algorithm}")
+        print(f"[ML Cascade] Available models: {list(models.keys())}")
 
     # Initialize all as noise
     breath_mask = np.zeros(n_peaks, dtype=bool)
@@ -125,18 +170,32 @@ def predict_with_cascade(
     model1_key_prefix = f'model1_{algorithm}'
     model1_keys = [k for k in models.keys() if k.startswith(model1_key_prefix)]
 
+    if debug:
+        print(f"[ML Cascade] Looking for Model 1 with prefix '{model1_key_prefix}'")
+        print(f"[ML Cascade] Found model1_keys: {model1_keys}")
+
     if model1_keys:
         model1_key = model1_keys[0]  # Use first match
         model1 = models[model1_key]['model']
         model1_metadata = models[model1_key]['metadata']
 
+        if debug:
+            feature_names = model1_metadata.get('feature_names', [])
+            print(f"[ML Cascade] Model 1 expects {len(feature_names)} features")
+
         # Extract features
-        X1 = extract_features_for_prediction(peak_metrics, model1_metadata.get('feature_names', []))
+        X1 = extract_features_for_prediction(peak_metrics, model1_metadata.get('feature_names', []), debug=debug)
 
         # Predict
         if len(X1) > 0:
             breath_predictions = model1.predict(X1)
             breath_mask = (breath_predictions == 1)
+            if debug:
+                print(f"[ML Cascade] Model 1 predicted: {np.sum(breath_mask)} breaths, {np.sum(~breath_mask)} noise")
+        elif debug:
+            print(f"[ML Cascade] WARNING: Model 1 got empty feature matrix (len(X1)=0)")
+    elif debug:
+        print(f"[ML Cascade] WARNING: No Model 1 found for algorithm '{algorithm}'")
 
     # Get indices of peaks classified as breaths
     breath_indices = np.where(breath_mask)[0]
