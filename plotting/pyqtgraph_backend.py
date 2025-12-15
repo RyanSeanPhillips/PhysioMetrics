@@ -355,8 +355,15 @@ class PyQtGraphPlotHost(QWidget):
             self.clear_peaks()
             return
 
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
         if self._peak_scatter is not None:
-            self.plot_widget.removeItem(self._peak_scatter)
+            try:
+                main_plot.removeItem(self._peak_scatter)
+            except:
+                pass
 
         self._peak_scatter = pg.ScatterPlotItem(
             x=np.asarray(t_peaks),
@@ -366,13 +373,15 @@ class PyQtGraphPlotHost(QWidget):
             pen=None
         )
         self._peak_scatter.setZValue(10)
-        self.plot_widget.addItem(self._peak_scatter)
+        main_plot.addItem(self._peak_scatter)
 
     def clear_peaks(self):
         """Remove peak markers."""
         if self._peak_scatter is not None:
+            main_plot = self._get_main_plot()
             try:
-                self.plot_widget.removeItem(self._peak_scatter)
+                if main_plot:
+                    main_plot.removeItem(self._peak_scatter)
             except:
                 pass
             self._peak_scatter = None
@@ -383,13 +392,17 @@ class PyQtGraphPlotHost(QWidget):
                               t_exoff=None, y_exoff=None,
                               size=30):
         """Update breath event markers."""
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
         marker_size = size // 3  # Adjust for pyqtgraph
 
         def _update_scatter(attr_name, t, y, color, symbol):
             scatter = getattr(self, attr_name, None)
             if scatter is not None:
                 try:
-                    self.plot_widget.removeItem(scatter)
+                    main_plot.removeItem(scatter)
                 except:
                     pass
 
@@ -403,7 +416,7 @@ class PyQtGraphPlotHost(QWidget):
                     pen=None
                 )
                 new_scatter.setZValue(8)
-                self.plot_widget.addItem(new_scatter)
+                main_plot.addItem(new_scatter)
                 setattr(self, attr_name, new_scatter)
             else:
                 setattr(self, attr_name, None)
@@ -415,20 +428,26 @@ class PyQtGraphPlotHost(QWidget):
 
     def clear_breath_markers(self):
         """Remove all breath markers."""
+        main_plot = self._get_main_plot()
         for attr in ('_onset_scatter', '_offset_scatter', '_expmin_scatter', '_expoff_scatter'):
             scatter = getattr(self, attr, None)
             if scatter is not None:
                 try:
-                    self.plot_widget.removeItem(scatter)
+                    if main_plot:
+                        main_plot.removeItem(scatter)
                 except:
                     pass
                 setattr(self, attr, None)
 
     def update_sighs(self, t, y, size=90, color="#FFD700", edge=None, filled=True):
         """Update sigh markers (stars)."""
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
         if self._sigh_scatter is not None:
             try:
-                self.plot_widget.removeItem(self._sigh_scatter)
+                main_plot.removeItem(self._sigh_scatter)
             except:
                 pass
 
@@ -445,13 +464,15 @@ class PyQtGraphPlotHost(QWidget):
             symbol='star'
         )
         self._sigh_scatter.setZValue(15)
-        self.plot_widget.addItem(self._sigh_scatter)
+        main_plot.addItem(self._sigh_scatter)
 
     def clear_sighs(self):
         """Remove sigh markers."""
         if self._sigh_scatter is not None:
+            main_plot = self._get_main_plot()
             try:
-                self.plot_widget.removeItem(self._sigh_scatter)
+                if main_plot:
+                    main_plot.removeItem(self._sigh_scatter)
             except:
                 pass
             self._sigh_scatter = None
@@ -459,13 +480,16 @@ class PyQtGraphPlotHost(QWidget):
     # ------- Threshold Line -------
     def update_threshold_line(self, threshold_value):
         """Draw horizontal threshold line."""
+        main_plot = self._get_main_plot()
+
         if self._threshold_line is not None:
             try:
-                self.plot_widget.removeItem(self._threshold_line)
+                if main_plot:
+                    main_plot.removeItem(self._threshold_line)
             except:
                 pass
 
-        if threshold_value is None:
+        if threshold_value is None or main_plot is None:
             self._threshold_line = None
             return
 
@@ -476,13 +500,15 @@ class PyQtGraphPlotHost(QWidget):
             movable=True
         )
         self._threshold_line.setZValue(20)
-        self.plot_widget.addItem(self._threshold_line)
+        main_plot.addItem(self._threshold_line)
 
     def clear_threshold_line(self):
         """Remove threshold line."""
         if self._threshold_line is not None:
+            main_plot = self._get_main_plot()
             try:
-                self.plot_widget.removeItem(self._threshold_line)
+                if main_plot:
+                    main_plot.removeItem(self._threshold_line)
             except:
                 pass
             self._threshold_line = None
@@ -617,36 +643,67 @@ class PyQtGraphPlotHost(QWidget):
 
     def clear_region_overlays(self):
         """Remove all region overlays."""
+        main_plot = self._get_main_plot()
         for item in self._region_overlays:
             try:
-                self.plot_widget.removeItem(item)
+                if main_plot:
+                    main_plot.removeItem(item)
             except:
                 pass
         self._region_overlays.clear()
 
     # ------- Click Handling -------
     def set_click_callback(self, fn):
-        """Set callback for plot clicks: fn(xdata, ydata, event)."""
+        """Set callback for plot clicks: fn(xdata, ydata, event).
+        Also disables pan/zoom to allow click-based editing."""
         self._external_click_cb = fn
+        # Disable mouse pan/drag when edit callback is active
+        if fn is not None:
+            self._set_mouse_mode_edit()
+        else:
+            self._set_mouse_mode_normal()
 
     def clear_click_callback(self):
-        """Remove click callback."""
+        """Remove click callback and restore normal mouse behavior."""
         self._external_click_cb = None
+        self._set_mouse_mode_normal()
+
+    def _set_mouse_mode_edit(self):
+        """Disable pan/zoom for click-based editing."""
+        for plot in self._subplots:
+            try:
+                # Disable left-button pan and right-button zoom
+                plot.vb.setMouseEnabled(x=False, y=False)
+            except:
+                pass
+
+    def _set_mouse_mode_normal(self):
+        """Re-enable normal pan/zoom behavior."""
+        for plot in self._subplots:
+            try:
+                plot.vb.setMouseEnabled(x=True, y=True)
+            except:
+                pass
 
     def _on_mouse_clicked(self, event):
         """Handle mouse click events."""
         if self._external_click_cb is None:
             return
 
+        # Get the main plot for coordinate mapping
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
         # Get click position in data coordinates
         pos = event.scenePos()
-        if self.plot_widget.sceneBoundingRect().contains(pos):
-            mouse_point = self.plot_widget.vb.mapSceneToView(pos)
+        if main_plot.sceneBoundingRect().contains(pos):
+            mouse_point = main_plot.vb.mapSceneToView(pos)
             x_data = mouse_point.x()
             y_data = mouse_point.y()
 
             # Create matplotlib-compatible event wrapper
-            wrapped_event = _MatplotlibCompatEvent(event, self.plot_widget, x_data, y_data)
+            wrapped_event = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
             self._external_click_cb(x_data, y_data, wrapped_event)
 
     # ------- Toolbar Compatibility -------

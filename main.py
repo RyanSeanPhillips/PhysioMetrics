@@ -5464,6 +5464,10 @@ class MainWindow(QMainWindow):
         theme = "dark" if dark_mode else "light"
         self.plot_host.set_plot_theme(theme)
 
+        # Clear saved view to prevent zoom issues when switching backends
+        self.plot_host.clear_saved_view("single")
+        self.plot_host.clear_saved_view("grid")
+
         # Redraw if we have data
         if self.state.t is not None:
             self.redraw_main_plot()
