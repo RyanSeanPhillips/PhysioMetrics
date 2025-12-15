@@ -125,14 +125,26 @@ class PyQtGraphPlotHost(QWidget):
         self._last_single = {"xlim": None, "ylim": None}
         self._last_grid = {"xlim": None, "ylims": []}
 
+        # Auto-range control - disable after first draw to prevent jumpiness
+        self._autorange_enabled = True
+
         # Click callback
         self._external_click_cb = None
 
         # Theme state
         self._current_theme = 'dark'
 
+        # Edit mode state (disables context menu when active)
+        self._edit_mode_active = False
+
+        # Flag to force auto-range on next draw (set by clear_saved_view)
+        self._force_autorange = False
+
         # Connect mouse click
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+
+        # Disable default context menu (we handle right-click for editing)
+        self.plot_widget.setMenuEnabled(False)
 
         # Layout
         layout = QVBoxLayout(self)
@@ -177,16 +189,30 @@ class PyQtGraphPlotHost(QWidget):
         self._preserve_y = bool(y)
 
     def clear_saved_view(self, mode: str = None):
-        """Clear saved view state."""
+        """Clear saved view state and force auto-range on next draw."""
         if mode is None or mode == "single":
             self._last_single = {"xlim": None, "ylim": None}
         if mode is None or mode == "grid":
             self._last_grid = {"xlim": None, "ylims": []}
+        # Force auto-range on next draw to show full data
+        self._force_autorange = True
 
     def set_xlim(self, x0: float, x1: float):
         """Set x-axis limits."""
         self.plot_widget.setXRange(x0, x1, padding=0)
         self._last_single["xlim"] = (x0, x1)
+
+    def disable_autorange(self):
+        """Disable auto-range to prevent jumpiness during edits."""
+        self._autorange_enabled = False
+        for plot in self._subplots:
+            plot.disableAutoRange()
+
+    def enable_autorange(self):
+        """Re-enable auto-range."""
+        self._autorange_enabled = True
+        for plot in self._subplots:
+            plot.enableAutoRange()
 
     # ------- Main Plotting API -------
     def show_trace_with_spans(self, t, y, spans_s, title: str = "",
@@ -450,37 +476,85 @@ class PyQtGraphPlotHost(QWidget):
                 pass
             self._threshold_line = None
 
-    # ------- Y2 Axis -------
+    # ------- Y2 Axis (Secondary Y-axis) -------
     def add_or_update_y2(self, t, y2, label: str = "Y2",
                          max_points: int = None, color: str = "#39FF14"):
-        """Add or update secondary Y axis."""
+        """Add or update secondary Y axis with proper ViewBox."""
         t_ds, y_ds = self._downsample(t, y2, max_points)
 
-        if self._y2_line is not None:
-            try:
-                self.plot_widget.removeItem(self._y2_line)
-            except:
-                pass
+        # Get the main plot (use ax_main if set, otherwise first subplot)
+        main_plot = self.ax_main if self.ax_main else self.plot_widget
+        if main_plot is None:
+            return
+
+        # Remove existing Y2 elements
+        self.clear_y2()
+
+        # Create ViewBox for secondary Y axis if needed
+        if self.ax_y2 is None:
+            self.ax_y2 = pg.ViewBox()
+            main_plot.layout.addItem(self.ax_y2, row=2, col=3)  # Add to right side
+            main_plot.showAxis('right')
+            main_plot.scene().addItem(self.ax_y2)
+            main_plot.getAxis('right').linkToView(self.ax_y2)
+            self.ax_y2.setXLink(main_plot)
+
+            # Style the right axis based on current theme
+            axis_color = '#d4d4d4' if self._current_theme == 'dark' else '#000000'
+            main_plot.getAxis('right').setTextPen(axis_color)
+            main_plot.getAxis('right').setPen(axis_color)
 
         # Convert hex color to RGB
         qcolor = QColor(color)
         pen = pg.mkPen(qcolor.red(), qcolor.green(), qcolor.blue(), width=1.5)
 
-        self._y2_line = self.plot_widget.plot(
-            t_ds, y_ds,
-            pen=pen,
-            name=label
-        )
-        self._y2_line.setZValue(5)
+        # Create the Y2 line in the secondary ViewBox
+        self._y2_line = pg.PlotDataItem(t_ds, y_ds, pen=pen, name=label)
+        self.ax_y2.addItem(self._y2_line)
+
+        # Set the right axis label
+        main_plot.getAxis('right').setLabel(label, color=color)
+
+        # Update the ViewBox geometry to match the main plot
+        self._update_y2_geometry()
+
+        # Connect resize signal to update Y2 geometry
+        main_plot.vb.sigResized.connect(self._update_y2_geometry)
+
+        # Auto-range the Y2 axis
+        self.ax_y2.setRange(yRange=(np.nanmin(y_ds), np.nanmax(y_ds)))
+
+    def _update_y2_geometry(self):
+        """Keep Y2 ViewBox geometry synced with main plot."""
+        if self.ax_y2 is None:
+            return
+        main_plot = self.ax_main if self.ax_main else self.plot_widget
+        if main_plot:
+            self.ax_y2.setGeometry(main_plot.vb.sceneBoundingRect())
 
     def clear_y2(self):
-        """Remove Y2 axis."""
+        """Remove Y2 axis and related items."""
         if self._y2_line is not None:
             try:
-                self.plot_widget.removeItem(self._y2_line)
+                if self.ax_y2:
+                    self.ax_y2.removeItem(self._y2_line)
             except:
                 pass
             self._y2_line = None
+
+        if self.ax_y2 is not None:
+            try:
+                main_plot = self.ax_main if self.ax_main else self.plot_widget
+                if main_plot:
+                    main_plot.scene().removeItem(self.ax_y2)
+                    try:
+                        main_plot.vb.sigResized.disconnect(self._update_y2_geometry)
+                    except:
+                        pass
+                    main_plot.hideAxis('right')
+            except:
+                pass
+            self.ax_y2 = None
 
     # ------- Region Overlays -------
     def update_region_overlays(self, t, eupnea_mask, apnea_mask,
@@ -601,6 +675,17 @@ class PyQtGraphPlotHost(QWidget):
     def turn_off_toolbar_modes(self):
         """Compatibility method - not used in pyqtgraph."""
         pass
+
+    # ------- Edit Mode Control -------
+    def set_edit_mode(self, active: bool):
+        """Enable/disable edit mode. When active, right-click is used for editing, not context menu."""
+        self._edit_mode_active = active
+        # Context menu is always disabled (set in __init__), but this flag
+        # can be used for other edit-mode-specific behaviors if needed
+
+    def is_edit_mode_active(self) -> bool:
+        """Check if edit mode is currently active."""
+        return self._edit_mode_active
 
     # ------- Helper Methods -------
     def _downsample(self, t, y, max_points):

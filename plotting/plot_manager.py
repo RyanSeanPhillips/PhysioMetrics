@@ -469,13 +469,20 @@ class PlotManager:
         # Get theme colors
         is_dark = self.plot_host._current_theme == 'dark'
         trace_color = '#d4d4d4' if is_dark else '#000000'
+        opto_trace_color = '#4682E0' if is_dark else '#2563EB'  # Blue for opto stim channel
         text_color = '#d4d4d4' if is_dark else '#000000'
         bg_color = '#1e1e1e' if is_dark else '#ffffff'
 
+        # Check if we should force auto-range (e.g., after snap to sweep)
+        force_autorange = getattr(self.plot_host, '_force_autorange', False)
+        if force_autorange:
+            self.plot_host._force_autorange = False  # Reset flag
+
         # Save current view range to prevent jumpiness on sweep change
+        # Skip if force_autorange is set (user wants full view)
         prev_x_range = None
         prev_y_range = None
-        if hasattr(self.plot_host, '_subplots') and self.plot_host._subplots:
+        if not force_autorange and hasattr(self.plot_host, '_subplots') and self.plot_host._subplots:
             try:
                 first_plot = self.plot_host._subplots[0]
                 if self.plot_host._preserve_x:
@@ -545,11 +552,14 @@ class PlotManager:
             if config.is_primary_pleth:
                 primary_y_data = y_data
 
+            # Choose trace color based on channel type
+            channel_trace_color = opto_trace_color if config.channel_type == "Opto Stim" else trace_color
+
             # Plot trace with smart downsampling
             # clipToView=True only sends visible data to GPU
             # autoDownsample uses a peak-preserving algorithm that looks better when zoomed out
             # downsampleMethod='peak' preserves peaks/valleys for cleaner rendering
-            plot.plot(t_plot, y_data, pen=pg.mkPen(trace_color, width=1),
+            plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1),
                       clipToView=True, autoDownsample=True, downsampleMethod='peak')
 
             # Add zero line
@@ -601,6 +611,9 @@ class PlotManager:
                 # Draw region overlays (eupnea, apnea, etc.)
                 self._draw_region_overlays_pyqtgraph(ax_main, s, t_plot, t0)
 
+                # Draw Y2 metric if configured
+                self._draw_y2_metric_pyqtgraph(s, t_plot)
+
         # Restore previous view range to prevent jumpiness on sweep change
         if plots and (prev_x_range is not None or prev_y_range is not None):
             try:
@@ -611,6 +624,11 @@ class PlotManager:
                     first_plot.setYRange(prev_y_range[0], prev_y_range[1], padding=0)
             except:
                 pass
+
+        # Disable auto-range after first successful draw to prevent jumpiness during edits
+        # (unless force_autorange was set, in which case let it auto-range once then disable)
+        if plots and not force_autorange and hasattr(self.plot_host, 'disable_autorange'):
+            self.plot_host.disable_autorange()
 
     def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw peak markers on PyQtGraph plot."""
@@ -726,6 +744,35 @@ class PlotManager:
         if outliers_shade and outlier_regions:
             for start_t, end_t in outlier_regions:
                 add_region(start_t, end_t, (255, 165, 0, 80))  # Orange
+
+    def _draw_y2_metric_pyqtgraph(self, sweep_idx, t_plot):
+        """Draw Y2 metric on PyQtGraph plot."""
+        st = self.state
+        key = getattr(st, "y2_metric_key", None)
+
+        if key:
+            # Get metric data for current sweep
+            arr = st.y2_values_by_sweep.get(sweep_idx, None)
+            if arr is not None and len(arr) == len(t_plot):
+                # Determine label and color based on metric type
+                if key == "if":
+                    label = "IF (Hz)"
+                    color = "#39FF14"  # Bright green
+                elif key == "sniff_conf":
+                    label = "Sniffing Confidence"
+                    color = "#9b59b6"  # Purple
+                elif key == "eupnea_conf":
+                    label = "Eupnea Confidence"
+                    color = "#2ecc71"  # Green
+                else:
+                    label = key
+                    color = "#39FF14"  # Default bright green
+
+                self.plot_host.add_or_update_y2(t_plot, arr, label=label, color=color, max_points=None)
+            else:
+                self.plot_host.clear_y2()
+        else:
+            self.plot_host.clear_y2()
 
     def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
         """Build ChannelPanelConfig list from channel manager.
@@ -1361,8 +1408,14 @@ class PlotManager:
             self.plot_host.clear_breath_markers()
 
     def _draw_y2_metric(self, sweep_idx, t, t_plot):
-        """Draw Y2 axis metric if selected and available."""
+        """Draw Y2 axis metric if selected and available (matplotlib version)."""
         st = self.state
+        is_pyqtgraph = getattr(st, 'plotting_backend', 'matplotlib') == 'pyqtgraph'
+
+        # Skip if using PyQtGraph (handled separately by _draw_y2_metric_pyqtgraph)
+        if is_pyqtgraph:
+            return
+
         key = getattr(st, "y2_metric_key", None)
 
         if key:
