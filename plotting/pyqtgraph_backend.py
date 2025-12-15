@@ -488,14 +488,26 @@ class PyQtGraphPlotHost(QWidget):
             self._threshold_line = None
 
     # ------- Y2 Axis (Secondary Y-axis) -------
+    def _get_main_plot(self):
+        """Get the main plot widget safely, avoiding stale references."""
+        # Priority: ax_main > first subplot > plot_widget
+        if self.ax_main is not None:
+            return self.ax_main
+        if self._subplots and len(self._subplots) > 0:
+            return self._subplots[0]
+        if self.plot_widget is not None:
+            return self.plot_widget
+        return None
+
     def add_or_update_y2(self, t, y2, label: str = "Y2",
                          max_points: int = None, color: str = "#39FF14"):
         """Add or update secondary Y axis - simplified overlay approach."""
         t_ds, y_ds = self._downsample(t, y2, max_points)
 
-        # Get the main plot (use ax_main if set, otherwise first subplot)
-        main_plot = self.ax_main if self.ax_main else self.plot_widget
+        # Get the main plot safely
+        main_plot = self._get_main_plot()
         if main_plot is None:
+            print("[PyQtGraph] Warning: No main plot available for Y2")
             return
 
         # Remove existing Y2 line only (keep it simple)
@@ -519,7 +531,7 @@ class PyQtGraphPlotHost(QWidget):
         """Remove Y2 axis line."""
         if self._y2_line is not None:
             try:
-                main_plot = self.ax_main if self.ax_main else self.plot_widget
+                main_plot = self._get_main_plot()
                 if main_plot:
                     main_plot.removeItem(self._y2_line)
             except:

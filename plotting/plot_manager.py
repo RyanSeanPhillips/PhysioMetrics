@@ -497,6 +497,12 @@ class PlotManager:
         self.plot_host._subplots = []
         self.plot_host.graphics_layout.setBackground(bg_color)
 
+        # Reset stale references to avoid errors
+        self.plot_host.ax_main = None
+        self.plot_host.ax_event = None
+        self.plot_host.plot_widget = None
+        self.plot_host._y2_line = None  # Clear Y2 reference
+
         # Create subplots
         plots = []
         ax_main = None
@@ -511,11 +517,6 @@ class PlotManager:
             # Disable context menu for right-click editing support
             plot.setMenuEnabled(False)
             plot.vb.setMenuEnabled(False)  # Also disable on ViewBox
-
-            # IMPORTANT: Disable auto-range immediately if we have a previous view to preserve
-            # This prevents auto-range from kicking in when we add data
-            if prev_x_range is not None or prev_y_range is not None:
-                plot.disableAutoRange()
 
             # Style axes
             plot.getAxis('bottom').setTextPen(text_color)
@@ -623,7 +624,11 @@ class PlotManager:
                 # Draw Y2 metric if configured
                 self._draw_y2_metric_pyqtgraph(s, t_plot)
 
-        # Restore previous view range to prevent jumpiness on sweep change
+        # View range handling:
+        # - If we have previous view range, restore it and disable auto-range
+        # - If force_autorange, let auto-range work and then disable for future edits
+        # - Otherwise (first draw), let auto-range complete
+        view_was_restored = False
         if plots and (prev_x_range is not None or prev_y_range is not None):
             try:
                 first_plot = plots[0]
@@ -631,13 +636,15 @@ class PlotManager:
                     first_plot.setXRange(prev_x_range[0], prev_x_range[1], padding=0)
                 if prev_y_range is not None:
                     first_plot.setYRange(prev_y_range[0], prev_y_range[1], padding=0)
+                view_was_restored = True
             except:
                 pass
 
-        # Disable auto-range after first successful draw to prevent jumpiness during edits
-        # (unless force_autorange was set, in which case let it auto-range once then disable)
-        if plots and not force_autorange and hasattr(self.plot_host, 'disable_autorange'):
-            self.plot_host.disable_autorange()
+        # Disable auto-range after view is set to prevent jumpiness during edits
+        # Only disable if we successfully restored a view OR if force_autorange completed
+        if plots and (view_was_restored or force_autorange):
+            if hasattr(self.plot_host, 'disable_autorange'):
+                self.plot_host.disable_autorange()
 
     def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw peak markers on PyQtGraph plot."""
