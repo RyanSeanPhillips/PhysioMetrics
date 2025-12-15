@@ -254,22 +254,23 @@ class PlotHost(QWidget):
         trace_color = self.theme_manager.get_color('trace_color')
         text_color = self.theme_manager.get_color('text_color')
 
-        # Apply theme to existing axes if they exist
-        if self.ax_main is not None:
-            self.theme_manager.apply_theme(self.ax_main, self.fig, theme_name)
+        # Apply theme to ALL existing axes (multi-channel mode needs all axes themed)
+        if self.fig.axes:
+            for ax in self.fig.axes:
+                self.theme_manager.apply_theme(ax, self.fig, theme_name)
 
-            # Update existing trace line colors (but not scatter plots for peaks/events)
-            for line in self.ax_main.get_lines():
-                # Only update the main trace lines (not threshold lines or other overlays)
-                # Main traces typically have linewidth around 0.9-1.2
-                if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
-                    # Check if this is a main trace color that should be updated
-                    if self._is_trace_color(line.get_color()):
-                        line.set_color(trace_color)
+                # Update existing trace line colors (but not scatter plots for peaks/events)
+                for line in ax.get_lines():
+                    # Only update the main trace lines (not threshold lines or other overlays)
+                    # Main traces typically have linewidth around 0.9-1.2
+                    if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
+                        # Check if this is a main trace color that should be updated
+                        if self._is_trace_color(line.get_color()):
+                            line.set_color(trace_color)
 
-            # Update title color if it exists
-            if self.ax_main.get_title():
-                self.ax_main.title.set_color(text_color)
+                # Update title color if it exists
+                if ax.get_title():
+                    ax.title.set_color(text_color)
 
             # Update Y2 axis colors if it exists
             if self.ax_y2 is not None:
@@ -287,30 +288,6 @@ class PlotHost(QWidget):
                 sigh_edge = "#FFD700" if is_dark else "black"
                 self._sigh_artist.set_facecolors(sigh_color)
                 self._sigh_artist.set_edgecolors(sigh_edge)
-
-            # Update event subplot if it exists (dual-subplot layout)
-            if hasattr(self, 'ax_event') and self.ax_event is not None:
-                self.theme_manager.apply_theme(self.ax_event, self.fig, theme_name)
-
-                # Update trace colors in event subplot
-                for line in self.ax_event.get_lines():
-                    if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
-                        if self._is_trace_color(line.get_color()):
-                            line.set_color(trace_color)
-
-        elif self.fig.axes:  # Apply to all axes in multi-plot mode
-            for ax in self.fig.axes:
-                self.theme_manager.apply_theme(ax, self.fig, theme_name)
-
-                # Update existing trace line colors in multi-plot
-                for line in ax.get_lines():
-                    if line.get_linewidth() >= 0.8 and line.get_linewidth() <= 1.5:
-                        if self._is_trace_color(line.get_color()):
-                            line.set_color(trace_color)
-
-                # Update title color if it exists
-                if ax.get_title():
-                    ax.title.set_color(text_color)
 
         self.canvas.draw()
 
@@ -813,7 +790,8 @@ class PlotHost(QWidget):
         """Create/update red dots for inspiratory peaks."""
         if not self.fig.axes:
             return
-        ax = self.fig.axes[0]
+        # Use ax_main (primary Pleth axis) if available, otherwise fall back to first axis
+        ax = self.ax_main if self.ax_main is not None else self.fig.axes[0]
         import numpy as np
         if t_peaks is None or y_peaks is None or len(t_peaks) == 0:
             self.clear_peaks()
@@ -838,7 +816,8 @@ class PlotHost(QWidget):
         """Draw/update a red dashed horizontal line at the height threshold."""
         if not self.fig.axes:
             return
-        ax = self.fig.axes[0]
+        # Use ax_main (primary Pleth axis) if available, otherwise fall back to first axis
+        ax = self.ax_main if self.ax_main is not None else self.fig.axes[0]
 
         if threshold_value is None:
             # Remove threshold line if no value
@@ -1373,7 +1352,8 @@ class PlotHost(QWidget):
         """
         if not self.fig.axes:
             return
-        ax = self.fig.axes[0]
+        # Use ax_main (primary Pleth axis) if available, otherwise fall back to first axis
+        ax = self.ax_main if self.ax_main is not None else self.fig.axes[0]
 
         def _upd(scatter_attr, tx, ty, color, marker):
             import numpy as np
@@ -1438,7 +1418,8 @@ class PlotHost(QWidget):
         """Create/update a right-axis (Y2) line over the main trace."""
         if not self.fig.axes:
             return
-        ax = self.fig.axes[0]
+        # Use ax_main (primary Pleth axis) if available, otherwise fall back to first axis
+        ax = self.ax_main if self.ax_main is not None else self.fig.axes[0]
 
         # ensure twin axis exists (robust to missing attrs)
         ax_y2 = getattr(self, "ax_y2", None)
@@ -1677,7 +1658,8 @@ class PlotHost(QWidget):
         """
         if not hasattr(self, "fig") or not self.fig.axes:
             return
-        ax = self.fig.axes[0]
+        # Use ax_main (primary Pleth axis) if available, otherwise fall back to first axis
+        ax = self.ax_main if self.ax_main is not None else self.fig.axes[0]
 
         # remove previous
         try:
