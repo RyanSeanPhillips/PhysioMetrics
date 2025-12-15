@@ -508,6 +508,15 @@ class PlotManager:
             plot = self.plot_host.graphics_layout.addPlot(row=i, col=0)
             plot.showGrid(x=False, y=False)
 
+            # Disable context menu for right-click editing support
+            plot.setMenuEnabled(False)
+            plot.vb.setMenuEnabled(False)  # Also disable on ViewBox
+
+            # IMPORTANT: Disable auto-range immediately if we have a previous view to preserve
+            # This prevents auto-range from kicking in when we add data
+            if prev_x_range is not None or prev_y_range is not None:
+                plot.disableAutoRange()
+
             # Style axes
             plot.getAxis('bottom').setTextPen(text_color)
             plot.getAxis('left').setTextPen(text_color)

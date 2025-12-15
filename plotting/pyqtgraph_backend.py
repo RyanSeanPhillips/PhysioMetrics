@@ -43,6 +43,15 @@ class _MatplotlibCompatEvent:
     This allows editing modes designed for matplotlib to work with PyQtGraph.
     """
 
+    # PyQt6 Qt.MouseButton values to matplotlib button mapping
+    # Qt: LeftButton=1, RightButton=2, MiddleButton=4
+    # Matplotlib: left=1, middle=2, right=3
+    _BUTTON_MAP = {
+        1: 1,   # Left -> 1
+        2: 3,   # Right -> 3 (matplotlib uses 3 for right-click)
+        4: 2,   # Middle -> 2
+    }
+
     def __init__(self, pyqt_event, plot_widget, xdata, ydata):
         self._pyqt_event = pyqt_event
         self.inaxes = plot_widget  # The plot widget acts as the "axes"
@@ -52,9 +61,11 @@ class _MatplotlibCompatEvent:
         qt_button = pyqt_event.button()
         if hasattr(qt_button, 'value'):
             # PyQt6 enum
-            self.button = qt_button.value
+            qt_val = qt_button.value
         else:
-            self.button = int(qt_button) if qt_button else 1
+            qt_val = int(qt_button) if qt_button else 1
+        # Map Qt button to matplotlib convention
+        self.button = self._BUTTON_MAP.get(qt_val, 1)
 
     def __getattr__(self, name):
         """Forward unknown attributes to the underlying PyQtGraph event."""
@@ -479,7 +490,7 @@ class PyQtGraphPlotHost(QWidget):
     # ------- Y2 Axis (Secondary Y-axis) -------
     def add_or_update_y2(self, t, y2, label: str = "Y2",
                          max_points: int = None, color: str = "#39FF14"):
-        """Add or update secondary Y axis with proper ViewBox."""
+        """Add or update secondary Y axis - simplified overlay approach."""
         t_ds, y_ds = self._downsample(t, y2, max_points)
 
         # Get the main plot (use ax_main if set, otherwise first subplot)
@@ -487,74 +498,33 @@ class PyQtGraphPlotHost(QWidget):
         if main_plot is None:
             return
 
-        # Remove existing Y2 elements
-        self.clear_y2()
-
-        # Create ViewBox for secondary Y axis if needed
-        if self.ax_y2 is None:
-            self.ax_y2 = pg.ViewBox()
-            main_plot.layout.addItem(self.ax_y2, row=2, col=3)  # Add to right side
-            main_plot.showAxis('right')
-            main_plot.scene().addItem(self.ax_y2)
-            main_plot.getAxis('right').linkToView(self.ax_y2)
-            self.ax_y2.setXLink(main_plot)
-
-            # Style the right axis based on current theme
-            axis_color = '#d4d4d4' if self._current_theme == 'dark' else '#000000'
-            main_plot.getAxis('right').setTextPen(axis_color)
-            main_plot.getAxis('right').setPen(axis_color)
+        # Remove existing Y2 line only (keep it simple)
+        if self._y2_line is not None:
+            try:
+                main_plot.removeItem(self._y2_line)
+            except:
+                pass
+            self._y2_line = None
 
         # Convert hex color to RGB
         qcolor = QColor(color)
         pen = pg.mkPen(qcolor.red(), qcolor.green(), qcolor.blue(), width=1.5)
 
-        # Create the Y2 line in the secondary ViewBox
-        self._y2_line = pg.PlotDataItem(t_ds, y_ds, pen=pen, name=label)
-        self.ax_y2.addItem(self._y2_line)
-
-        # Set the right axis label
-        main_plot.getAxis('right').setLabel(label, color=color)
-
-        # Update the ViewBox geometry to match the main plot
-        self._update_y2_geometry()
-
-        # Connect resize signal to update Y2 geometry
-        main_plot.vb.sigResized.connect(self._update_y2_geometry)
-
-        # Auto-range the Y2 axis
-        self.ax_y2.setRange(yRange=(np.nanmin(y_ds), np.nanmax(y_ds)))
-
-    def _update_y2_geometry(self):
-        """Keep Y2 ViewBox geometry synced with main plot."""
-        if self.ax_y2 is None:
-            return
-        main_plot = self.ax_main if self.ax_main else self.plot_widget
-        if main_plot:
-            self.ax_y2.setGeometry(main_plot.vb.sceneBoundingRect())
+        # Plot Y2 as an overlay line on the main plot
+        # Note: This shares the Y-axis scale, but is simpler and more reliable
+        self._y2_line = main_plot.plot(t_ds, y_ds, pen=pen, name=label)
+        self._y2_line.setZValue(5)
 
     def clear_y2(self):
-        """Remove Y2 axis and related items."""
+        """Remove Y2 axis line."""
         if self._y2_line is not None:
-            try:
-                if self.ax_y2:
-                    self.ax_y2.removeItem(self._y2_line)
-            except:
-                pass
-            self._y2_line = None
-
-        if self.ax_y2 is not None:
             try:
                 main_plot = self.ax_main if self.ax_main else self.plot_widget
                 if main_plot:
-                    main_plot.scene().removeItem(self.ax_y2)
-                    try:
-                        main_plot.vb.sigResized.disconnect(self._update_y2_geometry)
-                    except:
-                        pass
-                    main_plot.hideAxis('right')
+                    main_plot.removeItem(self._y2_line)
             except:
                 pass
-            self.ax_y2 = None
+            self._y2_line = None
 
     # ------- Region Overlays -------
     def update_region_overlays(self, t, eupnea_mask, apnea_mask,
