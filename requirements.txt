@@ -10,6 +10,7 @@ numba>=0.57.0  # Optional: 10-50× speedup for breath detection (highly recommen
 
 # Plotting
 matplotlib>=3.6.0
+pyqtgraph>=0.13.0  # High-performance plotting backend (GPU-accelerated, 10-50× faster for large datasets)
 
 # File format loaders
 # neo>=0.12.0  # Uncomment if using neo for ABF files

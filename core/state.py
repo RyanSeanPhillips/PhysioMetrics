@@ -47,6 +47,9 @@ class AppState:
     apnea_use_shade: bool = False           # Apnea display: True = background shade, False = line at bottom
     outliers_use_shade: bool = False        # Outliers display: True = background shade, False = line
 
+    # Plotting backend: 'matplotlib' (default, feature-complete) or 'pyqtgraph' (faster, experimental)
+    plotting_backend: str = 'matplotlib'
+
     # Peaks & edits
     peaks_by_sweep: Dict[int, np.ndarray] = field(default_factory=dict)
     breath_by_sweep: Dict[int, Dict] = field(default_factory=dict)  # sweep -> {'onsets', 'offsets', 'expmins', 'expoffs'}
