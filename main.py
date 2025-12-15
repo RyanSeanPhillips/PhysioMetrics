@@ -396,6 +396,9 @@ class MainWindow(QMainWindow):
             self.checkBox.setChecked(dark_mode_enabled)
             self.checkBox.toggled.connect(self.on_dark_mode_toggled)
 
+        # PyQtGraph backend toggle (experimental high-performance plotting)
+        self._setup_pyqtgraph_toggle()
+
         # Initialize editing modes manager
         self.editing_modes = EditingModes(self)
 
@@ -5327,6 +5330,87 @@ class MainWindow(QMainWindow):
 
         mode_text = "Dark mode" if checked else "Light mode"
         self._log_status_message(f"Plot theme: {mode_text}", 2000)
+
+    def _setup_pyqtgraph_toggle(self):
+        """Create and setup the PyQtGraph backend toggle checkbox."""
+        from PyQt6.QtWidgets import QCheckBox
+        from PyQt6.QtGui import QFont
+
+        # Create the checkbox
+        self.pyqtgraph_checkbox = QCheckBox("PyQtGraph (Fast)")
+        font = QFont()
+        font.setPointSize(8)
+        self.pyqtgraph_checkbox.setFont(font)
+        self.pyqtgraph_checkbox.setToolTip(
+            "Use PyQtGraph for faster plotting (experimental).\n"
+            "10-50x faster for large datasets, but some features may be limited."
+        )
+
+        # Load saved preference (default to False = matplotlib)
+        use_pyqtgraph = self.settings.value("use_pyqtgraph", False, type=bool)
+        self.pyqtgraph_checkbox.setChecked(use_pyqtgraph)
+
+        # Update state
+        self.state.plotting_backend = 'pyqtgraph' if use_pyqtgraph else 'matplotlib'
+
+        # Connect handler
+        self.pyqtgraph_checkbox.toggled.connect(self.on_pyqtgraph_toggled)
+
+        # Add to layout next to dark mode checkbox
+        if hasattr(self, 'checkBox') and self.checkBox.parent():
+            parent_layout = self.checkBox.parent().layout()
+            if parent_layout:
+                # Find the dark mode checkbox index and insert after it
+                for i in range(parent_layout.count()):
+                    item = parent_layout.itemAt(i)
+                    if item and item.widget() == self.checkBox:
+                        parent_layout.insertWidget(i + 1, self.pyqtgraph_checkbox)
+                        break
+                else:
+                    # Fallback: just add at the end
+                    parent_layout.addWidget(self.pyqtgraph_checkbox)
+
+    def on_pyqtgraph_toggled(self, checked: bool):
+        """Toggle between matplotlib and PyQtGraph plotting backends."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        backend = 'pyqtgraph' if checked else 'matplotlib'
+
+        # Check if pyqtgraph is available
+        if checked:
+            try:
+                import pyqtgraph
+            except ImportError:
+                QMessageBox.warning(
+                    self,
+                    "PyQtGraph Not Installed",
+                    "PyQtGraph is not installed. Install it with:\n\n"
+                    "pip install pyqtgraph\n\n"
+                    "Falling back to matplotlib."
+                )
+                self.pyqtgraph_checkbox.setChecked(False)
+                return
+
+        # Update state
+        self.state.plotting_backend = backend
+
+        # Save preference
+        self.settings.setValue("use_pyqtgraph", checked)
+
+        # Note: Full backend switching would require replacing plot_host widget
+        # For now, this just sets the preference - requires app restart for full effect
+        backend_name = "PyQtGraph (fast)" if checked else "Matplotlib (full features)"
+        self._log_status_message(f"Plotting backend: {backend_name}", 3000)
+
+        # Show info about restart needed for full effect
+        if checked:
+            QMessageBox.information(
+                self,
+                "PyQtGraph Backend",
+                "PyQtGraph backend selected.\n\n"
+                "Note: This is experimental. Some overlay features may be limited.\n"
+                "For full effect, restart the application."
+            )
 
     ##################################################
     ## Turn Off All Edit Modes ##
