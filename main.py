@@ -5422,10 +5422,28 @@ class MainWindow(QMainWindow):
         if layout is None:
             return
 
-        # Remove old plot_host
-        layout.removeWidget(self.plot_host)
-        self.plot_host.setParent(None)
-        self.plot_host.deleteLater()
+        # Properly clean up old plot_host to avoid dangling references
+        old_plot_host = self.plot_host
+
+        # For matplotlib, disconnect toolbar before deletion to avoid QAction errors
+        if self._current_backend == 'matplotlib':
+            try:
+                # Disconnect toolbar from canvas first
+                if hasattr(old_plot_host, 'toolbar') and old_plot_host.toolbar:
+                    old_plot_host.toolbar.setParent(None)
+                    old_plot_host.toolbar.deleteLater()
+                    old_plot_host.toolbar = None
+                # Close the figure to release matplotlib resources
+                if hasattr(old_plot_host, 'fig') and old_plot_host.fig:
+                    import matplotlib.pyplot as plt
+                    plt.close(old_plot_host.fig)
+            except Exception as e:
+                print(f"[PlotHost] Cleanup warning: {e}")
+
+        # Remove from layout and hide
+        layout.removeWidget(old_plot_host)
+        old_plot_host.hide()
+        old_plot_host.setParent(None)
 
         # Create new plot_host
         self._current_backend = new_backend
@@ -5433,10 +5451,13 @@ class MainWindow(QMainWindow):
         self.plot_host = self._create_plot_host(new_backend)
         layout.addWidget(self.plot_host)
 
-        # Re-initialize PlotManager with new plot_host
+        # Schedule old widget for deletion after event loop processes
+        old_plot_host.deleteLater()
+
+        # Re-initialize PlotManager (it reads plot_host from self)
         if hasattr(self, 'plot_manager'):
             from plotting.plot_manager import PlotManager
-            self.plot_manager = PlotManager(self, self.plot_host, self.state)
+            self.plot_manager = PlotManager(self)
 
         # Apply current theme
         dark_mode = self.settings.value("plot_dark_mode", True, type=bool)
