@@ -30,6 +30,13 @@ import pandas as pd
 from core.state import AppState
 from core import abf_io, filters
 from core.plotting import PlotHost
+# PyQtGraph backend import (lazy - only loaded when needed)
+PYQTGRAPH_AVAILABLE = False
+try:
+    from plotting.pyqtgraph_backend import PyQtGraphPlotHost, PYQTGRAPH_AVAILABLE as _PG_AVAIL
+    PYQTGRAPH_AVAILABLE = _PG_AVAIL
+except ImportError:
+    PYQTGRAPH_AVAILABLE = False
 from core import stim as stimdet   # stim detection
 
 # Peak detection: Switch between standard and downsampled versions
@@ -149,8 +156,16 @@ class MainWindow(QMainWindow):
         self.eupnea_min_duration = 2.0  # seconds - minimum sustained duration for eupnea region
         self.eupnea_detection_mode = "gmm"  # "gmm" or "frequency" - default to GMM-based detection
 
-        # --- Embed Matplotlib into MainPlot (QFrame in Designer) ---
-        self.plot_host = PlotHost(self.MainPlot)
+        # --- Embed Plot Widget into MainPlot (QFrame in Designer) ---
+        # Check saved backend preference (default to matplotlib)
+        use_pyqtgraph = self.settings.value("use_pyqtgraph", False, type=bool)
+        self._current_backend = 'pyqtgraph' if (use_pyqtgraph and PYQTGRAPH_AVAILABLE) else 'matplotlib'
+        self.state.plotting_backend = self._current_backend
+
+        # Create appropriate plot host
+        self.plot_host = self._create_plot_host(self._current_backend)
+
+        # Setup layout
         layout = self.MainPlot.layout()
         if layout is None:
             from PyQt6.QtWidgets import QVBoxLayout
@@ -5370,6 +5385,68 @@ class MainWindow(QMainWindow):
                     # Fallback: just add at the end
                     parent_layout.addWidget(self.pyqtgraph_checkbox)
 
+    def _create_plot_host(self, backend: str):
+        """Create the appropriate plot host widget based on backend selection.
+
+        Args:
+            backend: 'matplotlib' or 'pyqtgraph'
+
+        Returns:
+            PlotHost or PyQtGraphPlotHost widget
+        """
+        if backend == 'pyqtgraph' and PYQTGRAPH_AVAILABLE:
+            print(f"[PlotHost] Creating PyQtGraph backend (high-performance)")
+            return PyQtGraphPlotHost(self.MainPlot)
+        else:
+            print(f"[PlotHost] Creating Matplotlib backend (full features)")
+            return PlotHost(self.MainPlot)
+
+    def _switch_plot_backend(self, new_backend: str):
+        """Hot-swap the plotting backend.
+
+        Args:
+            new_backend: 'matplotlib' or 'pyqtgraph'
+        """
+        if new_backend == self._current_backend:
+            return  # No change needed
+
+        # Check availability
+        if new_backend == 'pyqtgraph' and not PYQTGRAPH_AVAILABLE:
+            print("[PlotHost] PyQtGraph not available, staying with matplotlib")
+            return
+
+        print(f"[PlotHost] Switching backend from {self._current_backend} to {new_backend}")
+
+        # Get layout
+        layout = self.MainPlot.layout()
+        if layout is None:
+            return
+
+        # Remove old plot_host
+        layout.removeWidget(self.plot_host)
+        self.plot_host.setParent(None)
+        self.plot_host.deleteLater()
+
+        # Create new plot_host
+        self._current_backend = new_backend
+        self.state.plotting_backend = new_backend
+        self.plot_host = self._create_plot_host(new_backend)
+        layout.addWidget(self.plot_host)
+
+        # Re-initialize PlotManager with new plot_host
+        if hasattr(self, 'plot_manager'):
+            from plotting.plot_manager import PlotManager
+            self.plot_manager = PlotManager(self, self.plot_host, self.state)
+
+        # Apply current theme
+        dark_mode = self.settings.value("plot_dark_mode", True, type=bool)
+        theme = "dark" if dark_mode else "light"
+        self.plot_host.set_plot_theme(theme)
+
+        # Redraw if we have data
+        if self.state.t is not None:
+            self.redraw_main_plot()
+
     def on_pyqtgraph_toggled(self, checked: bool):
         """Toggle between matplotlib and PyQtGraph plotting backends."""
         from PyQt6.QtWidgets import QMessageBox
@@ -5377,40 +5454,26 @@ class MainWindow(QMainWindow):
         backend = 'pyqtgraph' if checked else 'matplotlib'
 
         # Check if pyqtgraph is available
-        if checked:
-            try:
-                import pyqtgraph
-            except ImportError:
-                QMessageBox.warning(
-                    self,
-                    "PyQtGraph Not Installed",
-                    "PyQtGraph is not installed. Install it with:\n\n"
-                    "pip install pyqtgraph\n\n"
-                    "Falling back to matplotlib."
-                )
-                self.pyqtgraph_checkbox.setChecked(False)
-                return
-
-        # Update state
-        self.state.plotting_backend = backend
+        if checked and not PYQTGRAPH_AVAILABLE:
+            QMessageBox.warning(
+                self,
+                "PyQtGraph Not Available",
+                "PyQtGraph is not available. Install it with:\n\n"
+                "pip install pyqtgraph\n\n"
+                "Falling back to matplotlib."
+            )
+            self.pyqtgraph_checkbox.setChecked(False)
+            return
 
         # Save preference
         self.settings.setValue("use_pyqtgraph", checked)
 
-        # Note: Full backend switching would require replacing plot_host widget
-        # For now, this just sets the preference - requires app restart for full effect
+        # Hot-swap the backend
+        self._switch_plot_backend(backend)
+
+        # Log status
         backend_name = "PyQtGraph (fast)" if checked else "Matplotlib (full features)"
         self._log_status_message(f"Plotting backend: {backend_name}", 3000)
-
-        # Show info about restart needed for full effect
-        if checked:
-            QMessageBox.information(
-                self,
-                "PyQtGraph Backend",
-                "PyQtGraph backend selected.\n\n"
-                "Note: This is experimental. Some overlay features may be limited.\n"
-                "For full effect, restart the application."
-            )
 
     ##################################################
     ## Turn Off All Edit Modes ##
