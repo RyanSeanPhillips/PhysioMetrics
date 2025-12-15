@@ -37,6 +37,30 @@ EXPMIN_COLOR = (31, 120, 180)  # Blue
 EXPOFF_COLOR = (155, 89, 182)  # Purple
 
 
+class _MatplotlibCompatEvent:
+    """Wrapper to provide matplotlib-compatible event attributes for PyQtGraph events.
+
+    This allows editing modes designed for matplotlib to work with PyQtGraph.
+    """
+
+    def __init__(self, pyqt_event, plot_widget, xdata, ydata):
+        self._pyqt_event = pyqt_event
+        self.inaxes = plot_widget  # The plot widget acts as the "axes"
+        self.xdata = xdata
+        self.ydata = ydata
+        # Provide button info (matplotlib uses 1=left, 2=middle, 3=right)
+        qt_button = pyqt_event.button()
+        if hasattr(qt_button, 'value'):
+            # PyQt6 enum
+            self.button = qt_button.value
+        else:
+            self.button = int(qt_button) if qt_button else 1
+
+    def __getattr__(self, name):
+        """Forward unknown attributes to the underlying PyQtGraph event."""
+        return getattr(self._pyqt_event, name)
+
+
 class PyQtGraphPlotHost(QWidget):
     """
     PyQtGraph-based plot host with same API as matplotlib PlotHost.
@@ -564,7 +588,10 @@ class PyQtGraphPlotHost(QWidget):
             mouse_point = self.plot_widget.vb.mapSceneToView(pos)
             x_data = mouse_point.x()
             y_data = mouse_point.y()
-            self._external_click_cb(x_data, y_data, event)
+
+            # Create matplotlib-compatible event wrapper
+            wrapped_event = _MatplotlibCompatEvent(event, self.plot_widget, x_data, y_data)
+            self._external_click_cb(x_data, y_data, wrapped_event)
 
     # ------- Toolbar Compatibility -------
     def set_toolbar_callback(self, callback):

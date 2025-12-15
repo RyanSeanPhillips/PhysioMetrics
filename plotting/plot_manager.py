@@ -548,7 +548,8 @@ class PlotManager:
                     if t1_span > t0_span:
                         region = pg.LinearRegionItem(
                             values=[t0_span, t1_span],
-                            brush=pg.mkBrush(46, 80, 144, 60),
+                            brush=pg.mkBrush(46, 80, 144, 80),  # Blue with alpha
+                            pen=pg.mkPen(None),  # No border lines
                             movable=False
                         )
                         region.setZValue(-10)
@@ -640,26 +641,63 @@ class PlotManager:
         add_markers(breath.get('expmins'), (31, 120, 180), 's')
 
     def _draw_region_overlays_pyqtgraph(self, plot, sweep_idx, t_plot, t0):
-        """Draw region overlays (eupnea, apnea, etc.) on PyQtGraph plot."""
+        """Draw region overlays (eupnea, apnea, sniffing, outliers) on PyQtGraph plot."""
         import pyqtgraph as pg
         st = self.state
 
-        # Get eupnea regions
-        eupnea_regions = st.sniff_regions_by_sweep.get(sweep_idx, [])
-
-        # Draw eupnea regions (green)
-        for start_t, end_t in eupnea_regions:
-            # Adjust for t0 offset
+        def add_region(start_t, end_t, color_rgba):
+            """Helper to add a region with proper offset and no border."""
             start_adj = start_t - t0
             end_adj = end_t - t0
             if end_adj > start_adj:
                 region = pg.LinearRegionItem(
                     values=[start_adj, end_adj],
-                    brush=pg.mkBrush(46, 125, 50, 60),  # Green with alpha
+                    brush=pg.mkBrush(*color_rgba),
+                    pen=pg.mkPen(None),  # No border lines (removes yellow edges)
                     movable=False
                 )
                 region.setZValue(-8)
                 plot.addItem(region)
+
+        # Get display mode preferences
+        eupnea_shade = getattr(st, 'eupnea_use_shade', False)
+        sniffing_shade = getattr(st, 'sniffing_use_shade', False)
+        apnea_shade = getattr(st, 'apnea_use_shade', False)
+        outliers_shade = getattr(st, 'outliers_use_shade', False)
+
+        # Draw eupnea regions (green) - from GMM clustering or detection
+        # Check for eupnea_regions_by_sweep first, then sniff_regions_by_sweep
+        eupnea_regions = []
+        if hasattr(st, 'eupnea_regions_by_sweep') and sweep_idx in st.eupnea_regions_by_sweep:
+            eupnea_regions = st.eupnea_regions_by_sweep[sweep_idx]
+
+        if eupnea_shade and eupnea_regions:
+            for start_t, end_t in eupnea_regions:
+                add_region(start_t, end_t, (46, 125, 50, 80))  # Green
+
+        # Draw sniffing regions (purple)
+        sniff_regions = st.sniff_regions_by_sweep.get(sweep_idx, [])
+        if sniffing_shade and sniff_regions:
+            for start_t, end_t in sniff_regions:
+                add_region(start_t, end_t, (128, 0, 128, 80))  # Purple
+
+        # Draw apnea regions (red) - from apnea detection
+        apnea_regions = []
+        if hasattr(st, 'apnea_regions_by_sweep') and sweep_idx in st.apnea_regions_by_sweep:
+            apnea_regions = st.apnea_regions_by_sweep[sweep_idx]
+
+        if apnea_shade and apnea_regions:
+            for start_t, end_t in apnea_regions:
+                add_region(start_t, end_t, (255, 0, 0, 60))  # Red
+
+        # Draw outlier regions (orange)
+        outlier_regions = []
+        if hasattr(st, 'outlier_regions_by_sweep') and sweep_idx in st.outlier_regions_by_sweep:
+            outlier_regions = st.outlier_regions_by_sweep[sweep_idx]
+
+        if outliers_shade and outlier_regions:
+            for start_t, end_t in outlier_regions:
+                add_region(start_t, end_t, (255, 165, 0, 80))  # Orange
 
     def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
         """Build ChannelPanelConfig list from channel manager.

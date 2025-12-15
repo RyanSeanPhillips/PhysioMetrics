@@ -291,14 +291,25 @@ class NavigationManager:
 
     def _set_window(self, left: float, width: float):
         """Apply x-limits and remember left edge for subsequent steps."""
-        ax = self.main.plot_host.fig.axes[0] if self.main.plot_host.fig.axes else None
-        if ax is None:
-            return
         right = left + max(0.01, float(width))
-        ax.set_xlim(left, right)
         self._win_left = float(left)
-        self.main.plot_host.fig.tight_layout()
-        self.main.plot_host.canvas.draw_idle()
+
+        # Handle both matplotlib and PyQtGraph backends
+        if self.main.state.plotting_backend == 'pyqtgraph':
+            # PyQtGraph: use setXRange on plot widget
+            plot_host = self.main.plot_host
+            if hasattr(plot_host, 'plot_widget') and plot_host.plot_widget is not None:
+                plot_host.plot_widget.setXRange(left, right, padding=0)
+            elif hasattr(plot_host, '_subplots') and plot_host._subplots:
+                plot_host._subplots[0].setXRange(left, right, padding=0)
+        else:
+            # Matplotlib: use set_xlim on axes
+            ax = self.main.plot_host.fig.axes[0] if self.main.plot_host.fig.axes else None
+            if ax is None:
+                return
+            ax.set_xlim(left, right)
+            self.main.plot_host.fig.tight_layout()
+            self.main.plot_host.canvas.draw_idle()
 
     ##################################################
     ## List Box Navigation (Curation Tab)          ##
