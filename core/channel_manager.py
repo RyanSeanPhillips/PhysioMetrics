@@ -20,10 +20,11 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QSize
 from PyQt6.QtGui import QFont, QCursor
 
 
-# Channel type options (simplified for now)
+# Channel type options
 CHANNEL_TYPES = [
     ("Pleth", "Plethysmography - peak detection and breath analysis"),
     ("Opto Stim", "Optogenetic stimulus - shows blue background during stim"),
+    ("Event", "Event channel - for marking licks, bouts, or other events"),
     ("Raw Signal", "Display only, no special processing"),
 ]
 
@@ -41,11 +42,15 @@ class ChannelConfig:
     def __post_init__(self):
         # Auto-detect channel type from name
         name_lower = self.name.lower()
-        if 'pleth' in name_lower or 'resp' in name_lower or 'breath' in name_lower:
+        if 'pleth' in name_lower or 'resp' in name_lower or 'breath' in name_lower or 'flow' in name_lower or 'airway' in name_lower:
             self.channel_type = "Pleth"
-        elif 'opto' in name_lower or 'laser' in name_lower or 'stim' in name_lower:
+        elif 'opto' in name_lower or 'laser' in name_lower or 'stim' in name_lower or 'led' in name_lower or 'light' in name_lower:
             self.channel_type = "Opto Stim"
             # Opto Stim channels default to hidden (still creates blue spans on Pleth)
+            self.visible = False
+        elif 'lick' in name_lower or 'bout' in name_lower or 'event' in name_lower or 'detector' in name_lower:
+            self.channel_type = "Event"
+            # Event channels default to hidden
             self.visible = False
         elif 'δf/f' in name_lower or 'dff' in name_lower or 'df/f' in name_lower:
             self.source = "computed"
@@ -673,6 +678,13 @@ class ChannelManagerWidget(QWidget):
         """Get the name of the Opto Stim channel (for blue overlay)."""
         for config in self._channels.values():
             if config.channel_type == "Opto Stim":
+                return config.name
+        return None
+
+    def get_event_channel(self) -> Optional[str]:
+        """Get the name of the Event channel (for event marking/detection)."""
+        for config in self._channels.values():
+            if config.channel_type == "Event":
                 return config.name
         return None
 

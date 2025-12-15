@@ -742,6 +742,10 @@ class MainWindow(QMainWindow):
 
     def _setup_channel_manager(self):
         """Setup the Channel Manager using UI elements from the .ui file."""
+        # Hide the old Channel Selection groupbox (replaced by Channel Manager)
+        if hasattr(self, 'groupBox_2'):
+            self.groupBox_2.hide()
+
         # Create the ChannelManagerWidget, passing it the UI elements to use
         self.channel_manager = ChannelManagerWidget(
             parent=self,
@@ -754,12 +758,46 @@ class MainWindow(QMainWindow):
         self.channel_manager.apply_requested.connect(self._on_channel_manager_apply)
         self.channel_manager.settings_requested.connect(self._on_channel_settings_requested)
 
+        # Add Mark Events button to Channel Manager groupbox header
+        self._setup_mark_events_button()
+
+    def _setup_mark_events_button(self):
+        """Add Mark Events button to the Channel Manager header."""
+        from PyQt6.QtWidgets import QPushButton
+        from PyQt6.QtCore import Qt
+
+        # Create Mark Events button with same styling as old one
+        self.mark_events_btn = QPushButton("Mark Events")
+        self.mark_events_btn.setFixedSize(70, 18)
+        self.mark_events_btn.setStyleSheet("""
+            QPushButton {
+                text-align: left;
+                border: none;
+                background: transparent;
+                text-decoration: underline;
+                color: #4A9EFF;
+                font-size: 8pt;
+            }
+            QPushButton:hover {
+                color: #6BB6FF;
+            }
+        """)
+        self.mark_events_btn.setToolTip("Open Event Detection dialog (requires Event channel)")
+        self.mark_events_btn.clicked.connect(self.on_mark_events_clicked)
+
+        # Add to Channel Manager header layout (next to expand button)
+        if hasattr(self, 'channelManagerHeaderLayout'):
+            # Insert before the expand button (index 1)
+            self.channelManagerHeaderLayout.insertWidget(1, self.mark_events_btn)
+
     def _on_channel_manager_apply(self):
         """Called when channel manager requests to apply changes."""
         st = self.state
 
-        # Get the Pleth channel from channel manager
+        # Get channel assignments from channel manager
         pleth_channel = self.channel_manager.get_pleth_channel()
+        opto_stim_channel = self.channel_manager.get_opto_stim_channel()
+        event_channel = self.channel_manager.get_event_channel()
 
         # Check if Pleth channel changed - if so, clear analysis data
         channel_changed = (pleth_channel != st.analyze_chan)
@@ -795,13 +833,6 @@ class MainWindow(QMainWindow):
             # Clear processing cache so filters are re-applied
             st.proc_cache.clear()
 
-            # Also update the old dropdown to stay in sync (until we remove it)
-            idx = self.AnalyzeChanSelect.findText(pleth_channel)
-            if idx >= 0:
-                self.AnalyzeChanSelect.blockSignals(True)
-                self.AnalyzeChanSelect.setCurrentIndex(idx)
-                self.AnalyzeChanSelect.blockSignals(False)
-
             # Switch to single panel mode (required for proper navigation)
             if not self.single_panel_mode:
                 self.single_panel_mode = True
@@ -819,6 +850,27 @@ class MainWindow(QMainWindow):
             # No Pleth channel - still clear saved view to show full data range
             self.plot_host.clear_saved_view("single")
             self.plot_host.clear_saved_view("grid")
+
+        # Update Opto Stim channel (for blue stimulus overlays)
+        stim_changed = (opto_stim_channel != st.stim_chan)
+        if stim_changed:
+            st.stim_chan = opto_stim_channel
+            # Clear stimulus detection results when channel changes
+            st.stim_onsets_by_sweep.clear()
+            st.stim_offsets_by_sweep.clear()
+            st.stim_spans_by_sweep.clear()
+            st.stim_metrics_by_sweep.clear()
+            # Recompute stimulus for current sweep if channel is set
+            if st.stim_chan:
+                self._compute_stim_for_current_sweep()
+
+        # Update Event channel (for event marking)
+        event_changed = (event_channel != st.event_channel)
+        if event_changed:
+            st.event_channel = event_channel
+            # Clear bout annotations when event channel changes
+            if hasattr(st, 'bout_annotations'):
+                st.bout_annotations.clear()
 
         # Redraw the plot with new channel configuration
         self.redraw_main_plot()
@@ -2989,14 +3041,26 @@ class MainWindow(QMainWindow):
 
     def on_mark_events_clicked(self):
         """Open Event Detection Settings dialog."""
-        # Check if event channel is selected
+        # Check if event channel is selected (from Channel Manager)
         st = self.state
+
+        # Try to get event channel from Channel Manager first
+        if hasattr(self, 'channel_manager'):
+            event_chan = self.channel_manager.get_event_channel()
+            if event_chan and event_chan != st.event_channel:
+                # Sync state with Channel Manager
+                st.event_channel = event_chan
+
         if st.event_channel is None:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self,
                 "No Event Channel",
-                "Please select an event channel from the 'Events Chan Select' dropdown first."
+                "Please set a channel type to 'Event' in the Channel Manager first.\n\n"
+                "1. Click the Channel Manager expand button (▼)\n"
+                "2. Find your event channel (e.g., lick detector)\n"
+                "3. Change its type dropdown to 'Event'\n"
+                "4. Click Apply"
             )
             return
 
