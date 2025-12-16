@@ -93,6 +93,14 @@ class EditingModes:
         self.window.movePointButton.toggled.connect(self.on_move_point_toggled)
         self.window.markSniffButton.toggled.connect(self.on_mark_sniff_toggled)
 
+    def _is_pyqtgraph_backend(self) -> bool:
+        """Check if the current plotting backend is PyQtGraph."""
+        return getattr(self.window.state, 'plotting_backend', 'matplotlib') == 'pyqtgraph'
+
+    def _has_matplotlib_canvas(self) -> bool:
+        """Check if the plot host has a matplotlib canvas (for event connections)."""
+        return hasattr(self.window.plot_host, 'canvas') and self.window.plot_host.canvas is not None
+
     # ========================================================================
     # Helper Functions for Label-Based Editing
     # ========================================================================
@@ -1039,38 +1047,49 @@ class EditingModes:
                     '<b>SHIFT+DRAG:</b> Snap to critical points')
             self.window._show_editing_instructions(html)
 
-            # Connect matplotlib events
-            self._key_press_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
-            self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
-            self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_canvas_release)
+            # Connect drag and key events (different for matplotlib vs PyQtGraph)
+            if self._is_pyqtgraph_backend():
+                # PyQtGraph: use drag callback and key callback
+                self.window.plot_host.set_drag_callback(self._on_move_point_drag_pyqtgraph)
+                self.window.plot_host.set_key_callback(self._on_move_point_key_pyqtgraph)
+            elif self._has_matplotlib_canvas():
+                # Connect matplotlib events
+                self._key_press_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
+                self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
+                self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_canvas_release)
 
-            # Disable matplotlib's built-in toolbar - turn off any active modes
-            # The toolbar has a mode attribute we can check
-            if hasattr(self.window.plot_host.toolbar, 'mode') and self.window.plot_host.toolbar.mode != '':
-                # There's an active mode - turn it off by calling the same method again (toggle)
-                if self.window.plot_host.toolbar.mode == 'pan/zoom':
-                    self.window.plot_host.toolbar.pan()
-                elif self.window.plot_host.toolbar.mode == 'zoom rect':
-                    self.window.plot_host.toolbar.zoom()
+                # Disable matplotlib's built-in toolbar - turn off any active modes
+                if hasattr(self.window.plot_host.toolbar, 'mode') and self.window.plot_host.toolbar.mode != '':
+                    if self.window.plot_host.toolbar.mode == 'pan/zoom':
+                        self.window.plot_host.toolbar.pan()
+                    elif self.window.plot_host.toolbar.mode == 'zoom rect':
+                        self.window.plot_host.toolbar.zoom()
 
-            self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            self.window.plot_host.canvas.setFocus()
+                self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                self.window.plot_host.canvas.setFocus()
         else:
             self.window.movePointButton.setText("Move Point")
 
-            # Disconnect matplotlib events
-            if self._key_press_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._key_press_cid)
-                self._key_press_cid = None
-            if self._motion_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
-                self._motion_cid = None
-            if self._release_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
-                self._release_cid = None
+            # Disconnect events (different for matplotlib vs PyQtGraph)
+            if self._is_pyqtgraph_backend():
+                if hasattr(self.window.plot_host, 'clear_drag_callback'):
+                    self.window.plot_host.clear_drag_callback()
+                if hasattr(self.window.plot_host, 'clear_key_callback'):
+                    self.window.plot_host.clear_key_callback()
+            elif self._has_matplotlib_canvas():
+                if self._key_press_cid is not None:
+                    self.window.plot_host.canvas.mpl_disconnect(self._key_press_cid)
+                    self._key_press_cid = None
+                if self._motion_cid is not None:
+                    self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                    self._motion_cid = None
+                if self._release_cid is not None:
+                    self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+                    self._release_cid = None
 
-            # Re-enable toolbar (user can re-select zoom/pan if they want)
-            self.window.plot_host.canvas.toolbar.setEnabled(True)
+                # Re-enable toolbar (user can re-select zoom/pan if they want)
+                if hasattr(self.window.plot_host, 'canvas') and hasattr(self.window.plot_host.canvas, 'toolbar'):
+                    self.window.plot_host.canvas.toolbar.setEnabled(True)
 
             # Clear selected point
             self._selected_point = None
@@ -1403,8 +1422,138 @@ class EditingModes:
         if len(pks) > 0:
             self.window.plot_host.update_peaks(t_plot[pks], y[pks], size=50)
 
-        # Just update the canvas
-        self.window.plot_host.canvas.draw_idle()
+        # Just update the canvas (matplotlib only)
+        if self._has_matplotlib_canvas():
+            self.window.plot_host.canvas.draw_idle()
+
+    def _on_move_point_drag_pyqtgraph(self, event_type, xdata, ydata, event):
+        """Handle PyQtGraph drag events for move point mode."""
+        if not getattr(self, "_move_point_mode", False):
+            return
+
+        if event_type == 'press':
+            # Select a point - same logic as _on_plot_click_move_point
+            st = self.window.state
+            if st.t is None or st.analyze_chan not in st.sweeps:
+                return
+
+            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            t, y = self.window._current_trace()
+            if t is None or y is None:
+                return
+
+            # Get time basis
+            spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+            if st.stim_chan and spans:
+                t0 = spans[0][0]
+                t_plot = t - t0
+            else:
+                t_plot = t
+
+            # Find closest point among all types
+            pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+            breaths = st.breath_by_sweep.get(s, {})
+
+            onsets = np.asarray(breaths.get('onsets', np.array([], dtype=int)), dtype=int)
+            offsets = np.asarray(breaths.get('offsets', np.array([], dtype=int)), dtype=int)
+            expmins = np.asarray(breaths.get('expmins', np.array([], dtype=int)), dtype=int)
+            expoffs = np.asarray(breaths.get('expoffs', np.array([], dtype=int)), dtype=int)
+
+            max_distance = 0.5  # seconds
+            best_type = None
+            best_idx = None
+            best_distance = float('inf')
+
+            # Check breath event markers (onsets, offsets, expmins, expoffs) - these can be moved
+            for name, indices in [('onset', onsets), ('offset', offsets), ('expmin', expmins), ('expoff', expoffs)]:
+                if len(indices) == 0:
+                    continue
+                valid_mask = indices < len(t_plot)
+                valid_indices = indices[valid_mask]
+                if len(valid_indices) == 0:
+                    continue
+                times = t_plot[valid_indices]
+                distances = np.abs(times - xdata)
+                min_dist_idx = np.argmin(distances)
+                if distances[min_dist_idx] < best_distance and distances[min_dist_idx] < max_distance:
+                    best_distance = distances[min_dist_idx]
+                    best_type = name
+                    best_idx = valid_indices[min_dist_idx]
+
+            if best_type is None:
+                self._selected_point = None
+                return
+
+            # Store selection
+            self._selected_point = {
+                'type': best_type,
+                'index': best_idx,
+                'sweep': s,
+                'original_index': best_idx
+            }
+            print(f"[move-point] Selected {best_type} at index {best_idx}")
+
+        elif event_type == 'move':
+            # Update point position while dragging
+            if not self._selected_point:
+                return
+
+            st = self.window.state
+            s = self._selected_point['sweep']
+            t, y = self.window._current_trace()
+            if t is None or y is None:
+                return
+
+            # Get time basis
+            spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+            if st.stim_chan and spans:
+                t0 = spans[0][0]
+                t_plot = t - t0
+            else:
+                t_plot = t
+
+            # Find closest sample to mouse position
+            new_idx = int(np.clip(np.searchsorted(t_plot, float(xdata)), 0, len(t_plot) - 1))
+
+            # Constrain movement between adjacent peaks
+            new_idx = self._constrain_to_peak_boundaries(new_idx, s)
+
+            # Check if Shift key is held for snap-to-zero-crossing
+            modifiers = QApplication.keyboardModifiers()
+            shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+            if shift_held:
+                dy = np.gradient(y)
+                new_idx = self._find_nearest_zero_crossing(y, dy, new_idx, search_radius=200)
+                new_idx = self._constrain_to_peak_boundaries(new_idx, s)
+
+            # Update the point position
+            self._update_point_position(new_idx, t_plot, y, s)
+
+        elif event_type == 'release':
+            # Save the moved point
+            if self._selected_point:
+                self._save_moved_point(recompute_metrics=True)
+
+    def _on_move_point_key_pyqtgraph(self, key, modifiers):
+        """Handle keyboard events for move point mode in PyQtGraph."""
+        if not getattr(self, "_move_point_mode", False):
+            return
+
+        if key == 'escape':
+            # Cancel move - restore original position
+            if self._selected_point:
+                self._cancel_move_point()
+        elif key in ('left', 'right'):
+            # Fine-tune position with arrow keys
+            if self._selected_point:
+                direction = -1 if key == 'left' else 1
+                snap_to_zero = modifiers.get('shift', False)
+                self._move_selected_point(direction, snap_to_zero=snap_to_zero)
+        elif key == 'enter':
+            # Confirm move
+            if self._selected_point:
+                self._save_moved_point(recompute_metrics=True)
 
     def _save_moved_point(self, recompute_metrics=False):
         """Save the moved point position and clear selection."""
@@ -1924,18 +2073,26 @@ class EditingModes:
             self.window._show_editing_instructions(html)
         except Exception: pass
 
-        # Set up event handlers
-        self.window.plot_host.set_click_callback(self._on_plot_click_omit_region)
+        # Set up event handlers (different for matplotlib vs PyQtGraph)
         self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
 
-        # Give focus to the canvas so it can receive key events
-        self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.window.plot_host.canvas.setFocus()
+        if self._is_pyqtgraph_backend():
+            # PyQtGraph: use drag callback for ALL interactions (press/move/release)
+            # The drag callback handles Ctrl+Shift+click, Ctrl+click, and normal drag
+            # Do NOT set click callback - it interferes with drag callback handling
+            self.window.plot_host.set_drag_callback(self._on_omit_region_drag_pyqtgraph)
+            self.window.plot_host.set_key_callback(self._on_omit_region_key_pyqtgraph)
+        elif self._has_matplotlib_canvas():
+            # Matplotlib: use click callback for click events, separate drag handlers
+            self.window.plot_host.set_click_callback(self._on_plot_click_omit_region)
+            # Give focus to the canvas so it can receive key events
+            self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.window.plot_host.canvas.setFocus()
 
-        # Connect matplotlib events for drag functionality and keyboard
-        self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_omit_region_drag)
-        self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_omit_region_release)
-        self._key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_omit_region_key_press)
+            # Connect matplotlib events for drag functionality and keyboard
+            self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_omit_region_drag)
+            self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_omit_region_release)
+            self._key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_omit_region_key_press)
 
     def _exit_omit_region_mode(self):
         """Exit omit region selection mode."""
@@ -1946,25 +2103,37 @@ class EditingModes:
         self.window.OmitSweepButton.setChecked(False)
         self.window._refresh_omit_button_label()
 
-        # Disconnect matplotlib events
-        if self._motion_cid is not None:
-            self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
-            self._motion_cid = None
-        if self._release_cid is not None:
-            self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
-            self._release_cid = None
-        if self._key_cid is not None:
-            self.window.plot_host.canvas.mpl_disconnect(self._key_cid)
-            self._key_cid = None
+        # Disconnect events (different for matplotlib vs PyQtGraph)
+        if self._is_pyqtgraph_backend():
+            if hasattr(self.window.plot_host, 'clear_drag_callback'):
+                self.window.plot_host.clear_drag_callback()
+            if hasattr(self.window.plot_host, 'clear_key_callback'):
+                self.window.plot_host.clear_key_callback()
+        elif self._has_matplotlib_canvas():
+            if self._motion_cid is not None:
+                self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self._motion_cid = None
+            if self._release_cid is not None:
+                self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self._release_cid = None
+            if self._key_cid is not None:
+                self.window.plot_host.canvas.mpl_disconnect(self._key_cid)
+                self._key_cid = None
 
-        # Clear drag artist
+        # Clear drag artist (matplotlib)
         if self._omit_region_drag_artist:
             try:
                 self._omit_region_drag_artist.remove()
             except:
                 pass
             self._omit_region_drag_artist = None
-            self.window.plot_host.canvas.draw_idle()
+            if self._has_matplotlib_canvas():
+                self.window.plot_host.canvas.draw_idle()
+
+        # Clear PyQtGraph drag visual
+        if self._is_pyqtgraph_backend():
+            if hasattr(self.window.plot_host, '_clear_drag_visual'):
+                self.window.plot_host._clear_drag_visual()
 
         # Clear click callback and restore cursor
         self.window.plot_host.clear_click_callback()
@@ -1984,10 +2153,25 @@ class EditingModes:
         if event.inaxes is None or xdata is None:
             return
 
-        # Check modifier keys
-        modifiers = QApplication.keyboardModifiers()
-        shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-        ctrl_held = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        # In PyQtGraph mode, the drag callback handles all interactions including Ctrl+Shift
+        # Skip this click callback to avoid duplicate handling
+        if self._is_pyqtgraph_backend():
+            # Check if we already handled this via drag callback (full sweep omit)
+            # The drag callback sets this flag when it handles Ctrl+Shift
+            if getattr(self, '_pyqtgraph_handled_ctrl_shift', False):
+                self._pyqtgraph_handled_ctrl_shift = False  # Reset for next time
+                return
+
+        # Check modifier keys - prefer event modifiers (more reliable than QApplication.keyboardModifiers())
+        # which may have stale state if checked after a delay
+        if hasattr(event, 'shift_held') and hasattr(event, 'ctrl_held'):
+            shift_held = event.shift_held
+            ctrl_held = event.ctrl_held
+        else:
+            # Fallback to QApplication for matplotlib backend
+            modifiers = QApplication.keyboardModifiers()
+            shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+            ctrl_held = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
 
         # Get current sweep
         st = self.window.state
@@ -2266,13 +2450,232 @@ class EditingModes:
         self._omit_region_start_x = None
         self._omit_edge_mode = None
         self._omit_region_index = None
+
+        # Clear matplotlib drag artist if present
         if self._omit_region_drag_artist:
             try:
                 self._omit_region_drag_artist.remove()
             except:
                 pass
             self._omit_region_drag_artist = None
-            self.window.plot_host.canvas.draw_idle()
+            if self._has_matplotlib_canvas():
+                self.window.plot_host.canvas.draw_idle()
+
+        # Clear PyQtGraph drag visual if present
+        if self._is_pyqtgraph_backend():
+            if hasattr(self.window.plot_host, '_clear_drag_visual'):
+                self.window.plot_host._clear_drag_visual()
+
+    def _on_omit_region_drag_pyqtgraph(self, event_type, xdata, ydata, event):
+        """Handle PyQtGraph drag events for omit region mode."""
+        if not getattr(self, "_omit_region_mode", False):
+            return
+
+
+        if event_type == 'press':
+            # Start drag - similar to _on_plot_click_omit_region
+            # Check modifier keys from event (more reliable than QApplication.keyboardModifiers())
+            # The wrapped event stores modifiers captured at event time
+            if hasattr(event, 'shift_held') and hasattr(event, 'ctrl_held'):
+                shift_held = event.shift_held
+                ctrl_held = event.ctrl_held
+            else:
+                # Fallback to QApplication
+                modifiers = QApplication.keyboardModifiers()
+                shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                ctrl_held = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+
+            # Ctrl+Shift+Click: Toggle full sweep omission
+            if ctrl_held and shift_held:
+                st = self.window.state
+                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                if s in st.omitted_sweeps:
+                    st.omitted_sweeps.discard(s)
+                    # Clear any omitted regions for this sweep as well
+                    if s in st.omitted_ranges:
+                        del st.omitted_ranges[s]
+                    print(f"[omit-region] Un-omitted full sweep {s}")
+                    try: self.window._log_status_message(f"Sweep {s+1}: included", 2000)
+                    except Exception: pass
+                else:
+                    st.omitted_sweeps.add(s)
+                    # Clear smaller omitted regions when full sweep is omitted (they're redundant)
+                    if s in st.omitted_ranges:
+                        print(f"[omit-region] Clearing {len(st.omitted_ranges[s])} smaller regions (full sweep now omitted)")
+                        del st.omitted_ranges[s]
+                    print(f"[omit-region] Omitted full sweep {s}")
+                    try: self.window._log_status_message(f"Sweep {s+1}: omitted", 2000)
+                    except Exception: pass
+
+                # Clear any drag state to prevent accidental region creation
+                self._omit_region_start_x = None
+                self._omit_edge_mode = None
+                self._omit_region_index = None
+
+                # Set flag to prevent duplicate handling in click callback
+                self._pyqtgraph_handled_ctrl_shift = True
+
+                self.window.redraw_main_plot()
+                self.window._refresh_omit_button_label()
+                return 'handled'  # Signal to eventFilter not to start drag
+
+            # Ctrl+Click: Delete region under cursor
+            if ctrl_held and not shift_held:
+                st = self.window.state
+                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                sr_hz = st.sr_hz if st.sr_hz else 1000.0
+                spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+                t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
+
+                # Clear drag state to prevent accidental region creation
+                self._omit_region_start_x = None
+                self._omit_edge_mode = None
+                self._omit_region_index = None
+
+                # Set flag to prevent duplicate handling in click callback
+                self._pyqtgraph_handled_ctrl_shift = True
+
+                regions = st.omitted_ranges.get(s, [])
+                for i, (i_start, i_end) in enumerate(regions):
+                    t_start = i_start / sr_hz - t0
+                    t_end = i_end / sr_hz - t0
+                    if t_start <= xdata <= t_end:
+                        del st.omitted_ranges[s][i]
+                        if not st.omitted_ranges[s]:
+                            del st.omitted_ranges[s]
+                        print(f"[omit-region] Deleted region {i}")
+                        self.window.redraw_main_plot()
+                        return 'handled'  # Signal to eventFilter not to start drag
+                return 'handled'  # Ctrl+click outside region - don't start drag
+
+            # Normal click - check for edge grab or start new region
+            st = self.window.state
+            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            sr_hz = st.sr_hz if st.sr_hz else 1000.0
+            spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+            t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
+
+            regions = st.omitted_ranges.get(s, [])
+            edge_threshold = 0.3  # seconds
+
+            # Check for edge proximity
+            for i, (i_start, i_end) in enumerate(regions):
+                t_start = i_start / sr_hz - t0
+                t_end = i_end / sr_hz - t0
+
+                if abs(xdata - t_start) < edge_threshold:
+                    self._omit_edge_mode = 'start'
+                    self._omit_region_index = i
+                    self._omit_region_start_x = t_end
+                    print(f"[omit-region] Grabbed START edge of region {i}")
+                    return
+
+                if abs(xdata - t_end) < edge_threshold:
+                    self._omit_edge_mode = 'end'
+                    self._omit_region_index = i
+                    self._omit_region_start_x = t_start
+                    print(f"[omit-region] Grabbed END edge of region {i}")
+                    return
+
+            # Start new region
+            self._omit_edge_mode = None
+            self._omit_region_index = None
+            self._omit_region_start_x = xdata
+            print(f"[omit-region] Started new region at x={xdata:.3f}")
+
+        elif event_type == 'move':
+            # Update drag visual
+            if self._omit_region_start_x is None:
+                return
+
+            x_start = self._omit_region_start_x
+            x_end = xdata
+            x_left = min(x_start, x_end)
+            x_right = max(x_start, x_end)
+
+            # Use PyQtGraph's drag visual (gray for add, red for remove)
+            color = (255, 100, 100, 80) if self._omit_region_remove_mode else (128, 128, 128, 80)
+            self.window.plot_host.add_drag_visual(x_left, x_right, color=color)
+
+        elif event_type == 'release':
+            # Finalize region
+            if self._omit_region_start_x is None:
+                return
+
+            x_start = self._omit_region_start_x
+            x_end = xdata
+            x_left = min(x_start, x_end)
+            x_right = max(x_start, x_end)
+
+            # Minimum width check
+            if abs(x_right - x_left) < 0.05:
+                print(f"[omit-region] Region too small, ignoring")
+                self._reset_omit_region_state()
+                return
+
+            # Get current sweep and convert to sample indices
+            st = self.window.state
+            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            sr_hz = st.sr_hz if st.sr_hz else 1000.0
+
+            spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+            if st.stim_chan and spans:
+                t0 = spans[0][0]
+                t_left_absolute = x_left + t0
+                t_right_absolute = x_right + t0
+            else:
+                t_left_absolute = x_left
+                t_right_absolute = x_right
+
+            i_left = int(t_left_absolute * sr_hz)
+            i_right = int(t_right_absolute * sr_hz)
+
+            if abs(i_right - i_left) < 10:
+                print(f"[omit-region] Region too small in samples, ignoring")
+                self._reset_omit_region_state()
+                return
+
+            # Handle edge adjustment vs new region
+            if self._omit_edge_mode and self._omit_region_index is not None:
+                # Adjust existing region
+                old_region = st.omitted_ranges[s][self._omit_region_index]
+                if self._omit_edge_mode == 'start':
+                    new_region = (i_left, old_region[1])
+                else:
+                    new_region = (old_region[0], i_right)
+
+                if new_region[0] < new_region[1]:
+                    st.omitted_ranges[s][self._omit_region_index] = new_region
+                    print(f"[omit-region] Adjusted region {self._omit_region_index}")
+                else:
+                    del st.omitted_ranges[s][self._omit_region_index]
+                    print(f"[omit-region] Region inverted, deleting")
+            else:
+                # Create new region
+                new_region = (min(i_left, i_right), max(i_left, i_right))
+                if s not in st.omitted_ranges:
+                    st.omitted_ranges[s] = []
+                st.omitted_ranges[s].append(new_region)
+                print(f"[omit-region] Created new region: {new_region}")
+
+            # Reset state
+            self._reset_omit_region_state()
+
+            # Redraw
+            self.window.redraw_main_plot()
+            self.window._refresh_omit_button_label()
+
+    def _on_omit_region_key_pyqtgraph(self, key, modifiers):
+        """Handle keyboard events for omit region mode in PyQtGraph."""
+        if not getattr(self, "_omit_region_mode", False):
+            return
+
+        if key == 'r':
+            print(f"[omit-region] R key detected, calling snap function")
+            self._snap_all_omit_regions_to_breaths()
+        elif key == 'escape':
+            print(f"[omit-region] Escape key detected, exiting mode")
+            self._exit_omit_region_mode()
 
     def _snap_all_omit_regions_to_breaths(self):
         """Snap all omitted regions on current sweep to breath onsets (onset to onset)."""
@@ -2470,23 +2873,35 @@ class EditingModes:
                     '<b>ESC:</b> <span style="color:#F44336">Cancel</span>')
             self.window._show_editing_instructions(html)
 
-            # Connect matplotlib events for drag functionality
-            self._merge_motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_merge_drag)
-            self._merge_release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_merge_release)
-            self._merge_key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_merge_canvas_key_press)
+            # Connect drag events (different for matplotlib vs PyQtGraph)
+            if self._is_pyqtgraph_backend():
+                # PyQtGraph: use drag callback and key callback
+                self.window.plot_host.set_drag_callback(self._on_merge_drag_pyqtgraph)
+                self.window.plot_host.set_key_callback(self._on_merge_key_pyqtgraph)
+            elif self._has_matplotlib_canvas():
+                # Matplotlib: use mpl_connect
+                self._merge_motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_merge_drag)
+                self._merge_release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_merge_release)
+                self._merge_key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_merge_canvas_key_press)
         else:
             self.window.MergeBreathsButton.setText("Merge Breaths")
 
-            # Disconnect matplotlib events
-            if self._merge_motion_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
-                self._merge_motion_cid = None
-            if self._merge_release_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
-                self._merge_release_cid = None
-            if self._merge_key_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
-                self._merge_key_cid = None
+            # Disconnect drag events
+            if self._is_pyqtgraph_backend():
+                if hasattr(self.window.plot_host, 'clear_drag_callback'):
+                    self.window.plot_host.clear_drag_callback()
+                if hasattr(self.window.plot_host, 'clear_key_callback'):
+                    self.window.plot_host.clear_key_callback()
+            elif self._has_matplotlib_canvas():
+                if self._merge_motion_cid is not None:
+                    self.window.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
+                    self._merge_motion_cid = None
+                if self._merge_release_cid is not None:
+                    self.window.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
+                    self._merge_release_cid = None
+                if self._merge_key_cid is not None:
+                    self.window.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
+                    self._merge_key_cid = None
 
             # Clear selection and visual indicators
             self._cancel_merge_selection()
@@ -2500,6 +2915,179 @@ class EditingModes:
                 self.window.plot_host.clear_click_callback()
                 self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
                 self.window._clear_editing_instructions()
+
+    def _on_merge_drag_pyqtgraph(self, event_type, xdata, ydata, event):
+        """Handle PyQtGraph drag events for merge peaks mode.
+
+        Args:
+            event_type: 'press', 'move', or 'release'
+            xdata: X coordinate in data space
+            ydata: Y coordinate in data space
+            event: Event wrapper object
+        """
+        if not getattr(self, "_merge_peaks_mode", False):
+            return
+
+        if event_type == 'press':
+            # Start drag - same logic as _on_plot_click_merge_peaks
+            # If 2 peaks are already selected, check for click on selected peaks to merge
+            if len(self._selected_peaks) == 2:
+                st = self.window.state
+                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                t, y = self.window._current_trace()
+                if t is not None:
+                    spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+                    if st.stim_chan and spans:
+                        t0 = spans[0][0]
+                        t_plot = t - t0
+                    else:
+                        t_plot = t
+
+                    # Check if click is near either selected peak
+                    peak_times = t_plot[self._selected_peaks]
+                    half_win_s = float(getattr(self, "_peak_edit_half_win_s", 0.08))
+                    distances = np.abs(peak_times - xdata)
+
+                    if np.min(distances) < half_win_s:
+                        print(f"[merge-peaks] Click near selected peak, executing merge...")
+                        self._execute_merge()
+                        return
+                    elif np.min(distances) > half_win_s * 2:
+                        print(f"[merge-peaks] Click far from selected peaks, deselecting...")
+                        self._cancel_merge_selection()
+                        self.window._log_status_message("✗ Selection cleared", 1500)
+                        return
+
+            # Clear previous selection and start new drag
+            self._cancel_merge_selection()
+            self._merge_start_x = xdata
+            print(f"[merge-peaks] Started drag at x={xdata:.3f}")
+
+        elif event_type == 'move':
+            # Update drag visual
+            if self._merge_start_x is None:
+                return
+
+            x_start = self._merge_start_x
+            x_end = xdata
+            x_min = min(x_start, x_end)
+            x_max = max(x_start, x_end)
+
+            # Use PyQtGraph's drag visual
+            self.window.plot_host.add_drag_visual(x_min, x_max, color=(255, 255, 0, 50))
+
+        elif event_type == 'release':
+            # Complete drag - find peaks in selection
+            if self._merge_start_x is None:
+                return
+
+            x_start = self._merge_start_x
+            x_end = xdata
+            x_min = min(x_start, x_end)
+            x_max = max(x_start, x_end)
+
+            self._merge_start_x = None
+
+            # Get current sweep and peaks
+            st = self.window.state
+            if st.t is None or st.analyze_chan not in st.sweeps:
+                return
+
+            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+            if pks.size == 0:
+                print("[merge-peaks] No peaks in this sweep")
+                self._cancel_merge_selection()
+                return
+
+            # Get plot time (may be normalized if stim channel)
+            t, y = self.window._current_trace()
+            if t is None:
+                return
+
+            spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+            if st.stim_chan and spans:
+                t0 = spans[0][0]
+                t_plot = t - t0
+            else:
+                t_plot = t
+
+            # Find peaks within selection
+            peak_times = t_plot[pks]
+            selected_mask = (peak_times >= x_min) & (peak_times <= x_max)
+            selected_peak_indices = pks[selected_mask]
+
+            if len(selected_peak_indices) == 0:
+                print("[merge-peaks] No peaks selected")
+                self._cancel_merge_selection()
+                self.window._log_status_message("✗ No peaks in selection", 2000)
+                return
+            elif len(selected_peak_indices) == 1:
+                print("[merge-peaks] Only 1 peak selected, need 2")
+                self._cancel_merge_selection()
+                self.window._log_status_message("✗ Need to select exactly 2 peaks", 2000)
+                return
+            elif len(selected_peak_indices) > 2:
+                print(f"[merge-peaks] Too many peaks selected ({len(selected_peak_indices)})")
+                self._cancel_merge_selection()
+                self.window._log_status_message(f"✗ Too many peaks ({len(selected_peak_indices)})", 2000)
+                return
+
+            # Exactly 2 peaks selected!
+            self._selected_peaks = list(selected_peak_indices)
+            print(f"[merge-peaks] Selected 2 peaks at indices {self._selected_peaks}")
+            self.window._log_status_message("✓ 2 peaks selected. Click to merge or ESC to cancel.", 5000)
+
+            # Highlight selected peaks using PyQtGraph scatter
+            self._highlight_selected_peaks_pyqtgraph(t_plot, y)
+
+    def _on_merge_key_pyqtgraph(self, key, modifiers):
+        """Handle keyboard events for merge peaks in PyQtGraph mode."""
+        if not getattr(self, "_merge_peaks_mode", False):
+            return
+
+        if key == 'enter':
+            if len(self._selected_peaks) == 2:
+                print("[merge-peaks] Enter key pressed, executing merge...")
+                self._execute_merge()
+            else:
+                print("[merge-peaks] Enter pressed but no 2 peaks selected")
+        elif key == 'escape':
+            print("[merge-peaks] Escape pressed, canceling...")
+            self._cancel_merge_selection()
+            self.window._log_status_message("✗ Selection cleared", 1500)
+
+    def _highlight_selected_peaks_pyqtgraph(self, t_plot, y):
+        """Highlight selected peaks in PyQtGraph mode."""
+        if not self._selected_peaks:
+            return
+
+        try:
+            import pyqtgraph as pg
+            main_plot = self.window.plot_host._get_main_plot()
+            if main_plot is None:
+                return
+
+            # Remove old highlight
+            if hasattr(self, '_merge_highlight_scatter') and self._merge_highlight_scatter is not None:
+                try:
+                    main_plot.removeItem(self._merge_highlight_scatter)
+                except:
+                    pass
+
+            # Create highlight scatter
+            peak_times = t_plot[self._selected_peaks]
+            peak_values = y[self._selected_peaks]
+            self._merge_highlight_scatter = pg.ScatterPlotItem(
+                x=peak_times, y=peak_values,
+                size=20, brush=pg.mkBrush(255, 215, 0, 180),  # Gold with alpha
+                pen=pg.mkPen(255, 165, 0, width=2),  # Orange outline
+                symbol='o'
+            )
+            self._merge_highlight_scatter.setZValue(50)
+            main_plot.addItem(self._merge_highlight_scatter)
+        except Exception as e:
+            print(f"[merge-peaks] Error highlighting peaks: {e}")
 
     def _on_plot_click_merge_peaks(self, xdata, ydata, event):
         """Handle clicks for merge mode: drag to select, double-click to merge, click away to deselect."""
@@ -2819,11 +3407,27 @@ class EditingModes:
         self._selected_peaks = []
         self._merge_start_x = None
 
-        # Remove visual indicator
+        # Remove matplotlib visual indicator
         if self._merge_drag_artist:
             try:
                 self._merge_drag_artist.remove()
             except:
                 pass
             self._merge_drag_artist = None
-            self.window.plot_host.canvas.draw_idle()
+            if self._has_matplotlib_canvas():
+                self.window.plot_host.canvas.draw_idle()
+
+        # Remove PyQtGraph visual indicators
+        if self._is_pyqtgraph_backend():
+            # Clear drag visual
+            if hasattr(self.window.plot_host, '_clear_drag_visual'):
+                self.window.plot_host._clear_drag_visual()
+            # Clear highlight scatter
+            if hasattr(self, '_merge_highlight_scatter') and self._merge_highlight_scatter is not None:
+                try:
+                    main_plot = self.window.plot_host._get_main_plot()
+                    if main_plot:
+                        main_plot.removeItem(self._merge_highlight_scatter)
+                except:
+                    pass
+                self._merge_highlight_scatter = None

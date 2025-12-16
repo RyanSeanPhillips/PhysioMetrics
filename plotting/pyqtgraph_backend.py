@@ -23,6 +23,27 @@ try:
     import pyqtgraph as pg
     from pyqtgraph import PlotWidget, GraphicsLayoutWidget
     PYQTGRAPH_AVAILABLE = True
+
+    # Monkey-patch PyQtGraph to suppress 'autoRangeEnabled' AttributeError
+    # This error occurs when PlotDataItems try to access their view during reparenting
+    # (e.g., when GraphicsLayoutWidget.clear() is called and items reference stale views)
+    # The error doesn't affect functionality, just causes console noise
+    if hasattr(pg, 'PlotDataItem'):
+        _original_viewRangeChanged = pg.PlotDataItem.viewRangeChanged
+
+        def _safe_viewRangeChanged(self):
+            """Wrapped viewRangeChanged that handles stale view references gracefully."""
+            try:
+                _original_viewRangeChanged(self)
+            except AttributeError as e:
+                if 'autoRangeEnabled' in str(e):
+                    # Silently ignore - this happens during reparenting and doesn't affect functionality
+                    pass
+                else:
+                    raise  # Re-raise other AttributeErrors
+
+        pg.PlotDataItem.viewRangeChanged = _safe_viewRangeChanged
+
 except ImportError:
     PYQTGRAPH_AVAILABLE = False
     print("[PyQtGraph Backend] pyqtgraph not installed. Install with: pip install pyqtgraph")
@@ -67,6 +88,21 @@ class _MatplotlibCompatEvent:
         # Map Qt button to matplotlib convention
         self.button = self._BUTTON_MAP.get(qt_val, 1)
 
+        # Store keyboard modifiers from event (more reliable than QApplication.keyboardModifiers())
+        # This captures the modifier state at the time of the event, not when handler runs
+        try:
+            qt_modifiers = pyqt_event.modifiers()
+            self.shift_held = bool(qt_modifiers & Qt.KeyboardModifier.ShiftModifier)
+            self.ctrl_held = bool(qt_modifiers & Qt.KeyboardModifier.ControlModifier)
+            self.alt_held = bool(qt_modifiers & Qt.KeyboardModifier.AltModifier)
+        except:
+            # Fallback to QApplication if event doesn't have modifiers
+            from PyQt6.QtWidgets import QApplication
+            qt_modifiers = QApplication.keyboardModifiers()
+            self.shift_held = bool(qt_modifiers & Qt.KeyboardModifier.ShiftModifier)
+            self.ctrl_held = bool(qt_modifiers & Qt.KeyboardModifier.ControlModifier)
+            self.alt_held = bool(qt_modifiers & Qt.KeyboardModifier.AltModifier)
+
     def __getattr__(self, name):
         """Forward unknown attributes to the underlying PyQtGraph event."""
         return getattr(self._pyqt_event, name)
@@ -89,10 +125,10 @@ class PyQtGraphPlotHost(QWidget):
         if not PYQTGRAPH_AVAILABLE:
             raise ImportError("pyqtgraph is required for PyQtGraphPlotHost")
 
-        # Configure pyqtgraph for performance
+        # Configure pyqtgraph for quality and performance
         pg.setConfigOptions(
-            antialias=False,  # Faster rendering
-            useOpenGL=True,   # GPU acceleration
+            antialias=True,   # Smooth lines (prevents stair-step aliasing on vertical strokes)
+            useOpenGL=True,   # GPU acceleration (minimizes performance impact of antialiasing)
             enableExperimental=True,
         )
 
@@ -157,6 +193,21 @@ class PyQtGraphPlotHost(QWidget):
         # Disable default context menu (we handle right-click for editing)
         self.plot_widget.setMenuEnabled(False)
 
+        # Drag support for editing modes
+        self._drag_callback = None  # Callback for drag events: fn(event_type, xdata, ydata, event)
+        self._drag_start_pos = None  # Scene position where drag started
+        self._dragging = False  # Are we currently dragging?
+        self._drag_visual = None  # Visual indicator during drag (e.g., selection rectangle)
+
+        # Keyboard event callback
+        self._key_callback = None  # Callback for key events: fn(key, modifiers)
+
+        # Connect scene mouse events for drag support
+        self.graphics_layout.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+
+        # Make widget focusable for keyboard events
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
         # Layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -210,7 +261,9 @@ class PyQtGraphPlotHost(QWidget):
 
     def set_xlim(self, x0: float, x1: float):
         """Set x-axis limits."""
-        self.plot_widget.setXRange(x0, x1, padding=0)
+        main_plot = self._get_main_plot()
+        if main_plot is not None:
+            main_plot.setXRange(x0, x1, padding=0)
         self._last_single["xlim"] = (x0, x1)
 
     def disable_autorange(self):
@@ -233,6 +286,15 @@ class PyQtGraphPlotHost(QWidget):
 
         This is the primary plotting method, matching PlotHost API.
         """
+        # Use _get_main_plot() to get valid plot reference
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            # Fallback to plot_widget if available
+            main_plot = self.plot_widget
+            if main_plot is None:
+                print("[PyQtGraph] Warning: No valid plot widget for show_trace_with_spans")
+                return
+
         # Save previous view
         prev_xlim = self._last_single["xlim"] if self._preserve_x else None
 
@@ -246,7 +308,7 @@ class PyQtGraphPlotHost(QWidget):
         t_plot, y_plot = self._downsample(t, y, max_points)
 
         # Plot main trace
-        self._main_trace = self.plot_widget.plot(
+        self._main_trace = main_plot.plot(
             t_plot, y_plot,
             pen=pg.mkPen(trace_color, width=1),
             name='trace'
@@ -261,7 +323,7 @@ class PyQtGraphPlotHost(QWidget):
                     movable=False
                 )
                 region.setZValue(-10)  # Behind trace
-                self.plot_widget.addItem(region)
+                main_plot.addItem(region)
                 self._span_items.append(region)
 
         # Add zero line
@@ -270,19 +332,19 @@ class PyQtGraphPlotHost(QWidget):
             pen=pg.mkPen('#666666', width=1, style=Qt.PenStyle.DashLine)
         )
         zero_line.setZValue(-5)
-        self.plot_widget.addItem(zero_line)
+        main_plot.addItem(zero_line)
         self._span_items.append(zero_line)
 
         # Set title and labels
-        self.plot_widget.setTitle(title, color='#d4d4d4' if self._current_theme == 'dark' else '#000000')
-        self.plot_widget.setLabel('left', ylabel)
-        self.plot_widget.setLabel('bottom', 'Time (s)')
+        main_plot.setTitle(title, color='#d4d4d4' if self._current_theme == 'dark' else '#000000')
+        main_plot.setLabel('left', ylabel)
+        main_plot.setLabel('bottom', 'Time (s)')
 
         # Restore or auto-scale view
         if prev_xlim is not None:
-            self.plot_widget.setXRange(prev_xlim[0], prev_xlim[1], padding=0)
+            main_plot.setXRange(prev_xlim[0], prev_xlim[1], padding=0)
         else:
-            self.plot_widget.autoRange()
+            main_plot.autoRange()
 
         # Store view
         self._store_view()
@@ -479,20 +541,27 @@ class PyQtGraphPlotHost(QWidget):
 
     # ------- Threshold Line -------
     def update_threshold_line(self, threshold_value):
-        """Draw horizontal threshold line."""
+        """Draw horizontal threshold line with drag support and histogram display."""
         main_plot = self._get_main_plot()
 
+        # Clear existing threshold line
         if self._threshold_line is not None:
             try:
                 if main_plot:
                     main_plot.removeItem(self._threshold_line)
             except:
                 pass
+            self._threshold_line = None
 
         if threshold_value is None or main_plot is None:
-            self._threshold_line = None
             return
 
+        # Ensure main_plot has a valid ViewBox before proceeding
+        if not hasattr(main_plot, 'vb') or main_plot.vb is None:
+            print("[threshold] Warning: main_plot has no valid ViewBox, skipping threshold line")
+            return
+
+        # Create draggable threshold line
         self._threshold_line = pg.InfiniteLine(
             pos=threshold_value,
             angle=0,
@@ -500,10 +569,68 @@ class PyQtGraphPlotHost(QWidget):
             movable=True
         )
         self._threshold_line.setZValue(20)
-        main_plot.addItem(self._threshold_line)
+
+        try:
+            main_plot.addItem(self._threshold_line)
+        except Exception as e:
+            print(f"[threshold] Warning: Failed to add threshold line: {e}")
+            self._threshold_line = None
+            return
+
+        # Store reference for callbacks
+        plot_host = self
+
+        # Connect drag signals
+        def on_threshold_dragging():
+            """Update histogram colors during drag. Show histogram if not yet visible."""
+            if plot_host._threshold_line is not None:
+                new_val = plot_host._threshold_line.value()
+                if new_val > 0:
+                    # Show histogram if not yet visible (first drag event)
+                    if not hasattr(plot_host, '_histogram_items') or not plot_host._histogram_items:
+                        print("[threshold] First drag event - showing histogram")
+                        plot_host._show_threshold_histogram()
+                    else:
+                        # Update colors for existing histogram
+                        plot_host._update_threshold_histogram_colors(new_val)
+
+        def on_threshold_drag_finished():
+            """Update main window threshold and clear histogram."""
+            if plot_host._threshold_line is None:
+                return
+            new_val = plot_host._threshold_line.value()
+            if new_val > 0:
+                # Update main window threshold
+                main_window = plot_host._find_main_window()
+                if main_window:
+                    main_window.peak_height_threshold = new_val
+                    main_window.peak_prominence = new_val
+                    print(f"[threshold] Updated to {new_val:.4f}")
+
+                    # Sync with Analysis Options dialog if open
+                    try:
+                        prom_dialog = getattr(main_window, 'prominence_dialog', None)
+                        if prom_dialog and hasattr(prom_dialog, 'update_threshold_from_external'):
+                            prom_dialog.update_threshold_from_external(new_val)
+                    except:
+                        pass
+
+            # Clear histogram
+            plot_host._clear_threshold_histogram()
+
+        # sigDragged fires during drag, sigPositionChangeFinished when released
+        self._threshold_line.sigDragged.connect(on_threshold_dragging)
+        self._threshold_line.sigPositionChangeFinished.connect(on_threshold_drag_finished)
+
+        # Show histogram on click (before drag starts)
+        def on_threshold_clicked(line, ev):
+            print("[threshold] Line clicked - showing histogram")
+            plot_host._show_threshold_histogram()
+
+        self._threshold_line.sigClicked.connect(on_threshold_clicked)
 
     def clear_threshold_line(self):
-        """Remove threshold line."""
+        """Remove threshold line and histogram."""
         if self._threshold_line is not None:
             main_plot = self._get_main_plot()
             try:
@@ -512,17 +639,262 @@ class PyQtGraphPlotHost(QWidget):
             except:
                 pass
             self._threshold_line = None
+        self._clear_threshold_histogram()
+
+    def _find_main_window(self):
+        """Find the main application window."""
+        widget = self
+        while widget is not None:
+            if hasattr(widget, 'state') and hasattr(widget, 'peak_height_threshold'):
+                return widget
+            widget = getattr(widget, 'parent', lambda: None)()
+        return None
+
+    def _show_threshold_histogram(self):
+        """Show sideways histogram of peak heights on the main plot (like matplotlib version)."""
+        import numpy as np
+
+        print("[histogram] _show_threshold_histogram called")
+
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            print("[histogram] No main plot available")
+            return
+
+        # Ensure we have a proper plot with ViewBox (not just GraphicsLayoutWidget)
+        if not hasattr(main_plot, 'vb') or main_plot.vb is None:
+            print("[histogram] main_plot has no valid ViewBox")
+            return
+
+        # Additional check: ensure main_plot is a PlotItem, not GraphicsLayoutWidget
+        if not hasattr(main_plot, 'addItem'):
+            print("[histogram] main_plot doesn't support addItem")
+            return
+
+        main_window = self._find_main_window()
+        if main_window is None:
+            print("[histogram] main_window not found")
+            return
+        if not hasattr(main_window, 'state'):
+            print("[histogram] main_window has no 'state' attribute")
+            return
+
+        print(f"[histogram] Found main_window, has state: {hasattr(main_window, 'state')}")
+
+        st = main_window.state
+
+        # Collect peak heights from all_peak_heights if cached, otherwise from peaks
+        if hasattr(main_window, 'all_peak_heights') and main_window.all_peak_heights is not None:
+            peak_heights = main_window.all_peak_heights
+        else:
+            # Collect from detected peaks
+            all_heights = []
+            for s in range(len(st.peaks_by_sweep)):
+                pks = st.peaks_by_sweep.get(s, None)
+                if pks is not None and len(pks) > 0:
+                    y_proc = main_window._get_processed_for(st.analyze_chan, s)
+                    if y_proc is not None:
+                        all_heights.extend(y_proc[pks])
+
+            if not all_heights:
+                return
+
+            peak_heights = np.array(all_heights)
+            main_window.all_peak_heights = peak_heights
+
+        if len(peak_heights) == 0:
+            return
+
+        # Get histogram settings
+        num_bins = getattr(main_window, 'histogram_num_bins', 200)
+        percentile_cutoff = getattr(main_window, 'histogram_percentile_cutoff', 99)
+
+        # Calculate percentile cutoff
+        if percentile_cutoff < 100:
+            percentile_val = np.percentile(peak_heights, percentile_cutoff)
+            peaks_for_hist = peak_heights[peak_heights <= percentile_val]
+            hist_range = (peaks_for_hist.min(), percentile_val)
+        else:
+            peaks_for_hist = peak_heights
+            hist_range = None
+
+        if len(peaks_for_hist) == 0:
+            return
+
+        # Get x-axis limits to position histogram at left edge
+        x_range = main_plot.viewRange()[0]
+        x_min = x_range[0]
+        x_span = x_range[1] - x_range[0]
+
+        # Get current threshold
+        current_threshold = getattr(main_window, 'peak_height_threshold', None)
+        if current_threshold is None:
+            return
+
+        # Create histogram
+        counts, bins = np.histogram(peaks_for_hist, bins=num_bins, range=hist_range)
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        bin_height = bins[1] - bins[0]
+
+        # Scale histogram to 10% of x-axis range
+        max_count = np.max(counts)
+        if max_count <= 0:
+            return
+
+        scale_factor = (0.1 * x_span) / max_count
+        scaled_counts = counts * scale_factor
+
+        # Cache data for fast color updates
+        self._histogram_bin_centers = bin_centers
+        self._histogram_scaled_counts = scaled_counts
+        self._histogram_x_min = x_min
+        self._histogram_bin_height = bin_height
+
+        # Clear any existing histogram
+        self._clear_threshold_histogram()
+
+        # Draw histogram as horizontal bars (sideways histogram along Y-axis)
+        # Each bar extends from x_min to x_min + count, at height bin_center
+        self._histogram_items = []
+
+        below_mask = bin_centers < current_threshold
+        above_mask = bin_centers >= current_threshold
+
+        def draw_horizontal_bars(bins_y, counts_x, color):
+            """Draw horizontal bar chart - bars extend rightward from x_min."""
+            items = []
+            for y_center, width in zip(bins_y, counts_x):
+                if width > 0:
+                    # Create a rectangle: x from x_min to x_min+width, y from y_center-h/2 to y_center+h/2
+                    y_bottom = y_center - bin_height / 2
+                    y_top = y_center + bin_height / 2
+                    # Draw as a closed polygon (rectangle)
+                    x_pts = [x_min, x_min + width, x_min + width, x_min, x_min]
+                    y_pts = [y_bottom, y_bottom, y_top, y_top, y_bottom]
+                    bar = pg.PlotCurveItem(x_pts, y_pts,
+                                          pen=pg.mkPen(color[0], color[1], color[2], 200, width=0.5),
+                                          brush=pg.mkBrush(*color),
+                                          fillLevel=None)
+                    bar.setZValue(99)
+                    main_plot.addItem(bar)
+                    items.append(bar)
+            return items
+
+        # Gray bars for below threshold
+        if np.any(below_mask):
+            below_bins = bin_centers[below_mask]
+            below_counts = scaled_counts[below_mask]
+            gray_items = draw_horizontal_bars(below_bins, below_counts, (128, 128, 128, 180))
+            self._histogram_items.extend(gray_items)
+
+        # Red bars for above threshold
+        if np.any(above_mask):
+            above_bins = bin_centers[above_mask]
+            above_counts = scaled_counts[above_mask]
+            red_items = draw_horizontal_bars(above_bins, above_counts, (220, 60, 60, 180))
+            self._histogram_items.extend(red_items)
+
+        print(f"[histogram] Created histogram with {len(self._histogram_items)} items, "
+              f"{np.sum(below_mask)} below threshold, {np.sum(above_mask)} above threshold")
+
+    def _update_threshold_histogram_colors(self, new_threshold):
+        """Update histogram colors based on new threshold (fast update during drag)."""
+        import numpy as np
+
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
+        # Check if we have cached histogram data
+        if (not hasattr(self, '_histogram_bin_centers') or
+            self._histogram_bin_centers is None):
+            return
+
+        bin_centers = self._histogram_bin_centers
+        scaled_counts = self._histogram_scaled_counts
+        x_min = self._histogram_x_min
+        bin_height = self._histogram_bin_height
+
+        # Clear existing histogram items
+        self._clear_threshold_histogram()
+
+        # Redraw with new colors using horizontal bars
+        self._histogram_items = []
+
+        below_mask = bin_centers < new_threshold
+        above_mask = bin_centers >= new_threshold
+
+        def draw_horizontal_bars(bins_y, counts_x, color):
+            """Draw horizontal bar chart - bars extend rightward from x_min."""
+            items = []
+            for y_center, width in zip(bins_y, counts_x):
+                if width > 0:
+                    y_bottom = y_center - bin_height / 2
+                    y_top = y_center + bin_height / 2
+                    x_pts = [x_min, x_min + width, x_min + width, x_min, x_min]
+                    y_pts = [y_bottom, y_bottom, y_top, y_top, y_bottom]
+                    bar = pg.PlotCurveItem(x_pts, y_pts,
+                                          pen=pg.mkPen(color[0], color[1], color[2], 200, width=0.5),
+                                          brush=pg.mkBrush(*color),
+                                          fillLevel=None)
+                    bar.setZValue(99)
+                    main_plot.addItem(bar)
+                    items.append(bar)
+            return items
+
+        # Gray bars for below threshold
+        if np.any(below_mask):
+            below_bins = bin_centers[below_mask]
+            below_counts = scaled_counts[below_mask]
+            gray_items = draw_horizontal_bars(below_bins, below_counts, (128, 128, 128, 180))
+            self._histogram_items.extend(gray_items)
+
+        # Red bars for above threshold
+        if np.any(above_mask):
+            above_bins = bin_centers[above_mask]
+            above_counts = scaled_counts[above_mask]
+            red_items = draw_horizontal_bars(above_bins, above_counts, (220, 60, 60, 180))
+            self._histogram_items.extend(red_items)
+
+    def _clear_threshold_histogram(self):
+        """Remove threshold histogram from plot."""
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
+        if hasattr(self, '_histogram_items') and self._histogram_items:
+            for item in self._histogram_items:
+                try:
+                    main_plot.removeItem(item)
+                except:
+                    pass
+            self._histogram_items = []
+
+        # Clear cached data
+        self._histogram_bin_centers = None
+        self._histogram_scaled_counts = None
+        self._histogram_x_min = None
 
     # ------- Y2 Axis (Secondary Y-axis) -------
     def _get_main_plot(self):
         """Get the main plot widget safely, avoiding stale references."""
         # Priority: ax_main > first subplot > plot_widget
-        if self.ax_main is not None:
-            return self.ax_main
+        # Also validate that the plot has a proper ViewBox to avoid 'autoRangeEnabled' errors
+        candidates = [self.ax_main]
         if self._subplots and len(self._subplots) > 0:
-            return self._subplots[0]
+            candidates.append(self._subplots[0])
         if self.plot_widget is not None:
-            return self.plot_widget
+            candidates.append(self.plot_widget)
+
+        for plot in candidates:
+            if plot is not None and hasattr(plot, 'vb') and plot.vb is not None:
+                return plot
+
+        # Fallback to any non-None candidate (may not have ViewBox yet during init)
+        for plot in candidates:
+            if plot is not None:
+                return plot
+
         return None
 
     def add_or_update_y2(self, t, y2, label: str = "Y2",
@@ -602,6 +974,10 @@ class PyQtGraphPlotHost(QWidget):
 
     def _draw_regions(self, regions, color, use_shade):
         """Draw regions as shaded areas."""
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
         qcolor = QColor(color)
         for start_t, end_t in regions:
             if use_shade:
@@ -611,7 +987,7 @@ class PyQtGraphPlotHost(QWidget):
                     movable=False
                 )
                 region.setZValue(-8)
-                self.plot_widget.addItem(region)
+                main_plot.addItem(region)
                 self._region_overlays.append(region)
 
     def _extract_regions(self, t, mask):
@@ -652,7 +1028,7 @@ class PyQtGraphPlotHost(QWidget):
                 pass
         self._region_overlays.clear()
 
-    # ------- Click Handling -------
+    # ------- Click and Drag Handling -------
     def set_click_callback(self, fn):
         """Set callback for plot clicks: fn(xdata, ydata, event).
         Also disables pan/zoom to allow click-based editing."""
@@ -667,6 +1043,199 @@ class PyQtGraphPlotHost(QWidget):
         """Remove click callback and restore normal mouse behavior."""
         self._external_click_cb = None
         self._set_mouse_mode_normal()
+
+    def set_drag_callback(self, fn):
+        """Set callback for drag events: fn(event_type, xdata, ydata, event).
+        event_type is 'press', 'move', or 'release'.
+        Also disables pan/zoom to allow drag-based editing."""
+        self._drag_callback = fn
+        if fn is not None:
+            self._set_mouse_mode_edit()
+            # Install event filter for mouse press/release detection
+            self.graphics_layout.scene().installEventFilter(self)
+        else:
+            # Only restore normal mode if no click callback either
+            if self._external_click_cb is None:
+                self._set_mouse_mode_normal()
+            self.graphics_layout.scene().removeEventFilter(self)
+            self._clear_drag_visual()
+
+    def clear_drag_callback(self):
+        """Remove drag callback."""
+        self._drag_callback = None
+        try:
+            self.graphics_layout.scene().removeEventFilter(self)
+        except:
+            pass
+        self._clear_drag_visual()
+        # Only restore normal mode if no click callback either
+        if self._external_click_cb is None:
+            self._set_mouse_mode_normal()
+
+    def eventFilter(self, obj, event):
+        """Event filter for capturing mouse press/release for drag operations."""
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QMouseEvent
+
+        if self._drag_callback is None:
+            return False
+
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return False
+
+        if event.type() == QEvent.Type.GraphicsSceneMousePress:
+            # Only handle left button for drag
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = event.scenePos()
+                if main_plot.sceneBoundingRect().contains(pos):
+                    # Convert to data coordinates
+                    mouse_point = main_plot.vb.mapSceneToView(pos)
+                    x_data = mouse_point.x()
+                    y_data = mouse_point.y()
+
+                    # Create wrapped event
+                    wrapped = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
+
+                    # Call drag callback FIRST to check if it wants to handle specially
+                    # (e.g., Ctrl+Shift+click for full sweep omit should NOT start a drag)
+                    result = self._drag_callback('press', x_data, y_data, wrapped)
+
+                    # If callback returns 'handled', don't start drag operation
+                    if result == 'handled':
+                        # Explicitly clear any drag state to prevent accidental drags
+                        self._dragging = False
+                        self._drag_start_pos = None
+                        self._clear_drag_visual()
+                        return True  # Consume the event but don't start drag
+
+                    # Normal case - start drag operation
+                    self._drag_start_pos = pos
+                    self._dragging = True
+                    return True  # Consume the event
+
+        elif event.type() == QEvent.Type.GraphicsSceneMouseRelease:
+            if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+                self._dragging = False
+                pos = event.scenePos()
+                # Convert to data coordinates
+                mouse_point = main_plot.vb.mapSceneToView(pos)
+                x_data = mouse_point.x()
+                y_data = mouse_point.y()
+                # Create wrapped event
+                wrapped = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
+                self._drag_callback('release', x_data, y_data, wrapped)
+                self._drag_start_pos = None
+                self._clear_drag_visual()
+                return True  # Consume the event
+
+        return False  # Don't consume other events
+
+    def _on_scene_mouse_moved(self, pos):
+        """Handle scene mouse movement for drag operations."""
+        if not self._dragging or self._drag_callback is None:
+            return
+
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
+        # pos is already in scene coordinates
+        if main_plot.sceneBoundingRect().contains(pos):
+            mouse_point = main_plot.vb.mapSceneToView(pos)
+            x_data = mouse_point.x()
+            y_data = mouse_point.y()
+            # Create a simple event wrapper (no Qt event available here)
+            class SimpleDragEvent:
+                def __init__(self, x, y, plot):
+                    self.xdata = x
+                    self.ydata = y
+                    self.inaxes = plot
+                    self.button = 1  # Left button
+            wrapped = SimpleDragEvent(x_data, y_data, main_plot)
+            self._drag_callback('move', x_data, y_data, wrapped)
+
+    def add_drag_visual(self, x_start, x_end, color=(255, 255, 0, 50)):
+        """Add or update a visual selection rectangle during drag."""
+        main_plot = self._get_main_plot()
+        if main_plot is None:
+            return
+
+        self._clear_drag_visual()
+
+        # Create selection region
+        self._drag_visual = pg.LinearRegionItem(
+            values=[x_start, x_end],
+            brush=pg.mkBrush(*color),
+            pen=pg.mkPen(color[:3], width=1),
+            movable=False
+        )
+        self._drag_visual.setZValue(100)  # On top of everything
+        main_plot.addItem(self._drag_visual)
+
+    def _clear_drag_visual(self):
+        """Remove drag visual indicator."""
+        if self._drag_visual is not None:
+            try:
+                main_plot = self._get_main_plot()
+                if main_plot:
+                    main_plot.removeItem(self._drag_visual)
+            except:
+                pass
+            self._drag_visual = None
+
+    # ------- Keyboard Event Handling -------
+    def set_key_callback(self, fn):
+        """Set callback for keyboard events: fn(key, modifiers).
+        key is a string like 'enter', 'escape', 'left', 'right', etc.
+        modifiers is a dict like {'shift': bool, 'ctrl': bool, 'alt': bool}
+        """
+        self._key_callback = fn
+        if fn is not None:
+            self.setFocus()  # Take focus to receive key events
+
+    def clear_key_callback(self):
+        """Remove keyboard callback."""
+        self._key_callback = None
+
+    def keyPressEvent(self, event):
+        """Handle keyboard events and forward to callback."""
+        from PyQt6.QtCore import Qt as QtCore_Qt
+
+        if self._key_callback is not None:
+            # Map Qt key to string
+            key_map = {
+                QtCore_Qt.Key.Key_Return: 'enter',
+                QtCore_Qt.Key.Key_Enter: 'enter',
+                QtCore_Qt.Key.Key_Escape: 'escape',
+                QtCore_Qt.Key.Key_Left: 'left',
+                QtCore_Qt.Key.Key_Right: 'right',
+                QtCore_Qt.Key.Key_Up: 'up',
+                QtCore_Qt.Key.Key_Down: 'down',
+                QtCore_Qt.Key.Key_Space: 'space',
+                QtCore_Qt.Key.Key_Delete: 'delete',
+                QtCore_Qt.Key.Key_Backspace: 'backspace',
+            }
+
+            key = key_map.get(event.key(), None)
+            if key is None:
+                # Try to get character for letter keys
+                text = event.text()
+                if text and text.isalpha():
+                    key = text.lower()
+
+            if key is not None:
+                modifiers = {
+                    'shift': bool(event.modifiers() & QtCore_Qt.KeyboardModifier.ShiftModifier),
+                    'ctrl': bool(event.modifiers() & QtCore_Qt.KeyboardModifier.ControlModifier),
+                    'alt': bool(event.modifiers() & QtCore_Qt.KeyboardModifier.AltModifier),
+                }
+                self._key_callback(key, modifiers)
+                event.accept()
+                return
+
+        # Pass to parent if not handled
+        super().keyPressEvent(event)
 
     def _set_mouse_mode_edit(self):
         """Disable pan/zoom for click-based editing."""
@@ -744,10 +1313,14 @@ class PyQtGraphPlotHost(QWidget):
         self.clear_y2()
         self.clear_region_overlays()
 
+        # Use _get_main_plot() to avoid stale references after layout.clear()
+        main_plot = self._get_main_plot()
+
         # Clear spans
         for item in self._span_items:
             try:
-                self.plot_widget.removeItem(item)
+                if main_plot:
+                    main_plot.removeItem(item)
             except:
                 pass
         self._span_items.clear()
@@ -755,7 +1328,8 @@ class PyQtGraphPlotHost(QWidget):
         # Clear main trace
         if self._main_trace is not None:
             try:
-                self.plot_widget.removeItem(self._main_trace)
+                if main_plot:
+                    main_plot.removeItem(self._main_trace)
             except:
                 pass
             self._main_trace = None
@@ -763,9 +1337,11 @@ class PyQtGraphPlotHost(QWidget):
     def _store_view(self):
         """Store current view state."""
         try:
-            view_range = self.plot_widget.viewRange()
-            self._last_single["xlim"] = tuple(view_range[0])
-            self._last_single["ylim"] = tuple(view_range[1])
+            main_plot = self._get_main_plot()
+            if main_plot is not None:
+                view_range = main_plot.viewRange()
+                self._last_single["xlim"] = tuple(view_range[0])
+                self._last_single["ylim"] = tuple(view_range[1])
         except:
             pass
 

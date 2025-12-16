@@ -846,6 +846,15 @@ class MainWindow(QMainWindow):
                 self.zscore_global_mean = None
                 self.zscore_global_std = None
 
+                # Clear Y2 plot data (same as on_analyze_channel_changed)
+                st.y2_metric_key = None
+                st.y2_values_by_sweep.clear()
+                self.plot_host.clear_y2()
+                # Reset Y2 dropdown to "None"
+                self.y2plot_dropdown.blockSignals(True)
+                self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
+                self.y2plot_dropdown.blockSignals(False)
+
             st.analyze_chan = pleth_channel
 
             # Clear processing cache so filters are re-applied
@@ -5472,6 +5481,20 @@ class MainWindow(QMainWindow):
         if self.state.t is not None:
             self.redraw_main_plot()
 
+        # Re-register editing mode callbacks on new plot_host if any mode is active
+        if hasattr(self, 'editing_modes'):
+            # If omit mode was active, re-enter it to register callbacks on new plot_host
+            if getattr(self.editing_modes, '_omit_region_mode', False):
+                print(f"[PlotHost] Re-registering omit mode callbacks for {new_backend}")
+                # Exit and re-enter to re-register callbacks
+                self.editing_modes._exit_omit_region_mode()
+                self.editing_modes._enter_omit_region_mode(remove_mode=False)
+            # Similarly for other editing modes if needed
+            elif getattr(self.editing_modes, '_edit_mode', False):
+                print(f"[PlotHost] Re-registering edit mode callbacks for {new_backend}")
+                self.editing_modes._exit_edit_mode()
+                self.editing_modes._enter_edit_mode()
+
     def on_pyqtgraph_toggled(self, checked: bool):
         """Toggle between matplotlib and PyQtGraph plotting backends."""
         from PyQt6.QtWidgets import QMessageBox
@@ -5762,20 +5785,18 @@ class MainWindow(QMainWindow):
             self.redraw_main_plot()
 
     def _refresh_omit_button_label(self):
-        """Update Omit button text based on whether current sweep is omitted."""
-        # If in omit mode, always show "Omit (ON)" regardless of sweep state
+        """Update Omit button text based on omit mode state.
+
+        Simple states:
+        - "Omit" when not in omit mode
+        - "Omit (ON)" when in omit mode
+        """
         if getattr(self.editing_modes, "_omit_region_mode", False):
             self.OmitSweepButton.setText("Omit (ON)")
-            self.OmitSweepButton.setToolTip("Click to exit omit region mode")
-            return
-
-        s = max(0, min(self.state.sweep_idx, self.navigation_manager._sweep_count() - 1))
-        if s in self.state.omitted_sweeps:
-            self.OmitSweepButton.setText("Un-omit")
-            self.OmitSweepButton.setToolTip("This sweep will be excluded from saving and stats.")
+            self.OmitSweepButton.setToolTip("Click to exit omit mode. Ctrl+Shift+click to toggle full sweep.")
         else:
             self.OmitSweepButton.setText("Omit")
-            self.OmitSweepButton.setToolTip("Mark this sweep to be excluded from saving and stats.")
+            self.OmitSweepButton.setToolTip("Click to enter omit mode for marking regions to exclude.")
 
     def on_omit_sweep_clicked(self):
         """Handle Omit Sweep button - simple toggle to enter/exit omit region mode."""

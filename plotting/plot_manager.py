@@ -492,16 +492,45 @@ class PlotManager:
             except:
                 pass
 
-        # Clear and rebuild layout
-        self.plot_host.graphics_layout.clear()
-        self.plot_host._subplots = []
-        self.plot_host.graphics_layout.setBackground(bg_color)
+        # IMPORTANT: Clear Y2 elements BEFORE clearing graphics_layout
+        # Because Y2 viewbox is added to the scene separately and won't be cleared by layout.clear()
+        self._cleanup_y2_elements_pyqtgraph()
 
-        # Reset stale references to avoid errors
+        # Reset ALL stale references BEFORE clearing layout to avoid GraphicsLayoutWidget AttributeError
+        # (items try to access their old parent during clear() and callbacks fire with stale refs)
         self.plot_host.ax_main = None
         self.plot_host.ax_event = None
         self.plot_host.plot_widget = None
-        self.plot_host._y2_line = None  # Clear Y2 reference
+        self.plot_host._main_trace = None
+        self.plot_host._peak_scatter = None
+        self.plot_host._onset_scatter = None
+        self.plot_host._offset_scatter = None
+        self.plot_host._expmin_scatter = None
+        self.plot_host._expoff_scatter = None
+        self.plot_host._sigh_scatter = None
+        self.plot_host._threshold_line = None
+        self.plot_host._threshold_line_neg = None
+        self.plot_host._y2_line = None
+        self.plot_host._y2_viewbox = None
+        self.plot_host._y2_axis = None
+        self.plot_host._y2_update_connection = None
+        self.plot_host._span_items = []
+        self.plot_host._region_overlays = []
+        self.plot_host._subplots = []
+
+        # Clear and rebuild layout
+        # Suppress PyQtGraph's internal 'autoRangeEnabled' AttributeError during clear()
+        # This happens when PlotDataItems try to access their view during reparenting
+        # It's a known PyQtGraph issue that doesn't affect functionality
+        import sys
+        import io
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()  # Temporarily suppress stderr
+        try:
+            self.plot_host.graphics_layout.clear()
+        finally:
+            sys.stderr = old_stderr  # Restore stderr
+        self.plot_host.graphics_layout.setBackground(bg_color)
 
         # Create subplots
         plots = []
@@ -565,12 +594,12 @@ class PlotManager:
             # Choose trace color based on channel type
             channel_trace_color = opto_trace_color if config.channel_type == "Opto Stim" else trace_color
 
-            # Plot trace with smart downsampling
-            # clipToView=True only sends visible data to GPU
-            # autoDownsample uses a peak-preserving algorithm that looks better when zoomed out
-            # downsampleMethod='peak' preserves peaks/valleys for cleaner rendering
-            plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1),
-                      clipToView=True, autoDownsample=True, downsampleMethod='peak')
+            # Plot trace with optimal settings for signal fidelity
+            # clipToView=True only sends visible data to GPU (main performance optimization)
+            # autoDownsample=False gives full resolution for visible data
+            # Use width=1.2 for slightly thicker lines that render better
+            plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
+                      clipToView=True, autoDownsample=False)
 
             # Add zero line
             zero_line = pg.InfiniteLine(pos=0, angle=0,
@@ -618,8 +647,17 @@ class PlotManager:
                 # Draw breath markers
                 self._draw_breath_markers_pyqtgraph(ax_main, s, t_plot, primary_y_data)
 
+                # Draw sigh markers (stars)
+                self._draw_sigh_markers_pyqtgraph(ax_main, s, t_plot, primary_y_data)
+
                 # Draw region overlays (eupnea, apnea, etc.)
                 self._draw_region_overlays_pyqtgraph(ax_main, s, t_plot, t0)
+
+                # Draw omitted region overlays
+                self._draw_omitted_regions_pyqtgraph(ax_main, s, t_plot, t0)
+
+                # Draw threshold line
+                self.refresh_threshold_lines()
 
                 # Draw Y2 metric if configured
                 self._draw_y2_metric_pyqtgraph(s, t_plot)
@@ -647,7 +685,7 @@ class PlotManager:
                 self.plot_host.disable_autorange()
 
     def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
-        """Draw peak markers on PyQtGraph plot."""
+        """Draw peak markers on PyQtGraph plot, with gray markers for omitted regions."""
         import pyqtgraph as pg
         st = self.state
 
@@ -658,21 +696,43 @@ class PlotManager:
         if len(peak_idxs) == 0:
             return
 
-        # Get peak times and values
-        t_peaks = t_plot[peak_idxs]
-        y_peaks = y_data[peak_idxs]
+        # Separate peaks into normal and omitted groups
+        normal_pks = []
+        omitted_pks = []
+        for pk in peak_idxs:
+            if self._is_peak_in_omitted_region(sweep_idx, pk):
+                omitted_pks.append(pk)
+            else:
+                normal_pks.append(pk)
 
-        # Create scatter plot for peaks
-        scatter = pg.ScatterPlotItem(
-            x=t_peaks, y=y_peaks,
-            size=10, brush=pg.mkBrush(255, 0, 0),
-            pen=None
-        )
-        scatter.setZValue(10)
-        plot.addItem(scatter)
+        # Draw normal peaks in red
+        if normal_pks:
+            normal_pks = np.array(normal_pks)
+            t_peaks = t_plot[normal_pks]
+            y_peaks = y_data[normal_pks]
+            scatter = pg.ScatterPlotItem(
+                x=t_peaks, y=y_peaks,
+                size=10, brush=pg.mkBrush(255, 0, 0),
+                pen=None
+            )
+            scatter.setZValue(10)
+            plot.addItem(scatter)
+
+        # Draw omitted peaks in gray
+        if omitted_pks:
+            omitted_pks = np.array(omitted_pks)
+            t_peaks_omit = t_plot[omitted_pks]
+            y_peaks_omit = y_data[omitted_pks]
+            scatter_omit = pg.ScatterPlotItem(
+                x=t_peaks_omit, y=y_peaks_omit,
+                size=10, brush=pg.mkBrush(128, 128, 128, 150),
+                pen=None
+            )
+            scatter_omit.setZValue(9)  # Slightly below normal peaks
+            plot.addItem(scatter_omit)
 
     def _draw_breath_markers_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
-        """Draw breath event markers on PyQtGraph plot."""
+        """Draw breath event markers on PyQtGraph plot, with gray for omitted regions."""
         import pyqtgraph as pg
         st = self.state
 
@@ -680,6 +740,7 @@ class PlotManager:
             return
 
         breath = st.breath_by_sweep[sweep_idx]
+        gray_color = (128, 128, 128, 150)  # Semi-transparent gray for omitted
 
         def add_markers(indices, color, symbol):
             if indices is None or len(indices) == 0:
@@ -687,13 +748,37 @@ class PlotManager:
             valid = indices[indices < len(t_plot)]
             if len(valid) == 0:
                 return
-            scatter = pg.ScatterPlotItem(
-                x=t_plot[valid], y=y_data[valid],
-                size=8, brush=pg.mkBrush(*color),
-                symbol=symbol, pen=None
-            )
-            scatter.setZValue(8)
-            plot.addItem(scatter)
+
+            # Separate into normal and omitted
+            normal_idx = []
+            omit_idx = []
+            for idx in valid:
+                if self._is_peak_in_omitted_region(sweep_idx, idx):
+                    omit_idx.append(idx)
+                else:
+                    normal_idx.append(idx)
+
+            # Draw normal markers with original color
+            if normal_idx:
+                normal_idx = np.array(normal_idx)
+                scatter = pg.ScatterPlotItem(
+                    x=t_plot[normal_idx], y=y_data[normal_idx],
+                    size=8, brush=pg.mkBrush(*color),
+                    symbol=symbol, pen=None
+                )
+                scatter.setZValue(8)
+                plot.addItem(scatter)
+
+            # Draw omitted markers in gray
+            if omit_idx:
+                omit_idx = np.array(omit_idx)
+                scatter_omit = pg.ScatterPlotItem(
+                    x=t_plot[omit_idx], y=y_data[omit_idx],
+                    size=8, brush=pg.mkBrush(*gray_color),
+                    symbol=symbol, pen=None
+                )
+                scatter_omit.setZValue(7)  # Slightly below normal markers
+                plot.addItem(scatter_omit)
 
         # Onsets (green triangles)
         add_markers(breath.get('onsets'), (46, 204, 113), 't')
@@ -702,24 +787,123 @@ class PlotManager:
         # Exp mins (blue squares)
         add_markers(breath.get('expmins'), (31, 120, 180), 's')
 
-    def _draw_region_overlays_pyqtgraph(self, plot, sweep_idx, t_plot, t0):
-        """Draw region overlays (eupnea, apnea, sniffing, outliers) on PyQtGraph plot."""
+    def _draw_sigh_markers_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
+        """Draw sigh markers (gold stars) on PyQtGraph plot."""
         import pyqtgraph as pg
         st = self.state
 
-        def add_region(start_t, end_t, color_rgba):
-            """Helper to add a region with proper offset and no border."""
+        sigh_idx = getattr(st, "sigh_by_sweep", {}).get(sweep_idx, None)
+        if sigh_idx is None or len(sigh_idx) == 0:
+            return
+
+        # Filter to valid indices
+        valid_idx = np.array([i for i in sigh_idx if i < len(t_plot)])
+        if len(valid_idx) == 0:
+            return
+
+        t_sigh = t_plot[valid_idx]
+
+        # Add vertical offset (7% of y-span)
+        offset_frac = float(getattr(self.window, "_sigh_offset_frac", 0.07))
+        try:
+            y_span = float(np.nanmax(y_data) - np.nanmin(y_data))
+            y_off = offset_frac * (y_span if np.isfinite(y_span) and y_span > 0 else 1.0)
+        except Exception:
+            y_off = offset_frac
+        y_sigh = y_data[valid_idx] + y_off
+
+        # Theme-aware colors
+        is_dark_mode = self.plot_host._current_theme == 'dark'
+        if is_dark_mode:
+            sigh_color = (255, 215, 0)  # Gold RGB
+            edge_color = (255, 215, 0)
+        else:
+            sigh_color = (255, 215, 0)  # Gold RGB
+            edge_color = (0, 0, 0)      # Black outline for light mode
+
+        # Create star scatter plot
+        scatter = pg.ScatterPlotItem(
+            x=t_sigh, y=y_sigh,
+            size=16,  # Larger size for visibility
+            brush=pg.mkBrush(*sigh_color),
+            symbol='star',
+            pen=pg.mkPen(edge_color, width=1.5)
+        )
+        scatter.setZValue(15)  # Above other markers
+        plot.addItem(scatter)
+
+    def _draw_region_overlays_pyqtgraph(self, plot, sweep_idx, t_plot, t0):
+        """Draw region overlays (eupnea, apnea, sniffing, outliers, failures) on PyQtGraph plot.
+
+        Supports both shaded backgrounds and horizontal line indicators depending on user preference.
+        Computes apnea, outlier, and failure regions dynamically (same as matplotlib version).
+        """
+        import pyqtgraph as pg
+        from core import metrics
+        st = self.state
+
+        # Get Y data range from the actual trace data (not view range which may be incorrect)
+        # We'll compute this from t_plot bounds and current data
+        y_min, y_max = None, None
+        try:
+            # Get the primary Y data for this sweep to determine actual data range
+            if st.analyze_chan and st.analyze_chan in st.sweeps:
+                y_data = st.sweeps[st.analyze_chan][:, sweep_idx]
+                y_valid = y_data[np.isfinite(y_data)]
+                if len(y_valid) > 0:
+                    y_min = float(np.min(y_valid))
+                    y_max = float(np.max(y_valid))
+        except:
+            pass
+
+        # Fallback to view range if we couldn't get data range
+        if y_min is None or y_max is None:
+            y_range = plot.viewRange()[1]
+            y_min, y_max = y_range[0], y_range[1]
+
+        def add_shaded_region(start_t, end_t, color_rgba):
+            """Helper to add a shaded region with proper offset and no border."""
             start_adj = start_t - t0
             end_adj = end_t - t0
             if end_adj > start_adj:
                 region = pg.LinearRegionItem(
                     values=[start_adj, end_adj],
                     brush=pg.mkBrush(*color_rgba),
-                    pen=pg.mkPen(None),  # No border lines (removes yellow edges)
+                    pen=pg.mkPen(None),  # No border lines
                     movable=False
                 )
                 region.setZValue(-8)
                 plot.addItem(region)
+
+        def add_line_indicator(start_t, end_t, color_rgb, y_fraction):
+            """Helper to add a horizontal line indicator at a specific Y position.
+
+            Args:
+                start_t, end_t: Time range (in plot time, already adjusted for t0)
+                color_rgb: RGB tuple (e.g., (46, 125, 50) for green)
+                y_fraction: Y position as fraction of VIEW range (0.0=bottom, 1.0=top of visible area)
+            """
+            if end_t > start_t:
+                # Get current VIEW range (what's actually visible on screen)
+                # This ensures lines appear at top/bottom of visible area, not data range
+                view_y_range = plot.viewRange()[1]
+                view_y_min, view_y_max = view_y_range[0], view_y_range[1]
+
+                # If view range is still default [0, 1], use data range as fallback
+                if view_y_min == 0 and view_y_max == 1:
+                    view_y_min, view_y_max = y_min, y_max
+
+                # Calculate Y position from VIEW range
+                y_val = view_y_min + y_fraction * (view_y_max - view_y_min)
+
+                # Draw horizontal line
+                line = pg.PlotCurveItem(
+                    x=[start_t, end_t],
+                    y=[y_val, y_val],
+                    pen=pg.mkPen(color_rgb[0], color_rgb[1], color_rgb[2], 200, width=2)
+                )
+                line.setZValue(10)  # Above traces
+                plot.addItem(line)
 
         # Get display mode preferences
         eupnea_shade = getattr(st, 'eupnea_use_shade', False)
@@ -728,67 +912,349 @@ class PlotManager:
         outliers_shade = getattr(st, 'outliers_use_shade', False)
 
         # Draw eupnea regions (green) - from GMM clustering or detection
-        # Check for eupnea_regions_by_sweep first, then sniff_regions_by_sweep
         eupnea_regions = []
         if hasattr(st, 'eupnea_regions_by_sweep') and sweep_idx in st.eupnea_regions_by_sweep:
             eupnea_regions = st.eupnea_regions_by_sweep[sweep_idx]
 
-        if eupnea_shade and eupnea_regions:
-            for start_t, end_t in eupnea_regions:
-                add_region(start_t, end_t, (46, 125, 50, 80))  # Green
+        if eupnea_regions:
+            if eupnea_shade:
+                for start_t, end_t in eupnea_regions:
+                    add_shaded_region(start_t, end_t, (46, 125, 50, 80))  # Green shade
+            else:
+                for start_t, end_t in eupnea_regions:
+                    # Adjust for t0 offset
+                    add_line_indicator(start_t - t0, end_t - t0, (46, 125, 50), 0.99)  # Green line at top
 
-        # Draw sniffing regions (purple)
+        # Draw sniffing regions (purple) - same Y position as eupnea since they don't overlap
         sniff_regions = st.sniff_regions_by_sweep.get(sweep_idx, [])
-        if sniffing_shade and sniff_regions:
-            for start_t, end_t in sniff_regions:
-                add_region(start_t, end_t, (128, 0, 128, 80))  # Purple
+        if sniff_regions:
+            if sniffing_shade:
+                for start_t, end_t in sniff_regions:
+                    add_shaded_region(start_t, end_t, (128, 0, 128, 80))  # Purple shade
+            else:
+                for start_t, end_t in sniff_regions:
+                    add_line_indicator(start_t - t0, end_t - t0, (128, 0, 128), 0.99)  # Purple line at top
 
-        # Draw apnea regions (red) - from apnea detection
-        apnea_regions = []
-        if hasattr(st, 'apnea_regions_by_sweep') and sweep_idx in st.apnea_regions_by_sweep:
-            apnea_regions = st.apnea_regions_by_sweep[sweep_idx]
+        # Compute apnea, outlier, and failure regions dynamically (same as matplotlib version)
+        try:
+            br = getattr(st, "breath_by_sweep", {}).get(sweep_idx, None)
+            t = st.t
+            if br and t is not None and len(t) > 100:
+                # Get breath data
+                pks = getattr(st, "peaks_by_sweep", {}).get(sweep_idx, None)
+                on_idx = br.get("onsets", [])
+                off_idx = br.get("offsets", [])
+                ex_idx = br.get("expmins", [])
+                exoff_idx = br.get("expoffs", [])
 
-        if apnea_shade and apnea_regions:
-            for start_t, end_t in apnea_regions:
-                add_region(start_t, end_t, (255, 0, 0, 60))  # Red
+                # Get processed Y data
+                y = self.window._get_processed_for(st.analyze_chan, sweep_idx) if hasattr(self, 'window') else None
+                if y is None:
+                    y = st.sweeps[st.analyze_chan][:, sweep_idx]
 
-        # Draw outlier regions (orange)
-        outlier_regions = []
-        if hasattr(st, 'outlier_regions_by_sweep') and sweep_idx in st.outlier_regions_by_sweep:
-            outlier_regions = st.outlier_regions_by_sweep[sweep_idx]
+                # Get apnea threshold
+                apnea_thresh = self.window._parse_float(self.window.ApneaThresh) or 0.5 if hasattr(self, 'window') else 0.5
 
-        if outliers_shade and outlier_regions:
-            for start_t, end_t in outlier_regions:
-                add_region(start_t, end_t, (255, 165, 0, 80))  # Orange
+                # Compute apnea mask and convert to regions
+                apnea_mask = metrics.detect_apneas(
+                    t, y, st.sr_hz, pks, on_idx, off_idx, ex_idx, exoff_idx,
+                    min_apnea_duration_sec=apnea_thresh
+                )
+                apnea_regions = self._extract_regions_from_mask(t, apnea_mask)
+
+                if apnea_regions:
+                    if apnea_shade:
+                        for start_t, end_t in apnea_regions:
+                            add_shaded_region(start_t, end_t, (255, 0, 0, 60))  # Red shade
+                    else:
+                        for start_t, end_t in apnea_regions:
+                            add_line_indicator(start_t - t0, end_t - t0, (255, 0, 0), 0.02)  # Red line at bottom
+
+                # Compute outlier and failure masks
+                outlier_mask, failure_mask = self._compute_outlier_masks(
+                    sweep_idx, t, y, pks, on_idx, off_idx, ex_idx, exoff_idx
+                )
+
+                # Draw outlier regions (orange)
+                if outlier_mask is not None:
+                    outlier_regions = self._extract_regions_from_mask(t, outlier_mask)
+                    # Ensure minimum width for visibility
+                    adjusted_regions = []
+                    for start_t, end_t in outlier_regions:
+                        width = end_t - start_t
+                        if width < 0.1:
+                            mid = (start_t + end_t) / 2
+                            start_t = mid - 0.05
+                            end_t = mid + 0.05
+                        adjusted_regions.append((start_t, end_t))
+
+                    if adjusted_regions:
+                        if outliers_shade:
+                            for start_t, end_t in adjusted_regions:
+                                add_shaded_region(start_t, end_t, (255, 165, 0, 80))  # Orange shade
+                        else:
+                            for start_t, end_t in adjusted_regions:
+                                add_line_indicator(start_t - t0, end_t - t0, (255, 165, 0), 0.04)  # Orange line near bottom
+
+                # Draw failure regions (red shade) - always shaded
+                if failure_mask is not None:
+                    failure_regions = self._extract_regions_from_mask(t, failure_mask)
+                    # Ensure minimum width
+                    for start_t, end_t in failure_regions:
+                        width = end_t - start_t
+                        if width < 0.1:
+                            mid = (start_t + end_t) / 2
+                            start_t = mid - 0.05
+                            end_t = mid + 0.05
+                        add_shaded_region(start_t, end_t, (255, 0, 0, 76))  # Red shade
+
+        except Exception as e:
+            print(f"[PyQtGraph] Warning: Could not compute region overlays: {e}")
+
+    def _extract_regions_from_mask(self, t, mask):
+        """Extract continuous regions where mask == 1 or mask == True.
+
+        This is a copy of the matplotlib version's _extract_regions for use in PyQtGraph.
+        """
+        regions = []
+
+        if mask is None or len(mask) == 0 or len(t) == 0:
+            return regions
+
+        # Ensure mask is boolean
+        mask = np.asarray(mask, dtype=bool)
+
+        # Check if there are any True values
+        if not np.any(mask):
+            return regions
+
+        # Find transitions
+        diff_mask = np.diff(mask.astype(int))
+        starts = np.where(diff_mask == 1)[0] + 1  # Start of True regions
+        ends = np.where(diff_mask == -1)[0] + 1   # End of True regions
+
+        # Handle edge cases
+        if mask[0]:
+            starts = np.concatenate([[0], starts])
+        if mask[-1]:
+            ends = np.concatenate([ends, [len(mask)]])
+
+        # Convert indices to time values with bounds checking
+        for start_idx, end_idx in zip(starts, ends):
+            start_idx = int(start_idx)
+            end_idx = int(end_idx)
+
+            if start_idx < 0 or start_idx >= len(t):
+                continue
+            if end_idx < 0 or end_idx > len(t):
+                end_idx = len(t)
+
+            # Get time values (use end_idx-1 since end_idx is exclusive)
+            start_t = float(t[start_idx])
+            end_t = float(t[min(end_idx - 1, len(t) - 1)])
+
+            if end_t > start_t:  # Ensure valid region
+                regions.append((start_t, end_t))
+
+        return regions
+
+    def _draw_omitted_regions_pyqtgraph(self, plot, sweep_idx, t_plot, t0):
+        """Draw omitted region overlays on PyQtGraph plot."""
+        import pyqtgraph as pg
+        st = self.state
+
+        # Check if full sweep is omitted (like matplotlib version)
+        if sweep_idx in st.omitted_sweeps:
+            # Draw gray overlay over entire data range (not view range, which may not be set yet)
+            # Use t_plot which contains the actual time data for this sweep
+            if t_plot is not None and len(t_plot) > 0:
+                t_min = float(t_plot[0])
+                t_max = float(t_plot[-1])
+            else:
+                # Fallback to view range if no time data
+                x_range = plot.viewRange()[0]
+                t_min, t_max = x_range[0], x_range[1]
+
+            region = pg.LinearRegionItem(
+                values=[t_min, t_max],
+                brush=pg.mkBrush(128, 128, 128, 100),  # Gray with alpha
+                pen=pg.mkPen('darkgray', width=1, style=pg.QtCore.Qt.PenStyle.DashLine),
+                movable=False
+            )
+            region.setZValue(100)
+            plot.addItem(region)
+
+            # Add "omitted" label in center
+            t_center = (t_min + t_max) / 2.0
+            y_range = plot.viewRange()[1]
+            # If y_range is default [0, 1], estimate from data
+            if y_range[0] == 0 and y_range[1] == 1:
+                y_center = 0.0  # Default to zero line
+            else:
+                y_center = (y_range[0] + y_range[1]) / 2.0
+
+            text = pg.TextItem("omitted", color='darkgray', anchor=(0.5, 0.5))
+            text.setPos(t_center, y_center)
+            text.setZValue(101)
+            plot.addItem(text)
+            return
+
+        # Otherwise draw smaller omitted regions
+        omitted_ranges = st.omitted_ranges.get(sweep_idx, [])
+        if not omitted_ranges:
+            return
+
+        sr_hz = st.sr_hz if st.sr_hz else 1000.0
+
+        for (i_start, i_end) in omitted_ranges:
+            # Convert sample indices to plot time
+            t_start = i_start / sr_hz - t0
+            t_end = i_end / sr_hz - t0
+
+            if t_end > t_start:
+                region = pg.LinearRegionItem(
+                    values=[t_start, t_end],
+                    brush=pg.mkBrush(80, 80, 80, 100),  # Dark gray with alpha
+                    pen=pg.mkPen('darkgray', width=1, style=pg.QtCore.Qt.PenStyle.DashLine),
+                    movable=False
+                )
+                region.setZValue(100)  # Above trace but below markers
+                plot.addItem(region)
+
+                # Add "omitted" label in center of region
+                t_center = (t_start + t_end) / 2.0
+                y_range = plot.viewRange()[1]
+                y_center = (y_range[0] + y_range[1]) / 2.0
+
+                text = pg.TextItem("omitted", color='darkgray', anchor=(0.5, 0.5))
+                text.setPos(t_center, y_center)
+                text.setZValue(101)
+                plot.addItem(text)
+
+    def _cleanup_y2_elements_pyqtgraph(self):
+        """Clean up Y2 axis elements before redrawing or clearing layout."""
+        if not hasattr(self.plot_host, '_y2_viewbox'):
+            return
+
+        # Disconnect sigResized signal if connected
+        if hasattr(self.plot_host, '_y2_update_connection') and self.plot_host._y2_update_connection is not None:
+            try:
+                main_plot = self.plot_host._get_main_plot()
+                if main_plot is not None:
+                    main_plot.vb.sigResized.disconnect(self.plot_host._y2_update_connection)
+            except:
+                pass
+            self.plot_host._y2_update_connection = None
+
+        # Remove Y2 line from viewbox
+        if self.plot_host._y2_line is not None:
+            try:
+                if self.plot_host._y2_viewbox is not None:
+                    self.plot_host._y2_viewbox.removeItem(self.plot_host._y2_line)
+            except:
+                pass
+            self.plot_host._y2_line = None
+
+        # Remove Y2 viewbox from scene
+        if self.plot_host._y2_viewbox is not None:
+            try:
+                main_plot = self.plot_host._get_main_plot()
+                if main_plot is not None and main_plot.scene() is not None:
+                    main_plot.scene().removeItem(self.plot_host._y2_viewbox)
+            except:
+                pass
+            self.plot_host._y2_viewbox = None
+
+        # Remove Y2 axis from layout
+        if self.plot_host._y2_axis is not None:
+            try:
+                main_plot = self.plot_host._get_main_plot()
+                if main_plot is not None and main_plot.layout is not None:
+                    main_plot.layout.removeItem(self.plot_host._y2_axis)
+            except:
+                pass
+            self.plot_host._y2_axis = None
 
     def _draw_y2_metric_pyqtgraph(self, sweep_idx, t_plot):
-        """Draw Y2 metric on PyQtGraph plot."""
+        """Draw Y2 metric on PyQtGraph plot with independent Y axis."""
+        import pyqtgraph as pg
         st = self.state
         key = getattr(st, "y2_metric_key", None)
 
-        if key:
-            # Get metric data for current sweep
-            arr = st.y2_values_by_sweep.get(sweep_idx, None)
-            if arr is not None and len(arr) == len(t_plot):
-                # Determine label and color based on metric type
-                if key == "if":
-                    label = "IF (Hz)"
-                    color = "#39FF14"  # Bright green
-                elif key == "sniff_conf":
-                    label = "Sniffing Confidence"
-                    color = "#9b59b6"  # Purple
-                elif key == "eupnea_conf":
-                    label = "Eupnea Confidence"
-                    color = "#2ecc71"  # Green
-                else:
-                    label = key
-                    color = "#39FF14"  # Default bright green
+        # Get the main plot
+        main_plot = self.plot_host._get_main_plot()
+        if main_plot is None:
+            return
 
-                self.plot_host.add_or_update_y2(t_plot, arr, label=label, color=color, max_points=None)
-            else:
-                self.plot_host.clear_y2()
+        # Clear existing Y2 elements (use centralized cleanup)
+        self._cleanup_y2_elements_pyqtgraph()
+
+        if not key:
+            return
+
+        # Get metric data for current sweep
+        arr = st.y2_values_by_sweep.get(sweep_idx, None)
+        if arr is None or len(arr) != len(t_plot):
+            return
+
+        # Determine label and color based on metric type
+        if key == "if":
+            label = "IF (Hz)"
+            color = "#39FF14"  # Bright green
+        elif key == "sniff_conf":
+            label = "Sniffing Confidence"
+            color = "#9b59b6"  # Purple
+        elif key == "eupnea_conf":
+            label = "Eupnea Confidence"
+            color = "#2ecc71"  # Green
         else:
-            self.plot_host.clear_y2()
+            label = key
+            color = "#39FF14"  # Default bright green
+
+        # Create a new ViewBox for Y2 data
+        y2_viewbox = pg.ViewBox()
+        self.plot_host._y2_viewbox = y2_viewbox
+
+        # Create Y2 axis on the right
+        is_dark = self.plot_host._current_theme == 'dark'
+        text_color = '#d4d4d4' if is_dark else '#000000'
+
+        y2_axis = pg.AxisItem('right')
+        y2_axis.setLabel(label, color=color)
+        y2_axis.setTextPen(color)
+        y2_axis.setPen(color)
+        self.plot_host._y2_axis = y2_axis
+
+        # Add the Y2 axis and viewbox to the plot layout
+        main_plot.layout.addItem(y2_axis, 2, 2)  # row 2, col 2 (right side)
+        main_plot.scene().addItem(y2_viewbox)
+        y2_axis.linkToView(y2_viewbox)
+
+        # Link X axes
+        y2_viewbox.setXLink(main_plot.vb)
+
+        # Plot the Y2 data
+        qcolor = pg.mkColor(color)
+        pen = pg.mkPen(qcolor, width=1.5)
+        y2_line = pg.PlotDataItem(t_plot, arr, pen=pen)
+        y2_viewbox.addItem(y2_line)
+        self.plot_host._y2_line = y2_line
+
+        # Update viewbox geometry when main plot changes
+        def update_views():
+            try:
+                y2_viewbox.setGeometry(main_plot.vb.sceneBoundingRect())
+                y2_viewbox.linkedViewChanged(main_plot.vb, y2_viewbox.XAxis)
+            except RuntimeError:
+                # ViewBox may have been deleted
+                pass
+
+        main_plot.vb.sigResized.connect(update_views)
+        self.plot_host._y2_update_connection = update_views  # Store reference for cleanup
+        update_views()
+
+        # Auto-range the Y2 axis
+        y2_viewbox.autoRange()
 
     def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
         """Build ChannelPanelConfig list from channel manager.
@@ -1594,8 +2060,19 @@ class PlotManager:
         return outlier_mask, failure_mask
 
     def _is_peak_in_omitted_region(self, sweep_idx, peak_idx):
-        """Check if a peak index falls within an omitted region for the given sweep."""
+        """Check if a peak index falls within an omitted region for the given sweep.
+
+        Returns True if:
+        1. The entire sweep is omitted (sweep_idx in omitted_sweeps), OR
+        2. The peak falls within a specific omitted range
+        """
         st = self.state
+
+        # Check if entire sweep is omitted
+        if sweep_idx in st.omitted_sweeps:
+            return True
+
+        # Check if peak is in a specific omitted range
         if sweep_idx not in st.omitted_ranges:
             return False
 
