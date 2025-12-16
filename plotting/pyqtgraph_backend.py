@@ -315,11 +315,14 @@ class PyQtGraphPlotHost(QWidget):
         )
 
         # Add stimulus spans (blue regions)
+        # Use a subtle border pen to ensure thin pulses remain visible at all zoom levels
+        stim_pen = pg.mkPen(46, 80, 144, 100, width=1)  # Subtle border for antialiasing
         for (t0, t1) in (spans_s or []):
             if t1 > t0:
                 region = pg.LinearRegionItem(
                     values=[t0, t1],
                     brush=pg.mkBrush(46, 80, 144, 60),  # #2E5090 with alpha
+                    pen=stim_pen,  # Border helps with aliasing on thin regions
                     movable=False
                 )
                 region.setZValue(-10)  # Behind trace

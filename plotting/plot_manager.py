@@ -610,12 +610,14 @@ class PlotManager:
             # Add stim spans (blue background) if configured
             if config.show_stim_spans:
                 all_spans = opto_spans_plot if opto_spans_plot else list(spans_plot)
+                # Use subtle border pen to ensure thin pulses remain visible at all zoom levels
+                stim_pen = pg.mkPen(70, 130, 220, 150, width=1)
                 for (t0_span, t1_span) in all_spans:
                     if t1_span > t0_span:
                         region = pg.LinearRegionItem(
                             values=[t0_span, t1_span],
                             brush=pg.mkBrush(70, 130, 220, 100),  # Brighter blue with alpha
-                            pen=pg.mkPen(None),  # No border lines
+                            pen=stim_pen,  # Border helps with aliasing on thin regions
                             movable=False
                         )
                         region.setZValue(-10)
