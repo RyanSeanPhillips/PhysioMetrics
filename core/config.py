@@ -184,3 +184,29 @@ def set_crash_reports_enabled(enabled):
 def mark_first_launch_complete():
     """Mark that first launch has been completed."""
     return update_config('first_launch', False)
+
+
+# ============================================================================
+# Crash Reports and Error Logging Directories
+# ============================================================================
+
+def get_crash_reports_dir():
+    """
+    Get crash reports directory.
+
+    Returns:
+        Path: Crash reports directory (created if needed)
+    """
+    crash_dir = get_config_dir() / 'crash_reports'
+    crash_dir.mkdir(exist_ok=True)
+    return crash_dir
+
+
+def get_error_log_path():
+    """
+    Get path to error log file.
+
+    Returns:
+        Path: Error log file path
+    """
+    return get_config_dir() / 'error_log.json'

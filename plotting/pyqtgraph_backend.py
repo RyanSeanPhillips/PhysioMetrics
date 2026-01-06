@@ -244,11 +244,38 @@ class PyQtGraphPlotHost(QWidget):
         if self._main_trace is not None:
             self._main_trace.setPen(pg.mkPen(trace_color, width=1))
 
+        # Update Y2 line color if exists
+        if self._y2_line is not None:
+            self._y2_line.setPen(pg.mkPen(trace_color, width=1))
+
+        # Update all traces in all subplots (for multi-panel mode)
+        for plot in self._subplots:
+            for item in plot.listDataItems():
+                # Update PlotDataItems (traces) but skip threshold lines
+                if item is not self._threshold_line:
+                    current_pen = item.opts.get('pen')
+                    if current_pen is not None:
+                        # Preserve line width, just update color
+                        width = 1
+                        if hasattr(current_pen, 'width'):
+                            width = current_pen.width()
+                        elif isinstance(current_pen, dict) and 'width' in current_pen:
+                            width = current_pen['width']
+                        item.setPen(pg.mkPen(trace_color, width=width))
+
     # ------- View Preservation -------
     def set_preserve(self, x: bool = True, y: bool = False):
         """Set view preservation mode."""
         self._preserve_x = bool(x)
         self._preserve_y = bool(y)
+
+    def set_preserve_y(self, preserve: bool):
+        """Set Y-axis preservation mode (for Auto Y Scale toggle)."""
+        self._preserve_y = bool(preserve)
+        if not preserve:
+            # Clear stored Y limits when disabling preservation
+            self._last_single["ylim"] = None
+            self._last_grid["ylims"] = []
 
     def clear_saved_view(self, mode: str = None):
         """Clear saved view state and force auto-range on next draw."""
@@ -297,6 +324,7 @@ class PyQtGraphPlotHost(QWidget):
 
         # Save previous view
         prev_xlim = self._last_single["xlim"] if self._preserve_x else None
+        prev_ylim = self._last_single["ylim"] if self._preserve_y else None
 
         # Clear existing items
         self._clear_all_items()
@@ -346,6 +374,9 @@ class PyQtGraphPlotHost(QWidget):
         # Restore or auto-scale view
         if prev_xlim is not None:
             main_plot.setXRange(prev_xlim[0], prev_xlim[1], padding=0)
+            # Also restore Y if preserved
+            if prev_ylim is not None:
+                main_plot.setYRange(prev_ylim[0], prev_ylim[1], padding=0)
         else:
             main_plot.autoRange()
 
@@ -386,6 +417,18 @@ class PyQtGraphPlotHost(QWidget):
             plot.getAxis('left').setTextPen(text_color)
             plot.getAxis('bottom').setPen(text_color)
             plot.getAxis('left').setPen(text_color)
+
+            # Set fixed Y-axis width to ensure all panels align visually
+            # This is critical for x-axis synchronization - setXLink() only syncs data range,
+            # not visual positioning. Different label widths would cause misalignment.
+            plot.getAxis('left').setWidth(70)
+
+            # Configure mouse behavior: X-axis only, shift required for pan
+            self._configure_plot_mouse(plot)
+
+            # Disable PyQtGraph's built-in ViewBox context menu
+            plot.vb.setMenuEnabled(False)
+            plot.setMenuEnabled(False)
 
             # Link x-axis to first plot
             if i > 0:
@@ -1240,6 +1283,33 @@ class PyQtGraphPlotHost(QWidget):
         # Pass to parent if not handled
         super().keyPressEvent(event)
 
+    def _configure_plot_mouse(self, plot):
+        """Configure mouse behavior for a plot: X-axis only, shift required for drag pan."""
+        from PyQt6.QtCore import Qt as QtCore_Qt
+
+        vb = plot.vb
+
+        # Only allow X-axis mouse interaction (no Y zooming/panning)
+        vb.setMouseEnabled(x=True, y=False)
+
+        # Store original mouseDragEvent - need to bind to avoid closure issues
+        original_drag = vb.mouseDragEvent.__func__ if hasattr(vb.mouseDragEvent, '__func__') else vb.mouseDragEvent
+
+        def shift_only_drag(ev, axis=None, _vb=vb, _orig=original_drag):
+            """Only allow drag if Shift is held."""
+            modifiers = ev.modifiers() if hasattr(ev, 'modifiers') else QtCore_Qt.KeyboardModifier.NoModifier
+            if modifiers & QtCore_Qt.KeyboardModifier.ShiftModifier:
+                # Call original with proper binding
+                if hasattr(_orig, '__self__'):
+                    _orig(ev, axis)
+                else:
+                    _orig(_vb, ev, axis)
+            else:
+                # Accept the event but don't do anything - this prevents pan
+                ev.accept()
+
+        vb.mouseDragEvent = shift_only_drag
+
     def _set_mouse_mode_edit(self):
         """Disable pan/zoom for click-based editing."""
         for plot in self._subplots:
@@ -1253,12 +1323,25 @@ class PyQtGraphPlotHost(QWidget):
         """Re-enable normal pan/zoom behavior."""
         for plot in self._subplots:
             try:
-                plot.vb.setMouseEnabled(x=True, y=True)
+                plot.vb.setMouseEnabled(x=True, y=False)  # Keep Y disabled
             except:
                 pass
 
     def _on_mouse_clicked(self, event):
         """Handle mouse click events."""
+        from PyQt6.QtCore import Qt as QtCore_Qt
+
+        pos = event.scenePos()
+
+        # Check for right-click when NOT in edit mode - show context menu
+        if event.button() == QtCore_Qt.MouseButton.RightButton and not self._edit_mode_active:
+            # Find which plot was clicked
+            clicked_plot = self._find_plot_at_pos(pos)
+            if clicked_plot is not None:
+                self._show_context_menu(event, clicked_plot)
+            return
+
+        # For left/middle clicks, pass to external callback
         if self._external_click_cb is None:
             return
 
@@ -1268,7 +1351,6 @@ class PyQtGraphPlotHost(QWidget):
             return
 
         # Get click position in data coordinates
-        pos = event.scenePos()
         if main_plot.sceneBoundingRect().contains(pos):
             mouse_point = main_plot.vb.mapSceneToView(pos)
             x_data = mouse_point.x()
@@ -1277,6 +1359,100 @@ class PyQtGraphPlotHost(QWidget):
             # Create matplotlib-compatible event wrapper
             wrapped_event = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
             self._external_click_cb(x_data, y_data, wrapped_event)
+
+    def _find_plot_at_pos(self, scene_pos):
+        """Find which subplot was clicked."""
+        for plot in self._subplots:
+            if plot.sceneBoundingRect().contains(scene_pos):
+                return plot
+        return None
+
+    def _show_context_menu(self, event, plot):
+        """Show context menu for plot panel."""
+        from PyQt6.QtWidgets import QMenu, QApplication
+        from PyQt6.QtGui import QCursor
+
+        menu = QMenu()
+
+        # Get the plot's label (channel name)
+        try:
+            plot_label = plot.titleLabel.text if hasattr(plot, 'titleLabel') else None
+            if not plot_label:
+                # Try to get from axis label
+                left_axis = plot.getAxis('left')
+                if left_axis:
+                    plot_label = left_axis.labelText
+        except:
+            plot_label = None
+
+        # Auto Scale Y for this panel
+        action_auto_y = menu.addAction("Auto Scale Y")
+        action_auto_y.setToolTip("Scale Y-axis to fit visible data")
+
+        # Auto Scale All (all panels)
+        if len(self._subplots) > 1:
+            action_auto_all = menu.addAction("Auto Scale All Y")
+            action_auto_all.setToolTip("Scale Y-axis on all panels to fit visible data")
+        else:
+            action_auto_all = None
+
+        menu.addSeparator()
+
+        # Reset View (full auto range)
+        action_reset = menu.addAction("Reset View")
+        action_reset.setToolTip("Reset to show all data")
+
+        # Execute menu at cursor position
+        action = menu.exec(QCursor.pos())
+
+        if action == action_auto_y:
+            self._auto_scale_y_for_plot(plot)
+        elif action == action_auto_all:
+            self._auto_scale_y_all_panels()
+        elif action == action_reset:
+            plot.autoRange()
+
+    def _auto_scale_y_for_plot(self, plot):
+        """Auto-scale Y-axis for a specific plot to fit visible X range data."""
+        try:
+            # Get current X view range
+            view_range = plot.viewRange()
+            x_min, x_max = view_range[0]
+
+            # Find data items in this plot
+            for item in plot.listDataItems():
+                if hasattr(item, 'getData'):
+                    x_data, y_data = item.getData()
+                    if x_data is None or y_data is None:
+                        continue
+
+                    # Find indices within visible X range
+                    mask = (x_data >= x_min) & (x_data <= x_max)
+                    if not np.any(mask):
+                        continue
+
+                    visible_y = y_data[mask]
+                    if len(visible_y) == 0:
+                        continue
+
+                    # Calculate Y range with small padding
+                    y_min = np.nanmin(visible_y)
+                    y_max = np.nanmax(visible_y)
+                    y_range = y_max - y_min
+                    padding = y_range * 0.05 if y_range > 0 else 0.1
+
+                    # Set Y range, keeping X range fixed
+                    plot.setYRange(y_min - padding, y_max + padding, padding=0)
+                    print(f"[PyQtGraph] Auto-scaled Y: [{y_min:.3f}, {y_max:.3f}]")
+                    return
+
+        except Exception as e:
+            print(f"[PyQtGraph] Auto-scale Y error: {e}")
+
+    def _auto_scale_y_all_panels(self):
+        """Auto-scale Y-axis for all panels."""
+        for plot in self._subplots:
+            self._auto_scale_y_for_plot(plot)
 
     # ------- Toolbar Compatibility -------
     def set_toolbar_callback(self, callback):

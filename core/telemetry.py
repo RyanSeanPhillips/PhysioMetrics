@@ -21,6 +21,26 @@ from core.config import (
 from version_info import VERSION_STRING
 
 
+def _update_heartbeat(action: str, context: str = None):
+    """
+    Update heartbeat file and debug log for crash tracking.
+
+    This is called from telemetry functions to track what the user
+    was doing when the app is killed/crashes.
+    """
+    try:
+        from core import error_reporting
+        # Convert context string to dict if provided
+        extra_info = {"context": context} if context else None
+        error_reporting.update_heartbeat(action, extra_info)
+
+        # Also write to persistent debug log (survives app restart)
+        error_reporting.append_to_debug_log(action, context, level="info")
+    except Exception as e:
+        # Debug: print heartbeat errors during development
+        print(f"[Heartbeat] Error: {e}")
+
+
 # ============================================================================
 # CONFIGURATION - Add your credentials here
 # ============================================================================
@@ -469,6 +489,7 @@ def log_file_loaded(file_type, num_sweeps, num_breaths=None, **extra_params):
     _session_data['file_types'][file_type.lower()] = \
         _session_data['file_types'].get(file_type.lower(), 0) + 1
     _session_data['total_sweeps'] += num_sweeps
+    _session_data['last_action'] = f'load_{file_type}'
 
     if num_breaths:
         _session_data['total_breaths'] += num_breaths
@@ -477,6 +498,9 @@ def log_file_loaded(file_type, num_sweeps, num_breaths=None, **extra_params):
     _session_data['current_file_edits_added'] = 0
     _session_data['current_file_edits_deleted'] = 0
     _session_data['current_file_breaths'] = 0  # Will be set after peak detection
+
+    # Update heartbeat for crash tracking
+    _update_heartbeat(f'load_file:{file_type}', f'sweeps={num_sweeps}')
 
     params = {
         'file_type': file_type,
@@ -499,6 +523,10 @@ def log_feature_used(feature_name):
     """
     global _session_data
     _session_data['features_used'].add(feature_name)
+    _session_data['last_action'] = feature_name
+
+    # Update heartbeat for crash tracking
+    _update_heartbeat(f'feature:{feature_name}')
 
     log_event('feature_used', {'feature': feature_name})
 
@@ -515,6 +543,10 @@ def log_export(export_type):
     global _session_data
     _session_data['exports'][export_type] = \
         _session_data['exports'].get(export_type, 0) + 1
+    _session_data['last_action'] = f'export_{export_type}'
+
+    # Update heartbeat for crash tracking
+    _update_heartbeat(f'export:{export_type}')
 
     log_event('export', {'export_type': export_type})
 
@@ -790,6 +822,10 @@ def log_button_click(button_name, **extra_params):
 
     _session_data['last_action'] = button_name
 
+    # Update heartbeat for crash tracking
+    context = ', '.join(f'{k}={v}' for k, v in extra_params.items()) if extra_params else None
+    _update_heartbeat(f'button:{button_name}', context)
+
     params = {'button': button_name}
     params.update(extra_params)
 
@@ -974,6 +1010,33 @@ def log_error(error, context=None):
     except Exception as e:
         # Silently fail - never interrupt user workflow
         print(f"Warning: Could not log error: {e}")
+
+
+# ============================================================================
+# Session Data Access (for crash reporting)
+# ============================================================================
+
+def get_session_data() -> dict:
+    """
+    Get a copy of current session data for crash reports.
+
+    This exposes session context to the error reporting system
+    without creating circular dependencies.
+
+    Returns:
+        dict: Copy of session data (safe to modify)
+    """
+    return {
+        'files_analyzed': _session_data.get('files_analyzed', 0),
+        'total_breaths': _session_data.get('total_breaths', 0),
+        'total_sweeps': _session_data.get('total_sweeps', 0),
+        'features_used': list(_session_data.get('features_used', set())),
+        'last_action': _session_data.get('last_action', 'unknown'),
+        'session_start': _session_data.get('session_start'),
+        'edits_made': _session_data.get('edits_made', 0),
+        'edits_added': _session_data.get('edits_added', 0),
+        'edits_deleted': _session_data.get('edits_deleted', 0),
+    }
 
 
 # ============================================================================

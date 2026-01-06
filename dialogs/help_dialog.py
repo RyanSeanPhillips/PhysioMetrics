@@ -77,10 +77,37 @@ class HelpDialog(QDialog):
         tabs.addTab(self._create_about_tab(), "About")
         layout.addWidget(tabs)
 
+        # Button row with Report Issue and Close
+        from PyQt6.QtWidgets import QHBoxLayout, QPushButton
+
+        button_layout = QHBoxLayout()
+
+        # Report Issue button
+        report_btn = QPushButton("Report Issue / Request Feature")
+        report_btn.clicked.connect(self._on_report_issue)
+        report_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #404040;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                border-color: #2a7fff;
+            }
+        """)
+        button_layout.addWidget(report_btn)
+
+        button_layout.addStretch()
+
         # Close button
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         button_box.rejected.connect(self.accept)
-        layout.addWidget(button_box)
+        button_layout.addWidget(button_box)
+
+        layout.addLayout(button_layout)
 
     def _create_quick_reference(self):
         """Create single-page quick reference guide."""
@@ -736,6 +763,11 @@ class HelpDialog(QDialog):
         self.update_thread = UpdateChecker()
         self.update_thread.update_checked.connect(on_update_checked)
         self.update_thread.start()
+
+    def _on_report_issue(self):
+        """Open the Report Issue dialog."""
+        from dialogs.report_issue_dialog import show_report_issue_dialog
+        show_report_issue_dialog(parent=self)
 
     def _apply_dark_theme(self):
         """Apply dark theme styling to the dialog."""
