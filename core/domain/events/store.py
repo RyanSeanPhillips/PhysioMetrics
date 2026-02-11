@@ -105,12 +105,14 @@ class MarkerStore:
         """Get a marker by ID."""
         return self._markers.get(marker_id)
 
-    def update(self, marker: EventMarker) -> bool:
+    def update(self, marker: EventMarker, old_category: Optional[str] = None, old_sweep_idx: Optional[int] = None) -> bool:
         """
         Update an existing marker.
 
         Args:
             marker: Marker with updated values (must have existing ID)
+            old_category: Previous category for proper index cleanup (optional)
+            old_sweep_idx: Previous sweep index for proper index cleanup (optional)
 
         Returns:
             True if updated, False if marker not found
@@ -118,9 +120,17 @@ class MarkerStore:
         if marker.id not in self._markers:
             return False
 
-        old_marker = self._markers[marker.id]
-        self._unindex_marker(old_marker)
+        # If old values provided, manually clean up indices
+        # This handles the case where the marker object was modified in-place before update() was called
+        if old_category is not None and old_category != marker.category:
+            self._by_category[old_category].discard(marker.id)
+        if old_sweep_idx is not None and old_sweep_idx != marker.sweep_idx:
+            self._by_sweep[old_sweep_idx].discard(marker.id)
+
+        # Update the marker in storage
         self._markers[marker.id] = marker
+
+        # Re-index with new values (this is idempotent - adding to a set twice is fine)
         self._index_marker(marker)
         self._notify_change()
         return True

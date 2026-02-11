@@ -292,13 +292,13 @@ QComboBox:focus {
 QComboBox::drop-down {
     border: none;
     background: transparent;
-    width: 20px;
-    padding-right: 4px;
+    width: 24px;
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
 }
 QComboBox::down-arrow {
-    image: none;
-    width: 0;
-    height: 0;
+    width: 12px;
+    height: 12px;
 }
 QComboBox QAbstractItemView {
     background-color: #2b2b2b;
@@ -626,6 +626,9 @@ QPushButton:pressed {
                    </item>
                    <item>
                     <widget class="QCheckBox" name="notesWordCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Microsoft Word documents (.docx, .doc)</string>
                      </property>
@@ -638,7 +641,20 @@ QPushButton:pressed {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="notesSep1">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="notesExcelCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Microsoft Excel spreadsheets (.xlsx, .xls)</string>
                      </property>
@@ -651,7 +667,20 @@ QPushButton:pressed {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="notesSep2">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="notesCsvCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Comma-separated values files (.csv)</string>
                      </property>
@@ -664,7 +693,20 @@ QPushButton:pressed {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="notesSep3">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="notesTxtCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Plain text files (.txt)</string>
                      </property>
@@ -677,7 +719,20 @@ QPushButton:pressed {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="notesSep4">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="notesPdfCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>PDF documents (.pdf)</string>
                      </property>
@@ -1125,6 +1180,9 @@ QPushButton:disabled {
                    </item>
                    <item>
                     <widget class="QCheckBox" name="scanAbfCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Include Axon Binary Files (.abf)</string>
                      </property>
@@ -1137,7 +1195,20 @@ QPushButton:disabled {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="scanSep1">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="scanSmrxCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Include Spike2 64-bit files (.smrx)</string>
                      </property>
@@ -1150,7 +1221,20 @@ QPushButton:disabled {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="scanSep2">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="scanEdfCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Include European Data Format files (.edf)</string>
                      </property>
@@ -1163,7 +1247,46 @@ QPushButton:disabled {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="scanSep3">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
+                    <widget class="QCheckBox" name="scanPhotometryCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
+                     <property name="toolTip">
+                      <string>Include Neurophotometrics fiber photometry files (FP_data folders)</string>
+                     </property>
+                     <property name="text">
+                      <string>Photometry</string>
+                     </property>
+                     <property name="checked">
+                      <bool>true</bool>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
+                    <widget class="QLabel" name="scanSep4">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="scanNotesCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox { margin-right: 6px; } QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Include notes files (.xlsx, .xls, .docx, .doc, .txt)</string>
                      </property>
@@ -1176,7 +1299,20 @@ QPushButton:disabled {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QLabel" name="scanSep5">
+                     <property name="styleSheet">
+                      <string>color: #666; margin-right: 6px;</string>
+                     </property>
+                     <property name="text">
+                      <string>|</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="tableFullContentCheckbox">
+                     <property name="styleSheet">
+                      <string>QCheckBox::indicator { margin-right: 2px; }</string>
+                     </property>
                      <property name="toolTip">
                       <string>Expand columns to show all content (enables horizontal scrolling)</string>
                      </property>

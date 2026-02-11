@@ -16,8 +16,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPixmap
 from version_info import VERSION_STRING
 
+from dialogs.export_mixin import ExportMixin
 
-class FirstLaunchDialog(QDialog):
+
+class FirstLaunchDialog(ExportMixin, QDialog):
     """
     Welcome dialog shown on first launch.
 
@@ -37,6 +39,7 @@ class FirstLaunchDialog(QDialog):
         self._setup_ui()
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
     def _enable_dark_title_bar(self):
         """Enable dark title bar on Windows 10/11."""

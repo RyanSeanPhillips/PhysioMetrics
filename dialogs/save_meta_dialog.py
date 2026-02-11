@@ -24,8 +24,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt as QtCore_Qt, QSettings, pyqtSignal, QTimer
 from PyQt6.QtGui import QShortcut, QKeySequence
 
+from dialogs.export_mixin import ExportMixin
 
-class SaveMetaDialog(QDialog):
+
+class SaveMetaDialog(ExportMixin, QDialog):
     """Non-modal dialog for collecting save metadata.
 
     Emits accepted_with_values signal when user clicks OK, passing the values dict.
@@ -101,6 +103,7 @@ class SaveMetaDialog(QDialog):
 
         # Enable dark title bar on Windows
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
         # Load preview visibility preference and set size accordingly
         settings = QSettings("PhysioMetrics", "PhysioMetrics")

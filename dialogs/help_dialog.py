@@ -13,8 +13,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
+from dialogs.export_mixin import ExportMixin
 
-class HelpDialog(QDialog):
+
+class HelpDialog(ExportMixin, QDialog):
     """Quick reference help dialog with essential information."""
 
     def __init__(self, parent=None, update_info=None):
@@ -53,6 +55,7 @@ class HelpDialog(QDialog):
         self._setup_ui()
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
     def closeEvent(self, event):
         """Save position and size when closing."""

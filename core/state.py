@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.event_markers import EventMarkerManager
 
 
 @dataclass
@@ -92,7 +95,14 @@ class AppState:
     omitted_ranges: Dict[int, List[Tuple[int,int]]] = field(default_factory=dict)  # sweep -> [(i0,i1), ...]
     omitted_sweeps: set = field(default_factory=set)  # set of sweep indices to exclude
     sniff_regions_by_sweep: Dict[int, List[Tuple[float, float]]] = field(default_factory=dict)  # sweep -> [(start_time, end_time), ...]
-    bout_annotations: Dict[int, List[Dict]] = field(default_factory=dict)  # sweep -> [{'start_time': float, 'end_time': float, 'id': int}, ...]
+    bout_annotations: Dict[int, List[Dict]] = field(default_factory=dict)  # sweep -> [{'start_time': float, 'end_time': float, 'id': int}, ...] (LEGACY - use event_markers instead)
+
+    # Event markers (new system - replaces bout_annotations)
+    # This field holds the EventMarkerManager instance, initialized lazily
+    _event_markers_manager: Optional['EventMarkerManager'] = field(default=None, repr=False)
+
+    # Active event type for new markers (persisted per session)
+    active_event_type: str = 'lick_bout'
 
     # Y2 axis metrics
     y2_metric_key: Optional[str] = None  # e.g., "if", "ti", "te", etc.
@@ -103,3 +113,60 @@ class AppState:
 
     # Cached processed data (per sweep)
     proc_cache: Dict[Tuple[str,int], np.ndarray] = field(default_factory=dict)  # (chan, sweep) -> y
+
+    # Photometry data (for ΔF/F calculation and recalculation)
+    # Raw photometry signals - stored for recalculating ΔF/F when user adjusts params
+    photometry_raw: Optional[Dict] = None  # {'fp_time': array, 'iso': array, 'gcamp': array, 'ai_time': array, 'ai_channels': dict}
+    photometry_npz_path: Optional[Path] = None  # Path to source *_photometry.npz file
+    photometry_params: Optional[Dict] = None  # Current ΔF/F calculation parameters:
+    # {
+    #     'dff_method': 'fitted' | 'simple',
+    #     'detrend_method': 'none' | 'linear' | 'exponential' | 'biexponential',
+    #     'fit_range_start': float (minutes),
+    #     'fit_range_end': float (minutes),
+    #     'lowpass_enabled': bool,
+    #     'lowpass_hz': float,
+    # }
+    photometry_dff_channel: Optional[str] = None  # Name of the computed ΔF/F channel (for gear icon callback)
+
+    # Multi-experiment photometry support
+    photometry_experiment_index: int = 0  # Currently loaded experiment (0-indexed)
+    photometry_n_experiments: int = 1  # Total number of experiments in the NPZ
+    photometry_animal_id: str = ""  # Animal ID for current experiment
+
+    @property
+    def event_markers(self) -> 'EventMarkerManager':
+        """
+        Get the EventMarkerManager instance, creating it lazily if needed.
+
+        Returns:
+            EventMarkerManager instance for managing event markers
+        """
+        if self._event_markers_manager is None:
+            from core.event_markers import EventMarkerManager
+            self._event_markers_manager = EventMarkerManager()
+        return self._event_markers_manager
+
+    def migrate_bout_annotations_to_event_markers(self):
+        """
+        Migrate legacy bout_annotations to the new event_markers system.
+
+        Call this after loading a project that may have legacy data.
+        """
+        if not self.bout_annotations:
+            return
+
+        # Get source channel name
+        source_channel = self.event_channel or ''
+
+        # Import legacy bouts
+        self.event_markers.import_legacy_bouts(self.bout_annotations, source_channel)
+
+        # Clear legacy data after migration
+        # (Keep it for now for backward compatibility, but mark as migrated)
+        # self.bout_annotations.clear()
+
+    def clear_event_markers(self):
+        """Clear all event markers."""
+        if self._event_markers_manager is not None:
+            self._event_markers_manager.clear()

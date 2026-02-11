@@ -57,7 +57,7 @@ class EventMarkerService:
         self._undo_stack: List[UndoableAction] = []
         self._redo_stack: List[UndoableAction] = []
         self._max_undo = 50
-        self._selected_type: Tuple[str, str] = ('custom', 'marker')  # (category, label)
+        self._selected_type: Tuple[str, str] = ('stimulus', 'stim_on')  # (category, label)
 
     @property
     def store(self) -> MarkerStore:
@@ -144,14 +144,16 @@ class EventMarkerService:
         category: Optional[str] = None,
         label: Optional[str] = None,
         source_channel: Optional[str] = None,
+        end_time: Optional[float] = None,
         end_offset_percent: float = 10.0,
         visible_range: Optional[Tuple[float, float]] = None,
+        detection_method: str = 'manual',
     ) -> EventMarker:
         """
         Add a paired (region) marker.
 
-        The end time is automatically placed a percentage of the visible range
-        past the start time.
+        The end time can be explicitly specified, or automatically calculated
+        as a percentage of the visible range past the start time.
 
         Args:
             start_time: Start time position in seconds
@@ -159,8 +161,10 @@ class EventMarkerService:
             category: Category (uses selected_type if None)
             label: Label (uses selected_type if None)
             source_channel: Channel name for metadata
+            end_time: Explicit end time (if None, calculated from offset)
             end_offset_percent: Percentage of visible range for end offset
             visible_range: (start, end) of visible x-range for calculating offset
+            detection_method: How the marker was created ('manual', 'threshold', etc.)
 
         Returns:
             Created marker
@@ -170,17 +174,17 @@ class EventMarkerService:
         if label is None:
             label = self._selected_type[1]
 
-        # Calculate end time
-        if visible_range is not None:
-            range_width = visible_range[1] - visible_range[0]
-            offset = range_width * (end_offset_percent / 100.0)
-        else:
-            offset = 0.5  # Default 0.5s if no range provided
+        # Use explicit end_time if provided, otherwise calculate
+        if end_time is None:
+            if visible_range is not None:
+                range_width = visible_range[1] - visible_range[0]
+                offset = range_width * (end_offset_percent / 100.0)
+            else:
+                offset = 0.5  # Default 0.5s if no range provided
 
-        # Ensure minimum offset
-        offset = max(offset, 0.1)
-
-        end_time = start_time + offset
+            # Ensure minimum offset
+            offset = max(offset, 0.1)
+            end_time = start_time + offset
 
         marker = EventMarker(
             sweep_idx=sweep_idx,
@@ -190,7 +194,7 @@ class EventMarkerService:
             category=category,
             label=label,
             source_channel=source_channel,
-            detection_method='manual',
+            detection_method=detection_method,
         )
 
         self._store.add(marker)
@@ -228,7 +232,9 @@ class EventMarkerService:
         marker_id: str,
         category: Optional[str] = None,
         label: Optional[str] = None,
+        condition: Optional[str] = None,
         color_override: Optional[str] = None,
+        line_width: Optional[int] = None,
         notes: Optional[str] = None,
     ) -> bool:
         """
@@ -238,7 +244,9 @@ class EventMarkerService:
             marker_id: ID of marker to update
             category: New category (or None to keep current)
             label: New label (or None to keep current)
+            condition: Experimental condition (or None to keep current)
             color_override: New color override (or None to keep current)
+            line_width: Custom line width (or None to keep current, 0 to reset to default)
             notes: New notes (or None to keep current)
 
         Returns:
@@ -248,18 +256,26 @@ class EventMarkerService:
         if marker is None:
             return False
 
+        # Save old values BEFORE modifying (for undo and index cleanup)
         old_marker = marker.copy()
+        old_category = marker.category
+        old_sweep_idx = marker.sweep_idx
 
         if category is not None:
             marker.category = category
         if label is not None:
             marker.label = label
+        if condition is not None:
+            marker.condition = condition if condition else None
         if color_override is not None:
             marker.color_override = color_override if color_override else None
+        if line_width is not None:
+            marker.line_width = line_width if line_width > 0 else None
         if notes is not None:
             marker.notes = notes if notes else None
 
-        self._store.update(marker)
+        # Pass old values to store for proper index cleanup
+        self._store.update(marker, old_category=old_category, old_sweep_idx=old_sweep_idx)
         self._push_undo(UndoableAction('update', [old_marker], [marker.copy()]))
         return True
 
@@ -334,6 +350,63 @@ class EventMarkerService:
         markers = self._store.get_by_label(category, label)
         if markers:
             ids = [m.id for m in markers]
+            removed = self._store.remove_many(ids)
+            self._push_undo(UndoableAction('bulk_remove', removed))
+            return len(removed)
+        return 0
+
+    def delete_all_for_sweep(self, sweep_idx: int) -> int:
+        """
+        Delete all markers for a specific sweep.
+
+        Args:
+            sweep_idx: Sweep index to delete markers for
+
+        Returns:
+            Number of markers deleted
+        """
+        markers = self._store.get_by_sweep(sweep_idx)
+        if markers:
+            ids = [m.id for m in markers]
+            removed = self._store.remove_many(ids)
+            self._push_undo(UndoableAction('bulk_remove', removed))
+            return len(removed)
+        return 0
+
+    def delete_category_all_sweeps(self, category: str) -> int:
+        """
+        Delete all markers of a category across all sweeps.
+
+        Args:
+            category: Category to delete
+
+        Returns:
+            Number of markers deleted
+        """
+        markers = self._store.get_by_category(category)
+        if markers:
+            ids = [m.id for m in markers]
+            removed = self._store.remove_many(ids)
+            self._push_undo(UndoableAction('bulk_remove', removed))
+            return len(removed)
+        return 0
+
+    def delete_category_for_sweep(self, category: str, sweep_idx: int) -> int:
+        """
+        Delete all markers of a category in a specific sweep.
+
+        Args:
+            category: Category to delete
+            sweep_idx: Sweep index to delete from
+
+        Returns:
+            Number of markers deleted
+        """
+        # Get markers that match both category AND sweep
+        sweep_markers = self._store.get_by_sweep(sweep_idx)
+        matching = [m for m in sweep_markers if m.category == category]
+        if matching:
+            ids = [m.id for m in matching]
             removed = self._store.remove_many(ids)
             self._push_undo(UndoableAction('bulk_remove', removed))
             return len(removed)

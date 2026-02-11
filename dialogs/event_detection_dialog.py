@@ -18,8 +18,10 @@ from PyQt6.QtCore import Qt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
+from dialogs.export_mixin import ExportMixin
 
-class EventDetectionDialog(QDialog):
+
+class EventDetectionDialog(ExportMixin, QDialog):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -241,6 +243,7 @@ class EventDetectionDialog(QDialog):
         # Apply dark theme and title bar
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
     def _apply_dark_theme(self):
         """Apply dark theme styling to match main application."""

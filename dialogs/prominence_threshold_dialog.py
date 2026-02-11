@@ -22,8 +22,10 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from scipy.signal import find_peaks
 
+from dialogs.export_mixin import ExportMixin
 
-class ProminenceThresholdDialog(QDialog):
+
+class ProminenceThresholdDialog(ExportMixin, QDialog):
     """Interactive prominence threshold detection using Otsu's method."""
 
     def __init__(self, parent=None, y_data=None, sr_hz=None, current_prom=None, current_min_dist=None, current_height_threshold=None,
@@ -75,6 +77,7 @@ class ProminenceThresholdDialog(QDialog):
         # Apply dark theme
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
         self._setup_ui()
 
@@ -450,7 +453,7 @@ class ProminenceThresholdDialog(QDialog):
         t_start = time.time()
 
         try:
-            min_dist_samples = int(self.current_min_dist * self.sr_hz)
+            min_dist_samples = max(1, int(self.current_min_dist * self.sr_hz))  # Ensure at least 1 for low sample rates
 
             # Find ALL peaks with very low prominence AND above baseline (height > 0)
             # height=0 filters out rebound peaks below baseline, giving cleaner 2-population model

@@ -8,7 +8,7 @@ and the existing plot backend.
 
 from typing import Optional, Callable, List, Tuple
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtWidgets import QMenu
+from PyQt6.QtWidgets import QMenu, QColorDialog
 from PyQt6.QtGui import QCursor, QColor, QPen
 import pyqtgraph as pg
 
@@ -39,6 +39,7 @@ class EventMarkerPlotIntegration(QObject):
     marker_added = pyqtSignal(str)    # marker_id
     marker_deleted = pyqtSignal(str)  # marker_id
     markers_changed = pyqtSignal()
+    generate_cta_requested = pyqtSignal()  # Request to open CTA dialog
 
     def __init__(
         self,
@@ -66,15 +67,20 @@ class EventMarkerPlotIntegration(QObject):
         self._get_channel_names: Callable[[], List[str]] = lambda: []
         self._get_signal_data: Optional[Callable[[str, int], Tuple[float, Optional]]] = None
 
+        # Time offset for stimulus-normalized display
+        # When a stimulus channel exists, plots are shifted so t=0 is at stim onset
+        # Markers are stored in absolute time, so we need this offset to display correctly
+        self._time_offset: float = 0.0
+
         # Components (created on enable)
         self._renderer: Optional[MarkerRenderer] = None
         self._editor: Optional[MarkerEditor] = None
 
         # Keyboard state for shortcuts
         self._s_held = False
-        self._p_held = False
+        self._d_held = False  # D for double/paired markers
 
-        # Preview cursor lines (shown when S or P is held)
+        # Preview cursor lines (shown when S or D is held)
         self._preview_lines: List = []  # Start position lines
         self._preview_end_lines: List = []  # End position lines (paired mode only)
         self._preview_visible = False
@@ -106,14 +112,42 @@ class EventMarkerPlotIntegration(QObject):
         """
         self._get_signal_data = fn
 
+    def set_time_offset(self, offset: float) -> None:
+        """
+        Set the time offset for display.
+
+        When a stimulus channel is present, the plot time is normalized so t=0
+        is at the first stimulus onset. This offset is subtracted from marker
+        times when displaying, and added back when creating/editing markers.
+
+        Args:
+            offset: Time offset in seconds (typically first stim onset time)
+        """
+        self._time_offset = offset
+
     def enable(self) -> None:
         """Enable the event marker integration."""
         if self._enabled:
             return
 
         # Intercept context menu (works even before data is loaded)
-        self._original_context_menu_fn = self._plot_host._show_context_menu
-        self._plot_host._show_context_menu = self._show_enhanced_context_menu
+        # Only works with pyqtgraph backend which has _show_context_menu
+        if hasattr(self._plot_host, '_show_context_menu'):
+            self._original_context_menu_fn = self._plot_host._show_context_menu
+            self._plot_host._show_context_menu = self._show_enhanced_context_menu
+        else:
+            # Matplotlib backend - context menu interception not supported
+            self._original_context_menu_fn = None
+            print("[EventMarkers] Event markers not available with matplotlib backend")
+            # Show user warning
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                None,
+                "Event Markers Unavailable",
+                "Event markers require PyQtGraph, which could not be loaded.\n\n"
+                "This may indicate a missing dependency. Please reinstall\n"
+                "the application or contact support if this persists."
+            )
 
         # Install keyboard handler at application level to capture S/P keys regardless of focus
         from PyQt6.QtWidgets import QApplication
@@ -121,8 +155,9 @@ class EventMarkerPlotIntegration(QObject):
         if app:
             app.installEventFilter(self)
 
-        # Also install on graphics layout for mouse events
-        self._plot_host.graphics_layout.installEventFilter(self)
+        # Also install on graphics layout for mouse events (pyqtgraph only)
+        if hasattr(self._plot_host, 'graphics_layout'):
+            self._plot_host.graphics_layout.installEventFilter(self)
 
         self._enabled = True
 
@@ -131,6 +166,11 @@ class EventMarkerPlotIntegration(QObject):
 
     def _ensure_renderer_editor(self) -> bool:
         """Create renderer and editor if plot is ready. Returns True if ready."""
+        # Check if backend supports required methods (pyqtgraph only)
+        if not hasattr(self._plot_host, '_get_main_plot') or not hasattr(self._plot_host, 'graphics_layout'):
+            # Matplotlib backend - event markers not supported
+            return False
+
         # Get the main plot widget
         main_plot = self._plot_host._get_main_plot()
         if main_plot is None:
@@ -159,6 +199,8 @@ class EventMarkerPlotIntegration(QObject):
             main_plot,
             get_all_plots=get_all_plots,
             on_marker_dragged=self._on_marker_drag_finished,
+            get_signal_data=self._get_signal_data,
+            get_sweep_idx=self._get_sweep_idx,
         )
 
         # Create editor if needed
@@ -225,7 +267,24 @@ class EventMarkerPlotIntegration(QObject):
         if not self._ensure_renderer_editor():
             return
 
-        self._renderer.render_markers(self._get_sweep_idx())
+        self._renderer.render_markers(self._get_sweep_idx(), time_offset=self._time_offset)
+
+    def on_sweep_changed(self, new_sweep_idx: int) -> None:
+        """
+        Called when the sweep changes. Re-renders markers for the new sweep.
+
+        Args:
+            new_sweep_idx: The new sweep index
+        """
+        if not self._enabled:
+            return
+
+        # Ensure renderer exists
+        if not self._ensure_renderer_editor():
+            return
+
+        # Re-render markers for the new sweep
+        self._renderer.render_markers(new_sweep_idx, time_offset=self._time_offset)
 
     def eventFilter(self, obj: QObject, event) -> bool:
         """Filter events for keyboard shortcuts and preview cursor."""
@@ -233,45 +292,64 @@ class EventMarkerPlotIntegration(QObject):
         from PyQt6.QtWidgets import QApplication
 
         if event.type() == QEvent.Type.GraphicsSceneMousePress:
-            # Check for S/P + click shortcuts
+            # Check for S/D + click shortcuts
             if event.button() == Qt.MouseButton.LeftButton:
                 s_pressed = self._s_held
-                p_pressed = self._p_held
+                d_pressed = self._d_held
 
-                if s_pressed or p_pressed:
+                if s_pressed or d_pressed:
                     # Hide preview and create actual marker
                     self._hide_preview()
-                    return self._handle_shortcut_click(event, s_pressed, p_pressed)
+                    return self._handle_shortcut_click(event, s_pressed, d_pressed)
 
         elif event.type() == QEvent.Type.GraphicsSceneMouseMove:
-            # Update preview position when S or P is held
-            if self._s_held or self._p_held:
+            # Update preview position when S or D is held
+            if self._s_held or self._d_held:
                 self._update_preview_position(event.scenePos())
 
         elif event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            if key == Qt.Key.Key_S and not self._s_held:
+            modifiers = event.modifiers()
+
+            # Ctrl+Z for undo
+            if key == Qt.Key.Key_Z and modifiers & Qt.KeyboardModifier.ControlModifier:
+                if self._viewmodel.can_undo:
+                    self._viewmodel.undo()
+                    self.refresh()
+                    return True  # Consume the event
+
+            # Ctrl+Y for redo
+            elif key == Qt.Key.Key_Y and modifiers & Qt.KeyboardModifier.ControlModifier:
+                if self._viewmodel.can_redo:
+                    self._viewmodel.redo()
+                    self.refresh()
+                    return True  # Consume the event
+
+            # S key for single marker preview
+            elif key == Qt.Key.Key_S and not self._s_held:
                 self._s_held = True
                 try:
                     self._show_preview(is_paired=False)
                 except Exception as e:
                     print(f"[EventMarkerPlotIntegration] Preview error: {e}")
                     self._s_held = False  # Reset on error
-            elif key == Qt.Key.Key_P and not self._p_held:
-                self._p_held = True
+
+            # D key for paired/double marker preview
+            elif key == Qt.Key.Key_D and not self._d_held:
+                self._d_held = True
                 try:
                     self._show_preview(is_paired=True)
                 except Exception as e:
                     print(f"[EventMarkerPlotIntegration] Preview error: {e}")
-                    self._p_held = False  # Reset on error
+                    self._d_held = False  # Reset on error
 
         elif event.type() == QEvent.Type.KeyRelease:
             key = event.key()
             if key == Qt.Key.Key_S:
                 self._s_held = False
                 self._hide_preview()
-            elif key == Qt.Key.Key_P:
-                self._p_held = False
+            elif key == Qt.Key.Key_D:
+                self._d_held = False
                 self._hide_preview()
 
         return False
@@ -418,8 +496,8 @@ class EventMarkerPlotIntegration(QObject):
             for plot, line in self._preview_end_lines:
                 line.setValue(end_x)
 
-    def _handle_shortcut_click(self, event, s_pressed: bool = False, p_pressed: bool = False) -> bool:
-        """Handle S+click or P+click shortcut."""
+    def _handle_shortcut_click(self, event, s_pressed: bool = False, d_pressed: bool = False) -> bool:
+        """Handle S+click or D+click shortcut."""
         pos = event.scenePos()
 
         # Find which plot was clicked (check all subplots, not just main)
@@ -443,20 +521,25 @@ class EventMarkerPlotIntegration(QObject):
         mouse_point = clicked_plot.vb.mapSceneToView(pos)
         x = mouse_point.x()
 
+        # Convert from display time back to absolute time (add offset)
+        # Display shows time normalized to stim onset (t_display = t_absolute - offset)
+        # So to get absolute time: t_absolute = t_display + offset
+        x_absolute = x + self._time_offset
+
         if s_pressed or self._s_held:
             # Add single marker
             marker = self._viewmodel.add_single_marker(
-                time=x,
+                time=x_absolute,
                 sweep_idx=self._get_sweep_idx(),
             )
             self.marker_added.emit(marker.id)
             self.refresh()
             return True
 
-        if p_pressed or self._p_held:
-            # Add paired marker
+        if d_pressed or self._d_held:
+            # Add paired/double marker
             marker = self._viewmodel.add_paired_marker(
-                start_time=x,
+                start_time=x_absolute,
                 sweep_idx=self._get_sweep_idx(),
                 visible_range=self._get_visible_range(),
             )
@@ -482,13 +565,25 @@ class EventMarkerPlotIntegration(QObject):
 
         # Convert to data coordinates using the clicked plot's ViewBox
         mouse_point = plot.vb.mapSceneToView(pos)
-        click_time = mouse_point.x()
+        click_time_display = mouse_point.x()
 
-        # Check if clicking on an existing marker
+        # Convert from display time to absolute time for marker lookup
+        click_time_absolute = click_time_display + self._time_offset
+
+        # Calculate dynamic tolerance based on visible range
+        # Use 3% of visible range, but with min/max bounds for easier clicking
+        visible_range = self._get_visible_range()
+        if visible_range:
+            range_width = visible_range[1] - visible_range[0]
+            tolerance = max(0.05, min(0.5, range_width * 0.03))  # 3% of range, bounded 0.05-0.5s
+        else:
+            tolerance = 0.1  # Generous default
+
+        # Check if clicking on an existing marker (use absolute time for lookup)
         marker = self._viewmodel.get_marker_at_position(
-            click_time,
+            click_time_absolute,
             self._get_sweep_idx(),
-            tolerance=0.02,
+            tolerance=tolerance,
         )
 
         if marker:
@@ -496,7 +591,8 @@ class EventMarkerPlotIntegration(QObject):
             self._show_marker_context_menu(marker.id)
         else:
             # Show general context menu with marker options
-            self._show_add_marker_context_menu(click_time, plot)
+            # Pass absolute time so markers are created at correct positions
+            self._show_add_marker_context_menu(click_time_absolute, plot)
 
     def _show_add_marker_context_menu(self, click_time: float, plot):
         """Show context menu for adding markers."""
@@ -533,6 +629,7 @@ class EventMarkerPlotIntegration(QObject):
             click_time=click_time,
             existing_actions=existing_actions,
             channel_names=self._get_channel_names(),
+            show_derivative_on_drag=self._renderer.get_show_derivative_on_drag() if self._renderer else False,
         )
 
         # Connect signals
@@ -540,6 +637,13 @@ class EventMarkerPlotIntegration(QObject):
         menu.add_paired_requested.connect(self._on_add_paired_requested)
         menu.auto_detect_requested.connect(self._on_auto_detect_requested)
         menu.settings_requested.connect(self._on_settings_requested)
+        menu.delete_all_requested.connect(self._on_delete_all_requested)
+        menu.delete_all_type_requested.connect(self._on_delete_all_type_requested)
+        menu.delete_all_sweep_requested.connect(self._on_delete_all_sweep_requested)
+        menu.delete_category_sweep_requested.connect(self._on_delete_category_sweep_requested)
+        menu.delete_category_all_requested.connect(self._on_delete_category_all_requested)
+        menu.derivative_toggle_changed.connect(self._on_derivative_toggle_changed)
+        menu.generate_cta_requested.connect(self._on_generate_cta_requested)
 
         # Show menu
         menu.exec(QCursor.pos())
@@ -556,10 +660,16 @@ class EventMarkerPlotIntegration(QObject):
         menu.category_changed.connect(self._on_category_changed)
         menu.label_changed.connect(self._on_label_changed)
         menu.color_requested.connect(self._on_color_requested)
+        menu.line_width_changed.connect(self._on_line_width_changed)
+        menu.grab_width_changed.connect(self._on_grab_width_changed)
         menu.note_requested.connect(self._on_note_requested)
         menu.convert_requested.connect(self._on_convert_requested)
         menu.delete_requested.connect(self._on_delete_requested)
+        menu.delete_all_requested.connect(self._on_delete_all_requested)
         menu.delete_all_type_requested.connect(self._on_delete_all_type_requested)
+        menu.delete_all_sweep_requested.connect(self._on_delete_all_sweep_requested)
+        menu.delete_category_sweep_requested.connect(self._on_delete_category_sweep_requested)
+        menu.delete_category_all_requested.connect(self._on_delete_category_all_requested)
 
         # Show menu
         menu.exec(QCursor.pos())
@@ -589,13 +699,211 @@ class EventMarkerPlotIntegration(QObject):
 
     def _on_auto_detect_requested(self, channel_name: str) -> None:
         """Handle auto-detect request."""
-        # TODO: Show detection settings dialog
-        pass
+        from dialogs.marker_detection_dialog import MarkerDetectionDialog
+
+        # Get channel names
+        channel_names = []
+        if self._get_channel_names:
+            channel_names = self._get_channel_names()
+
+        if not channel_names:
+            return
+
+        # Create a wrapper to get signal data directly from plot items
+        # This ensures we get the exact data that's displayed
+        def get_signal_from_plot(channel: str):
+            # First try to get data directly from plot items (matches display exactly)
+            plot = self._find_plot_for_channel(channel)
+            if plot is not None:
+                for item in plot.listDataItems():
+                    if hasattr(item, 'getData'):
+                        x_data, y_data = item.getData()
+                        if x_data is not None and y_data is not None and len(x_data) > 100:
+                            # This is the main trace
+                            sample_rate = 1.0 / (x_data[1] - x_data[0]) if len(x_data) > 1 else 1000.0
+                            # Add time offset back since plot shows offset-adjusted time
+                            return x_data + self._time_offset, y_data, sample_rate
+
+            # Fallback to callback if plot data not available
+            if self._get_signal_data:
+                t_data, y_data = self._get_signal_data(channel, self._get_sweep_idx())
+                if t_data is not None and y_data is not None and len(t_data) > 1:
+                    sample_rate = 1.0 / (t_data[1] - t_data[0])
+                    return t_data, y_data, sample_rate
+            return None
+
+        # Create and show detection dialog
+        dialog = MarkerDetectionDialog(
+            viewmodel=self._viewmodel,
+            channel_names=channel_names,
+            get_signal_data=get_signal_from_plot,
+            sweep_idx=self._get_sweep_idx(),
+            parent=None,
+            initial_channel=channel_name,
+            time_offset=self._time_offset,  # Pass time offset for display alignment
+        )
+
+        # Connect preview signal to show temporary markers
+        dialog.preview_requested.connect(self._on_preview_events)
+        dialog.detection_complete.connect(self._on_detection_complete)
+        dialog.threshold_changed.connect(self._on_threshold_changed)
+        dialog.threshold_cleared.connect(self._clear_threshold_line)
+
+        dialog.exec()
+
+        # Clear any preview markers and threshold line
+        self._clear_preview_markers()
+        self._clear_threshold_line()
+
+    def _on_preview_events(self, events: list) -> None:
+        """Show preview of detected events (temporary markers)."""
+        # Clear any existing preview markers
+        self._clear_preview_markers()
+
+        if not events:
+            return
+
+        # Store preview items for later cleanup
+        if not hasattr(self, '_preview_items'):
+            self._preview_items = []
+
+        # Get all plots
+        plots = []
+        if hasattr(self._plot_host, 'get_subplots'):
+            plots = self._plot_host.get_subplots()
+        elif hasattr(self._plot_host, '_subplots'):
+            plots = self._plot_host._subplots
+        else:
+            main_plot = self._plot_host._get_main_plot()
+            if main_plot:
+                plots = [main_plot]
+
+        # Draw preview regions on all plots
+        import pyqtgraph as pg
+        for start, end in events:
+            # Convert to display time
+            display_start = start - self._time_offset
+            display_end = end - self._time_offset
+
+            for plot in plots:
+                region = pg.LinearRegionItem(
+                    values=[display_start, display_end],
+                    brush=pg.mkBrush(255, 200, 0, 40),  # Yellow with low alpha
+                    pen=pg.mkPen(255, 200, 0, 150),
+                    movable=False,
+                )
+                region.setZValue(800)  # Below actual markers
+                plot.addItem(region)
+                self._preview_items.append((plot, region))
+
+    def _clear_preview_markers(self) -> None:
+        """Clear any preview markers from the plot."""
+        if not hasattr(self, '_preview_items'):
+            return
+
+        for plot, item in self._preview_items:
+            try:
+                plot.removeItem(item)
+            except:
+                pass
+
+        self._preview_items.clear()
+
+    def _on_detection_complete(self, count: int) -> None:
+        """Handle detection completion."""
+        self._clear_preview_markers()
+        self.refresh()
+
+    def _on_threshold_changed(self, threshold: float, channel_name: str) -> None:
+        """Show threshold line on the specified channel's plot."""
+        import pyqtgraph as pg
+
+        # Clear existing threshold line
+        self._clear_threshold_line()
+
+        # Find the plot for this channel
+        plot = self._find_plot_for_channel(channel_name)
+        if plot is None:
+            return
+
+        # Store threshold line for later cleanup
+        if not hasattr(self, '_threshold_line'):
+            self._threshold_line = None
+            self._threshold_plot = None
+
+        # Create horizontal threshold line (orange dashed)
+        pen = pg.mkPen(color=(255, 165, 0), width=2, style=Qt.PenStyle.DashLine)
+        line = pg.InfiniteLine(
+            pos=threshold,
+            angle=0,  # Horizontal
+            pen=pen,
+            movable=False,
+            label=f'Threshold: {threshold:.3f}',
+            labelOpts={'position': 0.05, 'color': (255, 165, 0), 'fill': (0, 0, 0, 100)}
+        )
+        line.setZValue(1000)  # Above most items
+        plot.addItem(line)
+
+        self._threshold_line = line
+        self._threshold_plot = plot
+
+    def _find_plot_for_channel(self, channel_name: str):
+        """Find the plot panel that displays a specific channel."""
+        import pyqtgraph as pg
+
+        # Get all plots
+        plots = []
+        if hasattr(self._plot_host, 'get_subplots'):
+            plots = self._plot_host.get_subplots()
+        elif hasattr(self._plot_host, '_subplots'):
+            plots = self._plot_host._subplots
+        else:
+            main_plot = self._plot_host._get_main_plot()
+            if main_plot:
+                plots = [main_plot]
+
+        # Find plot by Y-axis label
+        for plot in plots:
+            try:
+                left_axis = plot.getAxis('left')
+                if left_axis and hasattr(left_axis, 'labelText'):
+                    label = left_axis.labelText
+                    if label and channel_name in label:
+                        return plot
+            except:
+                pass
+
+        # Fallback: return first plot if only one exists
+        if len(plots) == 1:
+            return plots[0]
+
+        return None
+
+    def _clear_threshold_line(self) -> None:
+        """Clear the threshold line from the plot."""
+        if hasattr(self, '_threshold_line') and self._threshold_line is not None:
+            try:
+                if self._threshold_plot:
+                    self._threshold_plot.removeItem(self._threshold_line)
+            except:
+                pass
+            self._threshold_line = None
+            self._threshold_plot = None
 
     def _on_settings_requested(self) -> None:
         """Handle settings request."""
         # TODO: Show settings dialog
         pass
+
+    def _on_derivative_toggle_changed(self, enabled: bool) -> None:
+        """Handle derivative overlay toggle change from context menu."""
+        if self._renderer:
+            self._renderer.set_show_derivative_on_drag(enabled)
+
+    def _on_generate_cta_requested(self) -> None:
+        """Handle request to generate photometry CTA."""
+        # Emit signal for main window to handle
+        self.generate_cta_requested.emit()
 
     def _show_export_dialog(self, plot) -> None:
         """Show export dialog for saving plot as image."""
@@ -768,8 +1076,33 @@ class EventMarkerPlotIntegration(QObject):
 
     def _on_color_requested(self, marker_id: str) -> None:
         """Handle color picker request."""
-        # TODO: Show color dialog
-        pass
+        marker = self._viewmodel.store.get(marker_id)
+        if marker is None:
+            return
+
+        # Get current color as starting color
+        current_color = QColor(self._viewmodel.get_color_for_marker(marker))
+
+        color = QColorDialog.getColor(
+            current_color,
+            None,
+            f"Set Marker Color — {marker.category}/{marker.label}",
+        )
+        if color.isValid():
+            self._viewmodel.update_marker(marker_id, color_override=color.name())
+            self.refresh()
+
+    def _on_line_width_changed(self, marker_id: str, width: int) -> None:
+        """Handle line thickness change from context menu."""
+        self._viewmodel.update_marker(marker_id, line_width=width)
+        self.refresh()
+
+    def _on_grab_width_changed(self, marker_id: str, grab_width: int) -> None:
+        """Handle edge grab width change for paired markers."""
+        if marker_id in self._renderer._paired_regions:
+            for region in self._renderer._paired_regions[marker_id]:
+                for edge_line in region.lines:
+                    edge_line._maxMarkerWidth = grab_width
 
     def _on_note_requested(self, marker_id: str) -> None:
         """Handle add note request."""
@@ -787,10 +1120,41 @@ class EventMarkerPlotIntegration(QObject):
         self._viewmodel.delete_marker(marker_id)
         self.marker_deleted.emit(marker_id)
 
+    def _on_delete_all_requested(self) -> None:
+        """Handle delete all markers request."""
+        count = self._viewmodel.clear_all()
+        if count > 0:
+            self.refresh()
+            self.markers_changed.emit()
+
     def _on_delete_all_type_requested(self, category: str, label: str) -> None:
         """Handle delete all of type request."""
         self._viewmodel.service.delete_all_of_type(category, label)
+        self.refresh()
         self.markers_changed.emit()
+
+    def _on_delete_all_sweep_requested(self) -> None:
+        """Handle delete all in current sweep request."""
+        sweep_idx = self._get_sweep_idx()
+        count = self._viewmodel.delete_all_for_sweep(sweep_idx)
+        if count > 0:
+            self.refresh()
+            self.markers_changed.emit()
+
+    def _on_delete_category_sweep_requested(self, category: str) -> None:
+        """Handle delete category in current sweep request."""
+        sweep_idx = self._get_sweep_idx()
+        count = self._viewmodel.delete_category_for_sweep(category, sweep_idx)
+        if count > 0:
+            self.refresh()
+            self.markers_changed.emit()
+
+    def _on_delete_category_all_requested(self, category: str) -> None:
+        """Handle delete category in all sweeps request."""
+        count = self._viewmodel.delete_category_all_sweeps(category)
+        if count > 0:
+            self.refresh()
+            self.markers_changed.emit()
 
     # -------------------------------------------------------------------------
     # Internal handlers

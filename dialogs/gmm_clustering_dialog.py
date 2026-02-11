@@ -16,10 +16,12 @@ from sklearn.metrics import silhouette_score
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox, QPushButton,
     QCheckBox, QTableWidget, QTableWidgetItem, QGroupBox, QRadioButton,
-    QButtonGroup, QDoubleSpinBox, QScrollArea, QWidget, QMessageBox, QSizePolicy
+    QButtonGroup, QDoubleSpinBox, QScrollArea, QWidget, QMessageBox, QSizePolicy,
+    QMenu, QFileDialog, QApplication
 )
 from PyQt6.QtCore import Qt, QEvent
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QAction, QPainter
+from PyQt6.QtPrintSupport import QPrinter
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -158,6 +160,8 @@ class GMMClusteringDialog(QDialog):
         self.main_window = main_window
         self.cluster_labels = None  # Will store cluster assignments
         self.gmm_model = None
+        self.gmm_scaler = None  # StandardScaler used for normalization
+        self.gmm_features = None  # List of feature names used for GMM
         self.feature_data = None  # Per-breath feature matrix
         self.breath_cycles = []  # List of (sweep_idx, breath_idx) tuples
         self.sniffing_cluster_id = None  # Which cluster represents sniffing
@@ -573,6 +577,39 @@ class GMMClusteringDialog(QDialog):
         plot_layout = QVBoxLayout(plot_container)
         plot_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Export toolbar
+        export_toolbar = QHBoxLayout()
+        export_toolbar.setContentsMargins(5, 5, 5, 5)
+        export_toolbar.setSpacing(8)
+
+        export_label = QLabel("Export:")
+        export_label.setStyleSheet("color: #888; font-size: 11px;")
+        export_toolbar.addWidget(export_label)
+
+        # PNG export button
+        self.export_png_btn = QPushButton("PNG")
+        self.export_png_btn.setToolTip("Export plot as PNG image (high resolution)")
+        self.export_png_btn.setFixedWidth(60)
+        self.export_png_btn.clicked.connect(lambda: self._export_figure('png'))
+        export_toolbar.addWidget(self.export_png_btn)
+
+        # SVG export button
+        self.export_svg_btn = QPushButton("SVG")
+        self.export_svg_btn.setToolTip("Export plot as SVG vector graphic")
+        self.export_svg_btn.setFixedWidth(60)
+        self.export_svg_btn.clicked.connect(lambda: self._export_figure('svg'))
+        export_toolbar.addWidget(self.export_svg_btn)
+
+        # PDF export button
+        self.export_pdf_btn = QPushButton("PDF")
+        self.export_pdf_btn.setToolTip("Export plot as PDF (vector, Illustrator compatible)")
+        self.export_pdf_btn.setFixedWidth(60)
+        self.export_pdf_btn.clicked.connect(lambda: self._export_figure('pdf'))
+        export_toolbar.addWidget(self.export_pdf_btn)
+
+        export_toolbar.addStretch()
+        plot_layout.addLayout(export_toolbar)
+
         # Matplotlib figure for visualizations (will contain both histograms and scatter plots)
         # Fit width to window, tall for scrolling
         self.figure = Figure(figsize=(9, 25))  # Narrower to fit width, tall for vertical scroll
@@ -595,6 +632,181 @@ class GMMClusteringDialog(QDialog):
 
         # Enable dark title bar on Windows
         self._enable_dark_title_bar()
+
+        # Set up right-click context menu for export
+        self._setup_context_menu()
+
+    def _setup_context_menu(self):
+        """Set up right-click context menu for export options."""
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _show_context_menu(self, pos):
+        """Show context menu with export options."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3e3e42;
+                margin: 4px 10px;
+            }
+        """)
+
+        # Export submenu
+        export_menu = menu.addMenu("Export...")
+
+        png_action = QAction("Export as PNG (High Resolution)", self)
+        png_action.triggered.connect(lambda: self._export_dialog_image('png'))
+        export_menu.addAction(png_action)
+
+        pdf_action = QAction("Export as PDF (Vector)", self)
+        pdf_action.triggered.connect(self._export_dialog_pdf)
+        export_menu.addAction(pdf_action)
+
+        jpg_action = QAction("Export as JPEG", self)
+        jpg_action.triggered.connect(lambda: self._export_dialog_image('jpg'))
+        export_menu.addAction(jpg_action)
+
+        export_menu.addSeparator()
+
+        # Plot-only export (matplotlib figure)
+        if hasattr(self, 'figure') and self.figure.axes:
+            plot_menu = menu.addMenu("Export Plot Only...")
+
+            plot_png = QAction("Plot as PNG", self)
+            plot_png.triggered.connect(lambda: self._export_figure('png'))
+            plot_menu.addAction(plot_png)
+
+            plot_svg = QAction("Plot as SVG (Vector)", self)
+            plot_svg.triggered.connect(lambda: self._export_figure('svg'))
+            plot_menu.addAction(plot_svg)
+
+            plot_pdf = QAction("Plot as PDF (Vector)", self)
+            plot_pdf.triggered.connect(lambda: self._export_figure('pdf'))
+            plot_menu.addAction(plot_pdf)
+
+        export_menu.addSeparator()
+
+        clipboard_action = QAction("Copy to Clipboard", self)
+        clipboard_action.triggered.connect(self._copy_to_clipboard)
+        export_menu.addAction(clipboard_action)
+
+        menu.exec(self.mapToGlobal(pos))
+
+    def _export_dialog_image(self, format: str):
+        """Export entire dialog as image."""
+        default_name = f"GMM_Clustering.{format}"
+
+        format_filters = {
+            'png': "PNG Image (*.png)",
+            'jpg': "JPEG Image (*.jpg)"
+        }
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, f"Export as {format.upper()}", default_name,
+            format_filters.get(format, "All Files (*)")
+        )
+
+        if not filepath:
+            return
+
+        if not filepath.lower().endswith(f'.{format}'):
+            filepath += f'.{format}'
+
+        try:
+            pixmap = self.grab()
+            scaled_size = pixmap.size() * 2
+            pixmap = pixmap.scaled(
+                scaled_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            quality = 95 if format == 'jpg' else -1
+            if pixmap.save(filepath, quality=quality):
+                QMessageBox.information(self, "Export Successful",
+                    f"Image exported to:\n{filepath}\n\nResolution: {pixmap.width()} x {pixmap.height()}")
+            else:
+                raise Exception("Failed to save image")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export:\n{str(e)}")
+
+    def _export_dialog_pdf(self):
+        """Export entire dialog as PDF."""
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export as PDF", "GMM_Clustering.pdf",
+            "PDF Document (*.pdf)"
+        )
+
+        if not filepath:
+            return
+
+        if not filepath.lower().endswith('.pdf'):
+            filepath += '.pdf'
+
+        try:
+            from PyQt6.QtGui import QPageLayout, QPageSize
+
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(filepath)
+            printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+
+            painter = QPainter()
+            if not painter.begin(printer):
+                raise Exception("Failed to initialize PDF painter")
+
+            page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            dialog_size = self.size()
+
+            scale_x = page_rect.width() / dialog_size.width()
+            scale_y = page_rect.height() / dialog_size.height()
+            scale = min(scale_x, scale_y) * 0.95
+
+            offset_x = (page_rect.width() - dialog_size.width() * scale) / 2
+            offset_y = (page_rect.height() - dialog_size.height() * scale) / 2
+
+            painter.translate(offset_x, offset_y)
+            painter.scale(scale, scale)
+            self.render(painter)
+            painter.end()
+
+            QMessageBox.information(self, "PDF Saved", f"PDF exported to:\n{filepath}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export PDF:\n{str(e)}")
+
+    def _copy_to_clipboard(self):
+        """Copy dialog screenshot to clipboard."""
+        try:
+            pixmap = self.grab()
+            scaled_size = pixmap.size() * 2
+            pixmap = pixmap.scaled(
+                scaled_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            clipboard = QApplication.clipboard()
+            clipboard.setPixmap(pixmap)
+
+            QMessageBox.information(self, "Copied",
+                f"Screenshot copied to clipboard!\n\nResolution: {pixmap.width()} x {pixmap.height()} pixels")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Copy Failed", f"Failed to copy:\n{str(e)}")
 
     def _enable_dark_title_bar(self):
         """Enable dark title bar on Windows 10/11."""
@@ -791,6 +1003,13 @@ class GMMClusteringDialog(QDialog):
             confidence_threshold=confidence_threshold
         )
 
+        # Store GMM model, scaler, and features in state for decision boundary overlays
+        self.main_window.state.gmm_model = self.gmm_model
+        self.main_window.state.gmm_scaler = self.gmm_scaler
+        self.main_window.state.gmm_features = self.gmm_features
+        self.main_window.state.gmm_sniffing_cluster_id = self.sniffing_cluster_id
+        print(f"[gmm-dialog] Stored GMM model in state (features: {self.gmm_features})")
+
         # Build BOTH eupnea AND sniffing regions using shared function
         results = gmm_clustering.build_eupnea_sniffing_regions(
             self.main_window.state,
@@ -871,8 +1090,9 @@ class GMMClusteringDialog(QDialog):
                 return
 
             # Standardize features
-            scaler = StandardScaler()
-            feature_matrix_scaled = scaler.fit_transform(feature_matrix)
+            self.gmm_scaler = StandardScaler()
+            feature_matrix_scaled = self.gmm_scaler.fit_transform(feature_matrix)
+            self.gmm_features = selected_features  # Store which features were used
 
             # Fit GMM
             n_clusters = self.n_clusters_spin.value()
@@ -2315,4 +2535,88 @@ GMM is an unsupervised machine learning technique that automatically identifies 
 
         print(f"[gmm-clustering] Applied {n_sniffing_breaths} sniffing breaths to main plot")
         print(f"[gmm-clustering] Created {total_regions} merged sniffing regions across {len(sniffing_breaths_by_sweep)} sweeps")
+
+    def _export_figure(self, format: str):
+        """Export the matplotlib figure to a file.
+
+        Args:
+            format: Export format ('png', 'svg', or 'pdf')
+        """
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
+        # Check if there's anything to export
+        if not self.figure.axes:
+            QMessageBox.warning(
+                self,
+                "Nothing to Export",
+                "Run GMM clustering first to generate visualizations."
+            )
+            return
+
+        # Set up file filter based on format
+        format_filters = {
+            'png': "PNG Image (*.png)",
+            'svg': "SVG Vector (*.svg)",
+            'pdf': "PDF Document (*.pdf)"
+        }
+
+        file_filter = format_filters.get(format, "All Files (*)")
+
+        # Default filename
+        default_name = f"gmm_clustering.{format}"
+
+        # Show save dialog
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Export as {format.upper()}",
+            default_name,
+            file_filter
+        )
+
+        if not filepath:
+            return  # User cancelled
+
+        # Ensure correct extension
+        if not filepath.lower().endswith(f'.{format}'):
+            filepath += f'.{format}'
+
+        try:
+            # Set up export parameters
+            dpi = 300 if format == 'png' else 150  # Higher DPI for raster
+
+            # For PDF/SVG, ensure proper vector output
+            if format in ('pdf', 'svg'):
+                self.figure.savefig(
+                    filepath,
+                    format=format,
+                    dpi=dpi,
+                    bbox_inches='tight',
+                    facecolor=self.figure.get_facecolor(),
+                    edgecolor='none'
+                )
+            else:
+                # PNG - high resolution raster
+                self.figure.savefig(
+                    filepath,
+                    format=format,
+                    dpi=dpi,
+                    bbox_inches='tight',
+                    facecolor=self.figure.get_facecolor(),
+                    edgecolor='none'
+                )
+
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"Figure exported to:\n{filepath}"
+            )
+            print(f"[gmm-dialog] Exported figure to: {filepath}")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Failed to export figure:\n{str(e)}"
+            )
+            print(f"[gmm-dialog] Export failed: {e}")
 

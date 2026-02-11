@@ -210,3 +210,180 @@ def get_error_log_path():
         Path: Error log file path
     """
     return get_config_dir() / 'error_log.json'
+
+
+# ============================================================================
+# NPZ File Registry
+# ============================================================================
+
+def get_npz_registry_path():
+    """
+    Get path to NPZ registry file.
+
+    The registry maps source data files (e.g., FP_data*.csv) to their
+    processed NPZ file paths, enabling automatic discovery when the user
+    opens a source file that was previously processed.
+
+    Returns:
+        Path: NPZ registry file path
+    """
+    return get_config_dir() / 'npz_registry.json'
+
+
+def load_npz_registry():
+    """
+    Load the NPZ file registry.
+
+    Returns:
+        dict: Registry mapping source_file_path -> {
+            'npz_path': str,
+            'created': str (ISO timestamp),
+            'last_accessed': str (ISO timestamp),
+            'n_experiments': int,
+            'animal_ids': list[str]
+        }
+    """
+    registry_path = get_npz_registry_path()
+    if registry_path.exists():
+        try:
+            with open(registry_path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_npz_registry(registry):
+    """
+    Save the NPZ file registry.
+
+    Args:
+        registry: dict mapping source paths to NPZ info
+    """
+    registry_path = get_npz_registry_path()
+    try:
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=2)
+    except IOError as e:
+        print(f"[Config] Warning: Failed to save NPZ registry: {e}")
+
+
+def register_npz_file(source_file_path, npz_path, n_experiments=1, animal_ids=None):
+    """
+    Register an NPZ file in the registry, mapping it to its source data file.
+
+    Args:
+        source_file_path: Path to the original source file (e.g., FP_data*.csv)
+        npz_path: Path to the saved NPZ file
+        n_experiments: Number of experiments in the NPZ
+        animal_ids: Optional list of animal IDs for each experiment
+    """
+    from datetime import datetime
+
+    registry = load_npz_registry()
+
+    # Normalize paths to strings
+    source_key = str(Path(source_file_path).resolve())
+    npz_str = str(Path(npz_path).resolve())
+
+    now = datetime.now().isoformat()
+
+    registry[source_key] = {
+        'npz_path': npz_str,
+        'created': registry.get(source_key, {}).get('created', now),
+        'last_accessed': now,
+        'n_experiments': n_experiments,
+        'animal_ids': animal_ids or []
+    }
+
+    save_npz_registry(registry)
+    print(f"[Config] Registered NPZ: {Path(source_file_path).name} -> {Path(npz_path).name}")
+
+
+def lookup_npz_for_source(source_file_path):
+    """
+    Look up the NPZ file path for a given source data file.
+
+    Args:
+        source_file_path: Path to the source file to look up
+
+    Returns:
+        dict with 'npz_path' and metadata if found, None if not registered
+        or if the NPZ file no longer exists
+    """
+    registry = load_npz_registry()
+
+    source_key = str(Path(source_file_path).resolve())
+
+    if source_key in registry:
+        entry = registry[source_key]
+        npz_path = Path(entry['npz_path'])
+
+        # Verify the NPZ file still exists
+        if npz_path.exists():
+            # Update last accessed time
+            from datetime import datetime
+            entry['last_accessed'] = datetime.now().isoformat()
+            save_npz_registry(registry)
+            return entry
+        else:
+            # NPZ file was deleted, remove from registry
+            print(f"[Config] NPZ file no longer exists, removing from registry: {npz_path}")
+            del registry[source_key]
+            save_npz_registry(registry)
+
+    return None
+
+
+def get_recent_npz_files(limit=10):
+    """
+    Get list of recently accessed NPZ files.
+
+    Args:
+        limit: Maximum number of entries to return
+
+    Returns:
+        List of dicts with 'source_path', 'npz_path', 'last_accessed', etc.
+        sorted by last_accessed (most recent first)
+    """
+    registry = load_npz_registry()
+
+    # Filter to only existing files and add source_path key
+    valid_entries = []
+    for source_path, entry in registry.items():
+        npz_path = Path(entry['npz_path'])
+        if npz_path.exists():
+            valid_entries.append({
+                'source_path': source_path,
+                **entry
+            })
+
+    # Sort by last_accessed (most recent first)
+    valid_entries.sort(key=lambda x: x.get('last_accessed', ''), reverse=True)
+
+    return valid_entries[:limit]
+
+
+def cleanup_npz_registry():
+    """
+    Remove entries for NPZ files that no longer exist.
+
+    Returns:
+        int: Number of entries removed
+    """
+    registry = load_npz_registry()
+    original_count = len(registry)
+
+    # Keep only entries where NPZ file exists
+    cleaned = {
+        source: entry
+        for source, entry in registry.items()
+        if Path(entry['npz_path']).exists()
+    }
+
+    removed = original_count - len(cleaned)
+    if removed > 0:
+        save_npz_registry(cleaned)
+        print(f"[Config] Cleaned up NPZ registry: removed {removed} stale entries")
+
+    return removed

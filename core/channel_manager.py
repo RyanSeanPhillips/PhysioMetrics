@@ -188,26 +188,38 @@ class ChannelRowWidget(QFrame):
 
         # Settings button container - fixed width to maintain alignment
         self.settings_container = QWidget()
-        self.settings_container.setFixedWidth(12)
+        self.settings_container.setFixedWidth(18)
         settings_layout = QHBoxLayout(self.settings_container)
         settings_layout.setContentsMargins(0, 0, 0, 0)
         settings_layout.setSpacing(0)
 
         self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setFixedSize(12, 12)
+        self.settings_btn.setFixedSize(16, 16)  # Slightly larger for better hover effect
         self.settings_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
                 color: #007acc;
                 border: none;
-                font-size: 9px;
-                padding: 0px;
+                border-radius: 3px;
+                font-size: 10px;
+                padding: 2px;
             }
             QPushButton:hover {
+                background-color: rgba(0, 122, 204, 0.3);
                 color: #3399ff;
+                font-size: 11px;
+            }
+            QPushButton:pressed {
+                background-color: rgba(0, 122, 204, 0.5);
+            }
+            QToolTip {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #555555;
+                padding: 4px;
             }
         """)
-        self.settings_btn.setToolTip("Open settings for this channel")
+        self.settings_btn.setToolTip("Edit photometry settings")
         self.settings_btn.clicked.connect(self._on_settings_clicked)
         self.settings_btn.setVisible(self.config.source == "computed")
         settings_layout.addWidget(self.settings_btn)
@@ -832,9 +844,9 @@ class ChannelManagerWidget(QWidget):
                 )
 
     def _on_channel_settings_requested(self, name: str):
+        # Only emit signal - main.py will call the callback
+        # Don't call callback directly here to avoid double-invocation
         self.settings_requested.emit(name)
-        if name in self._channels and self._channels[name].settings_callback:
-            self._channels[name].settings_callback()
 
 
 # Test the widget standalone

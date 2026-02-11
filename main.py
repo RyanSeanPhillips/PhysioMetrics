@@ -9,20 +9,32 @@ from core.file_table_delegates import ButtonDelegate, StatusDelegate, AutoComple
 import re
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QLineEdit, QComboBox, QLabel,
-    QDialogButtonBox, QPushButton, QHBoxLayout, QCheckBox
+    QDialogButtonBox, QPushButton, QHBoxLayout, QCheckBox, QMenu
 )
+from PyQt6.QtGui import QAction, QPainter
+from PyQt6.QtPrintSupport import QPrinter
 
 import csv, json
 
 
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import sys
 import os
 
 # Fix KMeans memory leak warning on Windows
 os.environ['OMP_NUM_THREADS'] = '1'
+
+# Set Windows AppUserModelID so app shows as "PhysioMetrics" in Task Manager
+# and groups correctly in taskbar (instead of showing as "Python")
+try:
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        "RyanPhillips.PhysioMetrics.App.1"
+    )
+except Exception:
+    pass  # Not on Windows or API not available
 
 import numpy as np
 import pandas as pd
@@ -56,6 +68,7 @@ from editing import EditingModes
 from dialogs import SpectralAnalysisDialog, SaveMetaDialog, PeakNavigatorDialog
 from dialogs.advanced_peak_editor_dialog import AdvancedPeakEditorDialog
 from dialogs.photometry_import_dialog_v2 import PhotometryImportDialog
+from dialogs.photometry.chooser_dialog import show_photometry_chooser
 from core import photometry
 from core.channel_manager import ChannelManagerWidget
 from core.ai_notebook_manager import AINotebookManager
@@ -66,6 +79,10 @@ from core.recovery_manager import RecoveryManager
 from core.classifier_manager import ClassifierManager
 from core.gmm_manager import GMMManager
 from core.notes_preview_manager import NotesPreviewManager
+
+# Import new event marker system
+from viewmodels.event_marker_viewmodel import EventMarkerViewModel
+from views.events.plot_integration import EventMarkerPlotIntegration
 
 # Import version
 from version_info import VERSION_STRING
@@ -106,10 +123,10 @@ class MainWindow(QMainWindow):
         # Tab order is now set in the UI file:
         # 0: Notes Files, 1: Project Files, 2: Consolidation, 3: Code Notebook
 
-        # Style status bar to match dark theme
+        # Style status bar to match dark theme (true black)
         self.statusBar().setStyleSheet("""
             QStatusBar {
-                background-color: #1e1e1e;
+                background-color: #000000;
                 color: #d4d4d4;
                 border-top: 1px solid #3e3e42;
             }
@@ -168,9 +185,8 @@ class MainWindow(QMainWindow):
         self.eupnea_detection_mode = "gmm"  # "gmm" or "frequency" - default to GMM-based detection
 
         # --- Embed Plot Widget into MainPlot (QFrame in Designer) ---
-        # Check saved backend preference (default to matplotlib)
-        use_pyqtgraph = self.settings.value("use_pyqtgraph", False, type=bool)
-        self._current_backend = 'pyqtgraph' if (use_pyqtgraph and PYQTGRAPH_AVAILABLE) else 'matplotlib'
+        # Force pyqtgraph backend - matplotlib is disabled (doesn't support event markers)
+        self._current_backend = 'pyqtgraph' if PYQTGRAPH_AVAILABLE else 'matplotlib'
         self.state.plotting_backend = self._current_backend
 
         # Create appropriate plot host
@@ -184,11 +200,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plot_host)
 
+        # --- Setup New Event Marker System ---
+        self._setup_new_event_markers()
+
         # --- Setup Channel Manager Widget ---
         self._setup_channel_manager()
 
         # --- Setup Event Markers Widget ---
         self._setup_event_markers_widget()
+
+        # --- Method Aliases (for backward compatibility with old code/plugins) ---
+        self.refresh_plot = self.redraw_main_plot
+        self._show_status = self._log_status_message
 
         saved_geom = self.settings.value("geometry")
         if saved_geom:
@@ -217,6 +240,11 @@ class MainWindow(QMainWindow):
         x_shortcut = QShortcut(QKeySequence("X"), self)
         x_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         x_shortcut.activated.connect(self._on_x_pressed)
+
+        # Add Ctrl+R shortcut for hot reload (development) - works from any window
+        ctrl_r_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        ctrl_r_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        ctrl_r_shortcut.activated.connect(self._on_hot_reload)
 
         # --- Wire channel selection (immediate application) ---
         self.AnalyzeChanSelect.currentIndexChanged.connect(self.on_analyze_channel_changed)
@@ -623,6 +651,182 @@ class MainWindow(QMainWindow):
         # optional: keep a handle to the chosen dir
         self._curation_dir = None
 
+        # Set up right-click export context menu for main window
+        self._setup_export_context_menu()
+
+    def _setup_export_context_menu(self):
+        """Set up right-click context menu for screenshot/PDF export."""
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_export_context_menu)
+
+    def _show_export_context_menu(self, pos):
+        """Show context menu with export options."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3e3e42;
+                margin: 4px 10px;
+            }
+        """)
+
+        # Export submenu
+        export_menu = menu.addMenu("Export Window...")
+
+        png_action = QAction("Export as PNG (High Resolution)", self)
+        png_action.triggered.connect(lambda: self._export_window_as_image('png'))
+        export_menu.addAction(png_action)
+
+        pdf_action = QAction("Export as PDF", self)
+        pdf_action.triggered.connect(self._export_window_as_pdf)
+        export_menu.addAction(pdf_action)
+
+        jpg_action = QAction("Export as JPEG", self)
+        jpg_action.triggered.connect(lambda: self._export_window_as_image('jpg'))
+        export_menu.addAction(jpg_action)
+
+        export_menu.addSeparator()
+
+        clipboard_action = QAction("Copy to Clipboard", self)
+        clipboard_action.triggered.connect(self._copy_window_to_clipboard)
+        export_menu.addAction(clipboard_action)
+
+        menu.exec(self.mapToGlobal(pos))
+
+    def _export_window_as_image(self, format: str):
+        """Export main window as image."""
+        # Use loaded filename if available
+        if self.state.in_path:
+            base_name = Path(self.state.in_path).stem
+        else:
+            base_name = "PhysioMetrics"
+        default_name = f"{base_name}_screenshot.{format}"
+
+        format_filters = {
+            'png': "PNG Image (*.png)",
+            'jpg': "JPEG Image (*.jpg)"
+        }
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, f"Export as {format.upper()}", default_name,
+            format_filters.get(format, "All Files (*)")
+        )
+
+        if not filepath:
+            return
+
+        if not filepath.lower().endswith(f'.{format}'):
+            filepath += f'.{format}'
+
+        try:
+            # Capture at 2x resolution
+            pixmap = self.grab()
+            scaled_size = pixmap.size() * 2
+            pixmap = pixmap.scaled(
+                scaled_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            quality = 95 if format == 'jpg' else -1
+            if pixmap.save(filepath, quality=quality):
+                QMessageBox.information(self, "Export Successful",
+                    f"Screenshot exported to:\n{filepath}\n\n"
+                    f"Resolution: {pixmap.width()} x {pixmap.height()} pixels")
+                print(f"[export] Saved {format.upper()}: {filepath}")
+            else:
+                raise Exception("Failed to save image")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export:\n{str(e)}")
+
+    def _export_window_as_pdf(self):
+        """Export main window as PDF."""
+        if self.state.in_path:
+            base_name = Path(self.state.in_path).stem
+        else:
+            base_name = "PhysioMetrics"
+        default_name = f"{base_name}_screenshot.pdf"
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export as PDF", default_name,
+            "PDF Document (*.pdf)"
+        )
+
+        if not filepath:
+            return
+
+        if not filepath.lower().endswith('.pdf'):
+            filepath += '.pdf'
+
+        try:
+            from PyQt6.QtGui import QPageLayout
+
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(filepath)
+            printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+
+            painter = QPainter()
+            if not painter.begin(printer):
+                raise Exception("Failed to initialize PDF painter")
+
+            page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            window_size = self.size()
+
+            scale_x = page_rect.width() / window_size.width()
+            scale_y = page_rect.height() / window_size.height()
+            scale = min(scale_x, scale_y) * 0.95
+
+            offset_x = (page_rect.width() - window_size.width() * scale) / 2
+            offset_y = (page_rect.height() - window_size.height() * scale) / 2
+
+            painter.translate(offset_x, offset_y)
+            painter.scale(scale, scale)
+            self.render(painter)
+            painter.end()
+
+            QMessageBox.information(self, "PDF Saved", f"PDF exported to:\n{filepath}")
+            print(f"[export] Saved PDF: {filepath}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export PDF:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _copy_window_to_clipboard(self):
+        """Copy window screenshot to clipboard."""
+        try:
+            pixmap = self.grab()
+            scaled_size = pixmap.size() * 2
+            pixmap = pixmap.scaled(
+                scaled_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            clipboard = QApplication.clipboard()
+            clipboard.setPixmap(pixmap)
+
+            QMessageBox.information(self, "Copied to Clipboard",
+                f"Screenshot copied!\n\n"
+                f"Resolution: {pixmap.width()} x {pixmap.height()} pixels\n\n"
+                "Paste with Ctrl+V into any application.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Copy Failed", f"Failed to copy:\n{str(e)}")
+
     def _auto_load_test_file(self, file_path: Path):
         """Helper function for testing mode - auto-loads file and sets channels."""
         print(f"[TESTING MODE] _auto_load_test_file() called with: {file_path}")
@@ -783,12 +987,23 @@ class MainWindow(QMainWindow):
             for path in pinned_paths:
                 p = Path(path)
                 if p.exists():
+                    # Show path context for pinned items too
+                    parts = p.parts
+                    if len(parts) >= 3:
+                        display_name = f"{parts[-3]}/{parts[-2]}/{p.name}"
+                    elif len(parts) >= 2:
+                        display_name = f"{parts[-2]}/{p.name}"
+                    else:
+                        display_name = p.name
+                    if len(display_name) > 45:
+                        display_name = "..." + display_name[-42:]
+
                     if p.is_file():
-                        action = self._browse_menu.addAction(f"📄 {p.name}")
+                        action = self._browse_menu.addAction(f"📄 {display_name}")
                         action.setToolTip(str(p))
                         action.triggered.connect(lambda checked, fp=str(p): self._load_recent_file(fp))
                     else:
-                        action = self._browse_menu.addAction(f"📁 {p.name}")
+                        action = self._browse_menu.addAction(f"📁 {display_name}")
                         action.setToolTip(str(p))
                         action.triggered.connect(lambda checked, fp=str(p): self._browse_from_folder(fp))
 
@@ -798,7 +1013,22 @@ class MainWindow(QMainWindow):
             for file_path in recent_files[:8]:
                 p = Path(file_path)
                 if p.exists():
-                    action = self._browse_menu.addAction(f"📄 {p.name}")
+                    # Show 3 levels of path context for clarity (especially for FP_data files)
+                    # e.g., "Project/Experiment/FP_data_0/FP_data_0.csv" -> "Project/.../FP_data_0.csv"
+                    parts = p.parts
+                    if len(parts) >= 4:
+                        # Show: grandparent/.../filename
+                        display_name = f"{parts[-4]}/.../{p.name}"
+                    elif len(parts) >= 3:
+                        display_name = f"{parts[-3]}/{parts[-2]}/{p.name}"
+                    elif len(parts) >= 2:
+                        display_name = f"{parts[-2]}/{p.name}"
+                    else:
+                        display_name = p.name
+                    # Truncate if still too long
+                    if len(display_name) > 50:
+                        display_name = "..." + display_name[-47:]
+                    action = self._browse_menu.addAction(f"📄 {display_name}")
                     action.setToolTip(str(p))
                     action.triggered.connect(lambda checked, fp=file_path: self._load_recent_file(fp))
 
@@ -964,31 +1194,27 @@ class MainWindow(QMainWindow):
 
         # Check if this is a photometry file (CSV with FP_data pattern)
         elif len(file_paths) == 1 and photometry.detect_photometry_file(file_paths[0]):
-            # Check if an existing processed NPZ file exists
-            existing_npz = photometry.find_existing_photometry_npz(file_paths[0])
+            # Use the chooser dialog to check for existing NPZ and show options
+            action, data = show_photometry_chooser(self, file_paths[0])
 
-            if existing_npz:
-                # Ask user what they want to do
-                reply = QMessageBox.question(
-                    self,
-                    "Existing Processed Data Found",
-                    f"A processed photometry file was found:\n{existing_npz.name}\n\n"
-                    "Load existing file (faster) or reprocess from raw data?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Yes
-                )
-                # Button mapping: Yes = Load existing, No = Reprocess, Cancel = abort
-
-                if reply == QMessageBox.StandardButton.Yes:
-                    # Load existing NPZ - open dialog on Tab 2
-                    self._show_photometry_import_dialog(file_paths[0], npz_path=existing_npz)
-                elif reply == QMessageBox.StandardButton.No:
-                    # Reprocess from raw - open dialog on Tab 1
-                    self._show_photometry_import_dialog(file_paths[0])
-                # else Cancel - do nothing
-            else:
-                # No existing NPZ - show dialog on Tab 1
+            if action == 'cancel':
+                # User cancelled - do nothing
+                pass
+            elif action == 'create_new' or action == 'reprocess':
+                # No NPZ exists OR user wants to reprocess - show import dialog with raw files
                 self._show_photometry_import_dialog(file_paths[0])
+            elif action == 'modify':
+                # User wants to modify existing NPZ - open dialog with NPZ path
+                self._show_photometry_import_dialog(file_paths[0], npz_path=data)
+            elif action == 'load':
+                # User selected a specific experiment to load directly
+                npz_path = data['npz_path']
+                exp_idx = data['experiment_index']
+                result_data = photometry.load_experiment_from_npz(npz_path, exp_idx)
+                if result_data:
+                    self._load_photometry_data(result_data)
+                else:
+                    self._show_error("Load Error", "Failed to load experiment from NPZ file.")
 
         else:
             # Load data files (ABF, SMRX, EDF)
@@ -1154,6 +1380,381 @@ class MainWindow(QMainWindow):
             # Insert before the expand button (index 1)
             self.channelManagerHeaderLayout.insertWidget(1, self.mark_events_btn)
 
+    def _setup_new_event_markers(self):
+        """Setup the new modular event marker system with right-click UX."""
+        # Create the viewmodel (central state for markers)
+        self._event_marker_viewmodel = EventMarkerViewModel(self)
+
+        # Create the plot integration (connects viewmodel to plot_host)
+        self._event_marker_integration = EventMarkerPlotIntegration(
+            viewmodel=self._event_marker_viewmodel,
+            plot_host=self.plot_host,
+            parent=self,
+        )
+
+        # Set up callbacks for getting current state
+        self._event_marker_integration.set_sweep_callback(lambda: self.state.sweep_idx)
+        self._event_marker_integration.set_visible_range_callback(self._get_visible_x_range)
+        self._event_marker_integration.set_channel_names_callback(self._get_channel_names_for_markers)
+        self._event_marker_integration.set_signal_data_callback(self._get_signal_data_for_markers)
+
+        # Connect signals
+        self._event_marker_viewmodel.markers_changed.connect(self._on_new_markers_changed)
+        self._event_marker_integration.generate_cta_requested.connect(self._on_generate_cta_requested)
+
+        # Enable the integration (this hooks into the plot's context menu)
+        self._event_marker_integration.enable()
+
+        print("[EventMarkers] New event marker system initialized")
+
+    def _get_visible_x_range(self):
+        """Get the visible x-axis range from the plot."""
+        try:
+            main_plot = self.plot_host._get_main_plot()
+            if main_plot is not None:
+                view_range = main_plot.viewRange()
+                return (view_range[0][0], view_range[0][1])
+        except Exception:
+            pass
+        # Fallback to state window
+        return (self.state.window_start_s, self.state.window_start_s + 10.0)
+
+    def _get_signal_data_for_markers(self, channel_name: str, sweep_idx: int):
+        """
+        Get signal data for a channel at a specific sweep.
+
+        Used by marker renderer to draw horizontal intersection lines
+        when dragging marker edges.
+
+        IMPORTANT: Returns PROCESSED data (with filters applied) to match
+        what's displayed on the plot. Raw data would give incorrect Y values.
+
+        Args:
+            channel_name: Name of the channel to get data for
+            sweep_idx: Sweep index
+
+        Returns:
+            Tuple of (time_array, signal_array) or (None, None) if not found
+        """
+        st = self.state
+        if st.t is None:
+            return None, None
+
+        if channel_name in st.sweeps:
+            # Use processed data to match what's displayed on the plot
+            # (filters, mean subtraction, inversion, etc.)
+            y_processed = self._get_processed_for(channel_name, sweep_idx)
+            return st.t, y_processed
+        return None, None
+
+    def _get_channel_names_for_markers(self):
+        """Get list of channel names for auto-detection menu."""
+        if self.state.sweeps is None:
+            return []
+        return list(self.state.sweeps.keys())
+
+    def _on_new_markers_changed(self):
+        """Handle markers changed from new system."""
+        # Mark state as modified
+        self.state.modified = True
+        # Update marker count display if we have the UI element
+        self._update_marker_count_display()
+
+    def _on_generate_cta_requested(self):
+        """Handle request to generate Photometry CTA from context menu."""
+        import numpy as np
+        from dialogs.photometry_cta_dialog import PhotometryCTADialog
+        from viewmodels.cta_viewmodel import CTAViewModel
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Get all markers
+        markers = list(self._event_marker_viewmodel.store.all())
+        if not markers:
+            QMessageBox.warning(self, "No Markers", "No event markers available for CTA generation.")
+            return
+
+        # Collect continuous signals suitable for CTA
+        signals = {}
+        metric_labels = {}
+
+        # Get time array first
+        time_array = self.state.t if hasattr(self.state, 't') and self.state.t is not None else None
+        if time_array is None or len(time_array) == 0:
+            QMessageBox.warning(self, "No Time Data", "Time array not available.")
+            return
+
+        # Ensure time_array is a 1D numpy array
+        time_array = np.asarray(time_array).flatten()
+        n_samples = len(time_array)
+
+        # Get current sweep index
+        sweep_idx = self.state.sweep_idx
+
+        # Get dF/F channel name if set
+        dff_channel_name = getattr(self.state, 'photometry_dff_channel', None)
+
+        # Get all channel names
+        channel_names = getattr(self.state, 'channel_names', [])
+
+        if hasattr(self.state, 'sweeps') and self.state.sweeps:
+            # Check if sweeps is keyed by channel names (photometry) or sweep indices (ABF)
+            first_key = next(iter(self.state.sweeps.keys()), None)
+
+            if isinstance(first_key, str):
+                # Photometry structure: sweeps = {'G0-dF/F': data, 'AI-0': data, ...}
+                for ch_name in channel_names:
+                    if ch_name in self.state.sweeps:
+                        ch_data = self.state.sweeps[ch_name]
+                        if ch_data is not None:
+                            ch_array = np.asarray(ch_data).flatten()
+                            if len(ch_array) == n_samples:
+                                signals[ch_name] = ch_array
+                                if ch_name == dff_channel_name:
+                                    metric_labels[ch_name] = f"{ch_name} (dF/F %)"
+                                else:
+                                    metric_labels[ch_name] = ch_name
+
+            elif isinstance(first_key, int) and sweep_idx in self.state.sweeps:
+                # ABF structure: sweeps = {0: {'y': data, ...}, 1: {...}, ...}
+                sweep_data = self.state.sweeps[sweep_idx]
+
+                for ch_name in channel_names:
+                    if ch_name in sweep_data:
+                        ch_data = sweep_data[ch_name]
+                        if ch_data is not None:
+                            ch_array = np.asarray(ch_data).flatten()
+                            if len(ch_array) == n_samples:
+                                signals[ch_name] = ch_array
+                                if ch_name == dff_channel_name:
+                                    metric_labels[ch_name] = f"{ch_name} (dF/F %)"
+                                else:
+                                    metric_labels[ch_name] = ch_name
+
+                # Also check for 'y' key (legacy pleth format)
+                if 'y' in sweep_data and 'y' not in signals:
+                    y_data = sweep_data['y']
+                    if y_data is not None:
+                        y_array = np.asarray(y_data).flatten()
+                        if len(y_array) == n_samples:
+                            signals['pleth'] = y_array
+                            metric_labels['pleth'] = 'Pleth Signal'
+
+        # Add interpolated breath metrics (IF, Ti, Te, Amplitude, etc.)
+        # These are per-breath values that need to be interpolated to a continuous signal
+        breath_metrics_to_add = ['IF', 'Ti', 'Te', 'PIF', 'PEF', 'VT', 'MV', 'DVDT', 'EF50']
+        breath_metric_labels = {
+            'IF': 'Instantaneous Frequency (Hz)',
+            'Ti': 'Inspiratory Time (s)',
+            'Te': 'Expiratory Time (s)',
+            'PIF': 'Peak Inspiratory Flow',
+            'PEF': 'Peak Expiratory Flow',
+            'VT': 'Tidal Volume',
+            'MV': 'Minute Ventilation',
+            'DVDT': 'dV/dt Max',
+            'EF50': 'Expiratory Flow at 50%',
+        }
+
+        # Debug: Check for breath metrics
+        print(f"[CTA Debug] Checking for breath metrics...")
+        print(f"[CTA Debug]   has cached_traces_by_sweep: {hasattr(self, 'cached_traces_by_sweep')}")
+        if hasattr(self, 'cached_traces_by_sweep'):
+            print(f"[CTA Debug]   cached_traces_by_sweep keys: {list(self.cached_traces_by_sweep.keys()) if self.cached_traces_by_sweep else 'empty'}")
+            print(f"[CTA Debug]   sweep_idx {sweep_idx} in cache: {sweep_idx in self.cached_traces_by_sweep}")
+
+        if hasattr(self, 'cached_traces_by_sweep') and sweep_idx in self.cached_traces_by_sweep:
+            cached_data = self.cached_traces_by_sweep[sweep_idx]
+            print(f"[CTA Debug]   cached_data keys: {list(cached_data.keys())}")
+
+            # Get breath timing info for interpolation
+            breath_data = self.state.breath_by_sweep.get(sweep_idx, {})
+            onsets = breath_data.get('onsets', [])
+            print(f"[CTA Debug]   Number of breath onsets: {len(onsets)}")
+
+            if len(onsets) > 1:
+                # Get onset times (convert indices to times)
+                onset_times = time_array[onsets] if max(onsets) < len(time_array) else None
+
+                if onset_times is not None and len(onset_times) > 1:
+                    for metric_key in breath_metrics_to_add:
+                        if metric_key in cached_data:
+                            metric_values = cached_data[metric_key]
+                            if metric_values is not None and len(metric_values) > 0:
+                                # Interpolate to continuous signal
+                                # Each breath's metric value is held constant for that breath's duration
+                                try:
+                                    interp_signal = self._interpolate_breath_metric(
+                                        time_array, onset_times, metric_values
+                                    )
+                                    if interp_signal is not None:
+                                        signal_key = f"breath_{metric_key}"
+                                        signals[signal_key] = interp_signal
+                                        metric_labels[signal_key] = breath_metric_labels.get(metric_key, metric_key)
+                                except Exception as e:
+                                    print(f"[CTA] Warning: Failed to interpolate {metric_key}: {e}")
+
+        if not signals:
+            # Debug: print what we have in state
+            print(f"[CTA Debug] sweep_idx: {sweep_idx}")
+            print(f"[CTA Debug] state.sweeps keys: {list(self.state.sweeps.keys()) if self.state.sweeps else 'None'}")
+            print(f"[CTA Debug] state.channel_names: {getattr(self.state, 'channel_names', 'Not set')}")
+            if self.state.sweeps and sweep_idx in self.state.sweeps:
+                print(f"[CTA Debug] sweep_data keys: {list(self.state.sweeps[sweep_idx].keys())}")
+                for k, v in self.state.sweeps[sweep_idx].items():
+                    if hasattr(v, '__len__'):
+                        print(f"[CTA Debug]   {k}: len={len(v)}, type={type(v).__name__}")
+                    else:
+                        print(f"[CTA Debug]   {k}: {type(v).__name__}")
+            print(f"[CTA Debug] n_samples (time_array): {n_samples}")
+
+            # Try to offer channel selection as fallback
+            if self.state.sweeps and sweep_idx in self.state.sweeps:
+                sweep_data = self.state.sweeps[sweep_idx]
+                available_channels = []
+                for key, value in sweep_data.items():
+                    if value is not None and hasattr(value, '__len__') and len(value) > 100:
+                        available_channels.append((key, len(value)))
+
+                if available_channels:
+                    from PyQt6.QtWidgets import QInputDialog
+                    items = [f"{name} ({length} samples)" for name, length in available_channels]
+                    item, ok = QInputDialog.getItem(
+                        self, "Select Signal",
+                        f"No matching signals found (expected {n_samples} samples).\n\n"
+                        "Available data arrays:",
+                        items, 0, False
+                    )
+                    if ok and item:
+                        # Extract channel name from selection
+                        selected_name = available_channels[items.index(item)][0]
+                        ch_data = sweep_data[selected_name]
+                        signals[selected_name] = np.asarray(ch_data).flatten()
+                        metric_labels[selected_name] = selected_name
+                        # Also update time_array to match if needed
+                        if len(signals[selected_name]) != n_samples:
+                            # Create matching time array
+                            time_array = np.linspace(0, len(signals[selected_name]) / self.state.sr_hz, len(signals[selected_name]))
+                            n_samples = len(time_array)
+
+            if not signals:
+                QMessageBox.warning(
+                    self, "No Signals",
+                    "No continuous signal data available for CTA generation.\n\n"
+                    "Please load data with photometry or analog channels."
+                )
+                return
+
+        # Debug: Print summary of available signals
+        print(f"[CTA Debug] Final signals available for CTA:")
+        for key in signals.keys():
+            label = metric_labels.get(key, key)
+            print(f"[CTA Debug]   {key}: {label}")
+
+        # Create and show the CTA dialog
+        cta_viewmodel = CTAViewModel(self)
+        dialog = PhotometryCTADialog(
+            parent=self,
+            viewmodel=cta_viewmodel,
+            markers=markers,
+            signals=signals,
+            time_array=time_array,
+            metric_labels=metric_labels,
+        )
+        dialog.exec()
+
+    def _update_marker_count_display(self):
+        """Update the marker count label in the UI."""
+        if hasattr(self, 'eventCountLabel'):
+            count = self._event_marker_viewmodel.marker_count
+            sweep_count = self._event_marker_viewmodel.get_marker_count_for_sweep(self.state.sweep_idx)
+            self.eventCountLabel.setText(f"{sweep_count} / {count}")
+
+    def _interpolate_breath_metric(
+        self,
+        time_array: np.ndarray,
+        onset_times: np.ndarray,
+        metric_values: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        """
+        Interpolate per-breath metric values to a continuous time series.
+
+        Each breath's metric value is held constant from that breath's onset
+        to the next breath's onset (step function / sample-and-hold).
+
+        Args:
+            time_array: Full time array for the recording
+            onset_times: Array of breath onset times
+            metric_values: Array of metric values (one per breath)
+
+        Returns:
+            Interpolated signal with same length as time_array, or None if error
+        """
+        import numpy as np
+
+        # Validate inputs
+        if len(onset_times) < 2 or len(metric_values) < 1:
+            return None
+
+        # Ensure arrays
+        onset_times = np.asarray(onset_times).flatten()
+        metric_values = np.asarray(metric_values).flatten()
+
+        # Number of values should match number of inter-onset intervals
+        # metric_values[i] corresponds to breath from onset_times[i] to onset_times[i+1]
+        n_breaths = min(len(onset_times) - 1, len(metric_values))
+
+        if n_breaths < 1:
+            return None
+
+        # Create output array initialized to NaN
+        result = np.full(len(time_array), np.nan)
+
+        # Fill in values for each breath interval
+        for i in range(n_breaths):
+            t_start = onset_times[i]
+            t_end = onset_times[i + 1] if i + 1 < len(onset_times) else time_array[-1]
+
+            # Find indices for this breath interval
+            mask = (time_array >= t_start) & (time_array < t_end)
+            result[mask] = metric_values[i]
+
+        # Handle the last breath - extend to end of recording if needed
+        if n_breaths > 0 and n_breaths < len(metric_values):
+            last_onset = onset_times[n_breaths] if n_breaths < len(onset_times) else onset_times[-1]
+            mask = time_array >= last_onset
+            if np.any(mask) and n_breaths < len(metric_values):
+                result[mask] = metric_values[n_breaths]
+
+        return result
+
+    def _refresh_event_markers(self):
+        """Refresh event marker display for the current sweep."""
+        # Skip if matplotlib backend (event markers only work with pyqtgraph)
+        if self._current_backend == 'matplotlib':
+            return
+
+        if hasattr(self, '_event_marker_integration') and self._event_marker_integration.enabled:
+            try:
+                # Calculate time offset (same logic as in plot_manager.py)
+                # When stimulus channel is active, plot time is normalized to first stim onset
+                st = self.state
+                s = st.sweep_idx
+                t0 = 0.0
+                if st.stim_chan and st.stim_spans_by_sweep:
+                    spans = st.stim_spans_by_sweep.get(s, [])
+                    if spans:
+                        t0 = spans[0][0]
+
+                # Set the time offset on the integration before refreshing
+                self._event_marker_integration.set_time_offset(t0)
+                self._event_marker_integration.refresh()
+                self._update_marker_count_display()
+            except RuntimeError as e:
+                # Plot host may have been deleted during backend switch
+                if "deleted" in str(e):
+                    print(f"[EventMarkers] Skipping refresh - plot host was deleted")
+                else:
+                    raise
+
     def _setup_event_markers_widget(self):
         """Setup the Event Markers QGroupBox widgets (defined in .ui file)."""
         from core.event_types import get_registry, get_all_event_types
@@ -1162,6 +1763,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'eventMarkersGroupBox'):
             print("Warning: eventMarkersGroupBox not found in UI")
             return
+
+        # Hide the event markers groupbox (feature not fully released)
+        self.eventMarkersGroupBox.hide()
+        return
 
         # Populate event type combo
         self._populate_event_type_combo()
@@ -1721,16 +2326,21 @@ class MainWindow(QMainWindow):
 
     def _on_channel_settings_requested(self, channel_name: str):
         """Called when user clicks settings (gear) icon for a channel."""
+        print(f"[ChannelManager] Settings requested for channel: '{channel_name}'")
+
         # Look up the channel config from channel manager
         configs = self.channel_manager.get_all_configs()
         if channel_name not in configs:
             print(f"[ChannelManager] Warning: No config found for channel '{channel_name}'")
+            print(f"[ChannelManager]   Available channels: {list(configs.keys())}")
             return
 
         config = configs[channel_name]
+        print(f"[ChannelManager] Config found: source={config.source}, callback={config.settings_callback is not None}")
 
         # Call the settings callback if one was registered
         if config.settings_callback is not None:
+            print(f"[ChannelManager] Calling settings callback...")
             config.settings_callback()
         else:
             print(f"[ChannelManager] No settings callback for channel '{channel_name}'")
@@ -1964,6 +2574,106 @@ class MainWindow(QMainWindow):
         if self.Tabs.currentIndex() == 1:
             self.navigation_manager.on_unified_next()
 
+    def _on_hot_reload(self):
+        """Hot reload development modules (Ctrl+R).
+
+        Reloads dialog and utility modules so code changes take effect
+        the next time you open a dialog. Also refreshes the main plot
+        so styling changes (colors, titles) appear immediately.
+
+        Already-open dialogs keep old code - close and reopen them.
+        """
+        import importlib
+        import sys
+
+        # Modules to reload - order matters (dependencies first)
+        modules_to_reload = [
+            # Core utilities
+            'core.photometry',
+            'core.peaks',
+            'core.metrics',
+            'core.plot_themes',
+            'core.plotting',
+
+            # Photometry subsystem
+            'dialogs.photometry.experiment_plotter',
+            'dialogs.photometry.data_assembly_widget',
+            'dialogs.photometry.chooser_dialog',
+            'dialogs.photometry.processing_widget',
+            'dialogs.photometry',
+
+            # Dialogs
+            'dialogs.peak_detection_dialog',
+            'dialogs.advanced_peak_editor_dialog',
+            'dialogs.gmm_clustering_dialog',
+            'dialogs.prominence_threshold_dialog',
+            'dialogs.photometry_import_dialog',
+            'dialogs.photometry_import_dialog_v2',
+
+            # Plotting
+            'plotting.pyqtgraph_backend',
+            'plotting.plot_manager',
+
+            # Export
+            'export.export_manager',
+
+            # Views and editing
+            'views.events.marker_renderer',
+            'views.events.marker_editor',
+            'views.events.context_menu',
+            'views.events.plot_integration',
+            'editing.editing_modes',
+            'editing.event_marking_mode',
+
+            # Event marker system
+            'viewmodels.event_marker_viewmodel',
+            'core.domain.events.models',
+            'core.domain.events.store',
+            'core.domain.events.registry',
+            'core.services.event_marker_service',
+
+            # Detection framework
+            'core.detection.base',
+            'core.detection.threshold',
+            'core.detection',
+            'dialogs.marker_detection_dialog',
+        ]
+
+        reloaded = []
+        failed = []
+
+        for module_name in modules_to_reload:
+            if module_name in sys.modules:
+                try:
+                    module = sys.modules[module_name]
+                    importlib.reload(module)
+                    reloaded.append(module_name)
+                except Exception as e:
+                    failed.append(f"{module_name}: {e}")
+
+        # Auto-refresh the main plot to show styling changes immediately
+        plot_refreshed = False
+        if reloaded and self.state.in_path:
+            try:
+                self.redraw_main_plot()
+                plot_refreshed = True
+            except Exception as e:
+                print(f"[Hot Reload] Plot refresh failed: {e}")
+
+        # Show status in status bar
+        if reloaded:
+            msg = f"Hot reload: {len(reloaded)} modules"
+            if plot_refreshed:
+                msg += " + plot refreshed"
+            if failed:
+                msg += f" ({len(failed)} failed)"
+            self.statusBar().showMessage(msg, 5000)
+            print(f"[Hot Reload] Reloaded: {', '.join(reloaded)}")
+            if failed:
+                print(f"[Hot Reload] Failed: {', '.join(failed)}")
+        else:
+            self.statusBar().showMessage("Hot reload: No modules to reload", 3000)
+
     def on_browse_clicked(self):
         last_dir = self.settings.value("last_dir", str(Path.home()))
         # Skip exists() check - it's slow on network drives and the dialog handles it gracefully
@@ -2040,9 +2750,42 @@ class MainWindow(QMainWindow):
 
         # Store photometry-specific data for recalculation
         st.photometry_raw = data['photometry_raw']
-        st.photometry_params = data['photometry_params']
         st.photometry_npz_path = data['photometry_npz_path']
-        st.photometry_dff_channel = data['dff_channel_name']
+
+        # Normalize photometry_params to use consistent keys across all paths.
+        # NPZ loader uses: method, fit_start, fit_end
+        # Tab 2 dialog uses: dff_method, fit_range_start, fit_range_end, lowpass_enabled
+        # We store BOTH conventions so either consumer works correctly.
+        raw_params = data['photometry_params']
+        if raw_params:
+            normalized = dict(raw_params)  # Copy
+            # Ensure Tab 2 keys exist (from NPZ keys)
+            if 'dff_method' not in normalized and 'method' in normalized:
+                normalized['dff_method'] = normalized['method']
+            if 'fit_range_start' not in normalized and 'fit_start' in normalized:
+                normalized['fit_range_start'] = float(normalized['fit_start'])
+            if 'fit_range_end' not in normalized and 'fit_end' in normalized:
+                normalized['fit_range_end'] = float(normalized['fit_end'])
+            # Ensure NPZ keys exist (from Tab 2 keys)
+            if 'method' not in normalized and 'dff_method' in normalized:
+                normalized['method'] = normalized['dff_method']
+            if 'fit_start' not in normalized and 'fit_range_start' in normalized:
+                normalized['fit_start'] = float(normalized['fit_range_start'])
+            if 'fit_end' not in normalized and 'fit_range_end' in normalized:
+                normalized['fit_end'] = float(normalized['fit_range_end'])
+            # Ensure lowpass_enabled is consistent
+            if 'lowpass_enabled' not in normalized:
+                lp_hz = normalized.get('lowpass_hz')
+                normalized['lowpass_enabled'] = lp_hz is not None and lp_hz > 0
+            st.photometry_params = normalized
+        else:
+            st.photometry_params = raw_params
+        st.photometry_dff_channel = data.get('dff_channel_name')
+
+        # Store experiment metadata for reload/switch functionality
+        st.photometry_experiment_index = data.get('experiment_index', 0)
+        st.photometry_n_experiments = data.get('n_experiments', 1)
+        st.photometry_animal_id = data.get('animal_id', '')
 
         # Set the file path (use NPZ path if available, otherwise construct from source)
         if data['photometry_npz_path']:
@@ -2066,6 +2809,7 @@ class MainWindow(QMainWindow):
         st.peaks_by_sweep.clear()
         st.breath_by_sweep.clear()
         st.sigh_by_sweep.clear()
+        st.sniff_regions_by_sweep.clear()
         st.all_peaks_by_sweep.clear()
         st.all_breaths_by_sweep.clear()
         st.peak_metrics_by_sweep.clear()
@@ -2097,6 +2841,7 @@ class MainWindow(QMainWindow):
         st = self.state
         ch_names = st.channel_names
         dff_channel = data.get('dff_channel_name')
+        channel_visibility = data.get('channel_visibility', {})  # Dict of ch_name -> bool
 
         # Populate the old combo boxes (for compatibility with rest of app)
         self.AnalyzeChanSelect.blockSignals(True)
@@ -2151,9 +2896,12 @@ class MainWindow(QMainWindow):
             if is_computed:
                 settings_callback = self._open_photometry_settings
 
+            # Determine visibility from data (default to True if not specified)
+            is_visible = channel_visibility.get(ch_name, True)
+
             config = ChannelConfig(
                 name=ch_name,
-                visible=True,
+                visible=is_visible,
                 channel_type=ch_type,
                 source='computed' if is_computed else 'file',
                 order=i,
@@ -2197,18 +2945,35 @@ class MainWindow(QMainWindow):
         """
         st = self.state
 
+        print("[Photometry] Gear icon clicked - opening settings dialog")
+
         if st.photometry_raw is None:
             self._show_error("No Photometry Data",
-                           "No raw photometry data available for recalculation.")
+                           "No raw photometry data available for recalculation.\n\n"
+                           "This can happen if the data wasn't loaded from a photometry file.")
+            print("[Photometry] ERROR: photometry_raw is None")
             return
 
-        # Open dialog with existing NPZ path, starting on Tab 2
-        # Pass current params to restore settings
+        # Build current experiment info for the dialog (for edit mode)
+        current_exp_info = {
+            'experiment_index': getattr(st, 'photometry_experiment_index', 0),
+            'n_experiments': getattr(st, 'photometry_n_experiments', 1),
+            'animal_id': getattr(st, 'photometry_animal_id', ''),
+        }
+
+        print(f"[Photometry] Opening dialog with cached data, exp_info={current_exp_info}")
+        print(f"[Photometry]   npz_path={st.photometry_npz_path}")
+        print(f"[Photometry]   raw data keys={list(st.photometry_raw.keys()) if st.photometry_raw else 'None'}")
+
+        # Open dialog with cached data for instant opening
+        # Pass current params to restore settings and current experiment info
         dialog = PhotometryImportDialog(
             self,
             initial_path=None,  # Don't need to reload files
             photometry_npz_path=st.photometry_npz_path,
-            initial_params=st.photometry_params  # Restore previous settings
+            initial_params=st.photometry_params,  # Restore previous settings
+            current_experiment=current_exp_info,  # Enable edit mode
+            cached_photometry_data=st.photometry_raw,  # Use cached data - no disk loading!
         )
 
         result = dialog.exec()
@@ -2219,6 +2984,58 @@ class MainWindow(QMainWindow):
                 # Update with new processing
                 self._load_photometry_data(result_data)
                 print("[Photometry] Updated ΔF/F with new settings")
+
+                # Persist updated dF/F params back to NPZ so they survive app restart
+                self._update_npz_dff_params()
+        else:
+            print("[Photometry] Dialog cancelled")
+
+    def _update_npz_dff_params(self):
+        """Write updated dF/F parameters back to the NPZ file.
+
+        Called after the user adjusts processing settings via the gear icon.
+        Updates the 'dff_params' field in the NPZ so changes persist on restart.
+        """
+        st = self.state
+        npz_path = st.photometry_npz_path
+        if npz_path is None or not Path(npz_path).exists():
+            return
+
+        params = st.photometry_params
+        if not params:
+            return
+
+        try:
+            # Build dff_params dict in NPZ format (uses NPZ key names)
+            npz_params = {
+                'method': params.get('method', params.get('dff_method', 'fitted')),
+                'detrend_method': params.get('detrend_method', 'none'),
+                'lowpass_hz': params.get('lowpass_hz'),
+                'fit_start': params.get('fit_start', params.get('fit_range_start', 0)),
+                'fit_end': params.get('fit_end', params.get('fit_range_end', 0)),
+            }
+
+            exp_idx = getattr(st, 'photometry_experiment_index', 0)
+
+            # Load existing NPZ, update dff_params, re-save
+            data = dict(np.load(npz_path, allow_pickle=True))
+
+            # Parse existing dff_params or create new
+            dff_params_all = {}
+            if 'dff_params' in data:
+                try:
+                    dff_params_all = eval(str(data['dff_params'][0]))
+                except Exception:
+                    pass
+
+            dff_params_all[exp_idx] = npz_params
+            data['dff_params'] = np.array([str(dff_params_all)], dtype=object)
+
+            np.savez(npz_path, **data)
+            print(f"[Photometry] Updated dff_params in NPZ for experiment {exp_idx}")
+
+        except Exception as e:
+            print(f"[Photometry] Warning: Could not update NPZ dff_params: {e}")
 
     def load_file(self, path: Path):
         import time
@@ -2389,12 +3206,14 @@ class MainWindow(QMainWindow):
             # Found a stimulus channel - select it
             stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
             self.StimChanSelect.setCurrentIndex(stim_idx)
-            st.stim_chan = auto_stim
+            # NOTE: Don't set st.stim_chan here - let on_stim_channel_changed do it
+            # Otherwise the handler's "if new_stim != st.stim_chan" check fails and
+            # stim detection is skipped!
 
             # Update channel manager to show this as Opto Stim
             self.channel_manager.set_channel_type(auto_stim, "Opto Stim")
 
-            # Trigger stim detection
+            # Trigger stim detection (this sets st.stim_chan and computes stim spans)
             self.on_stim_channel_changed(stim_idx)
 
             if auto_analysis:
@@ -2649,12 +3468,14 @@ class MainWindow(QMainWindow):
             # Found a stimulus channel - select it
             stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
             self.StimChanSelect.setCurrentIndex(stim_idx)
-            st.stim_chan = auto_stim
+            # NOTE: Don't set st.stim_chan here - let on_stim_channel_changed do it
+            # Otherwise the handler's "if new_stim != st.stim_chan" check fails and
+            # stim detection is skipped!
 
             # Update channel manager to show this as Opto Stim
             self.channel_manager.set_channel_type(auto_stim, "Opto Stim")
 
-            # Trigger stim detection
+            # Trigger stim detection (this sets st.stim_chan and computes stim spans)
             self.on_stim_channel_changed(stim_idx)
 
             if auto_analysis:
@@ -2822,7 +3643,18 @@ class MainWindow(QMainWindow):
                 'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
             }
 
-            save_state_to_npz(self.state, save_path, include_raw_data=include_raw, gmm_cache=gmm_cache, app_settings=app_settings)
+            # Get event markers for persistence
+            event_markers_data = None
+            if hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
+                try:
+                    event_markers_data = self._event_marker_viewmodel.save_to_npz()
+                    marker_count = self._event_marker_viewmodel.marker_count
+                    if marker_count > 0:
+                        print(f"[npz-save] Saving {marker_count} event markers to session file")
+                except Exception as e:
+                    print(f"[npz-save] Warning: Failed to save event markers: {e}")
+
+            save_state_to_npz(self.state, save_path, include_raw_data=include_raw, gmm_cache=gmm_cache, app_settings=app_settings, event_markers=event_markers_data)
 
             t_elapsed = time.time() - t_start
             file_size_mb = save_path.stat().st_size / (1024 * 1024)
@@ -2949,7 +3781,7 @@ class MainWindow(QMainWindow):
             progress.setValue(30)
             QApplication.processEvents()
 
-            new_state, raw_data_loaded, gmm_cache, app_settings = load_state_from_npz(
+            new_state, raw_data_loaded, gmm_cache, app_settings, event_markers = load_state_from_npz(
                 npz_path, reload_raw_data=True, alternative_data_path=alternative_data_path
             )
         except OriginalFileNotFoundError as e:
@@ -3151,6 +3983,14 @@ class MainWindow(QMainWindow):
             # Restore navigation and plot
             self.navigation_manager.reset_window_state()
 
+            # Restore event markers from NPZ if present
+            if event_markers and hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
+                try:
+                    count = self._event_marker_viewmodel.load_from_npz(event_markers)
+                    print(f"[npz-load] Restored {count} event markers from session file")
+                except Exception as e:
+                    print(f"[npz-load] Warning: Failed to restore event markers: {e}")
+
             # Redraw plot (will use single_panel_mode to determine layout)
             self.redraw_main_plot()
 
@@ -3255,6 +4095,8 @@ class MainWindow(QMainWindow):
     def plot_all_channels(self):
         """Delegate to PlotManager."""
         self.plot_manager.plot_all_channels()
+        # Refresh event markers for current sweep (same as redraw_main_plot)
+        self._refresh_event_markers()
 
     def on_analyze_channel_changed(self, idx: int):
         """Apply analyze channel selection immediately."""
@@ -3677,19 +4519,25 @@ class MainWindow(QMainWindow):
         self.filter_order = self.FilterOrderSpin.value()
 
 
-        # Peaks/breaths no longer valid if filters change
+        # Peaks/breaths/classifications no longer valid if filters change
         if hasattr(self.state, "peaks_by_sweep"):
             self.state.peaks_by_sweep.clear()
         if hasattr(self.state, "breath_by_sweep"):
             self.state.breath_by_sweep.clear()
-
-        # Peaks/breaths/y2 no longer valid if filters change
-        if hasattr(self.state, "peaks_by_sweep"):
-            self.state.peaks_by_sweep.clear()
-        if hasattr(self.state, "breath_by_sweep"):
-            self.state.breath_by_sweep.clear()
+        if hasattr(self.state, "all_peaks_by_sweep"):
+            self.state.all_peaks_by_sweep.clear()
+        if hasattr(self.state, "sigh_by_sweep"):
+            self.state.sigh_by_sweep.clear()
+        if hasattr(self.state, "sniff_regions_by_sweep"):
+            self.state.sniff_regions_by_sweep.clear()
+        if hasattr(self.state, "y2_values_by_sweep"):
             self.state.y2_values_by_sweep.clear()
+        if hasattr(self, 'plot_host') and self.plot_host:
             self.plot_host.clear_y2()
+
+        # Re-enable detect button since peaks were just cleared
+        if self.state.analyze_chan:
+            self.ApplyPeakFindPushButton.setEnabled(True)
 
         # Clear z-score global statistics cache (filters changed)
         self.zscore_global_mean = None
@@ -3770,6 +4618,8 @@ class MainWindow(QMainWindow):
     def redraw_main_plot(self):
         """Delegate to PlotManager."""
         self.plot_manager.redraw_main_plot()
+        # Refresh event markers for current sweep
+        self._refresh_event_markers()
 
 
     ##################################################
@@ -5224,44 +6074,47 @@ class MainWindow(QMainWindow):
         self._log_status_message(f"Plot theme: {mode_text}", 2000)
 
     def _setup_pyqtgraph_toggle(self):
-        """Create and setup the PyQtGraph backend toggle checkbox."""
+        """Create and setup the PyQtGraph backend toggle checkbox.
+
+        NOTE: Matplotlib backend is currently disabled because it doesn't support
+        the event marker system. PyQtGraph is now the only option. The checkbox
+        is hidden but the code is preserved for potential future re-enabling.
+        """
         from PyQt6.QtWidgets import QCheckBox
         from PyQt6.QtGui import QFont
 
         font = QFont()
         font.setPointSize(8)
 
-        # Create the PyQtGraph checkbox
+        # Create the PyQtGraph checkbox (hidden - matplotlib disabled for now)
         self.pyqtgraph_checkbox = QCheckBox("PyQtGraph (Fast)")
         self.pyqtgraph_checkbox.setFont(font)
         self.pyqtgraph_checkbox.setToolTip(
-            "Use PyQtGraph for faster plotting (experimental).\n"
-            "10-50x faster for large datasets, but some features may be limited.\n"
+            "Use PyQtGraph for faster plotting (recommended).\n"
+            "Required for event markers. 10-50x faster for large datasets.\n"
             "Right-click on any panel to auto-scale Y-axis."
         )
 
-        # Load saved preference (default to False = matplotlib)
-        use_pyqtgraph = self.settings.value("use_pyqtgraph", False, type=bool)
+        # Allow user to choose backend - matplotlib useful for figure export
+        use_pyqtgraph = self.settings.value("use_pyqtgraph", True, type=bool)
         self.pyqtgraph_checkbox.setChecked(use_pyqtgraph)
 
         # Update state
-        self.state.plotting_backend = 'pyqtgraph' if use_pyqtgraph else 'matplotlib'
+        self.state.plotting_backend = 'pyqtgraph'
 
-        # Connect handler
+        # Connect handler (kept for future use)
         self.pyqtgraph_checkbox.toggled.connect(self.on_pyqtgraph_toggled)
 
-        # Add to layout next to dark mode checkbox
+        # Add checkbox to UI - allows switching to matplotlib for figure export
         if hasattr(self, 'checkBox') and self.checkBox.parent():
             parent_layout = self.checkBox.parent().layout()
             if parent_layout:
-                # Find the dark mode checkbox index and insert after it
                 for i in range(parent_layout.count()):
                     item = parent_layout.itemAt(i)
                     if item and item.widget() == self.checkBox:
                         parent_layout.insertWidget(i + 1, self.pyqtgraph_checkbox)
                         break
                 else:
-                    # Fallback: just add at the end
                     parent_layout.addWidget(self.pyqtgraph_checkbox)
 
     def _create_plot_host(self, backend: str):
@@ -5358,6 +6211,27 @@ class MainWindow(QMainWindow):
             from plotting.plot_manager import PlotManager
             self.plot_manager = PlotManager(self)
 
+        # Handle event marker integration - only works with pyqtgraph
+        if hasattr(self, '_event_marker_integration'):
+            if new_backend == 'matplotlib':
+                # Disable event markers for matplotlib (not supported)
+                self._event_marker_integration.disable()
+                print("[PlotHost] Event markers disabled (matplotlib backend)")
+            else:
+                # Re-create integration for new pyqtgraph plot_host
+                self._event_marker_integration.disable()
+                self._event_marker_integration = EventMarkerPlotIntegration(
+                    viewmodel=self._event_marker_viewmodel,
+                    plot_host=self.plot_host,
+                    parent=self,
+                )
+                self._event_marker_integration.set_sweep_callback(lambda: self.state.sweep_idx)
+                self._event_marker_integration.set_visible_range_callback(self._get_visible_x_range)
+                self._event_marker_integration.set_channel_names_callback(self._get_channel_names_for_markers)
+                self._event_marker_integration.set_signal_data_callback(self._get_signal_data_for_markers)
+                self._event_marker_integration.enable()
+                print("[PlotHost] Event markers re-enabled for new pyqtgraph backend")
+
         # Apply current theme
         dark_mode = self.settings.value("plot_dark_mode", True, type=bool)
         theme = "dark" if dark_mode else "light"
@@ -5415,6 +6289,16 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QMessageBox
 
         backend = 'pyqtgraph' if checked else 'matplotlib'
+
+        # Warn about matplotlib limitations
+        if not checked:
+            QMessageBox.information(
+                self,
+                "Matplotlib Backend",
+                "Switching to matplotlib for figure export.\n\n"
+                "Note: Event markers will not be visible in matplotlib mode.\n"
+                "Switch back to PyQtGraph when done exporting."
+            )
 
         # Check if pyqtgraph is available
         if checked and not PYQTGRAPH_AVAILABLE:
@@ -5605,24 +6489,56 @@ class MainWindow(QMainWindow):
 
         def on_update_checked(update_info):
             """Handle update check result."""
-            if update_info:
-                # Store for help dialog
-                self.update_info = update_info
+            # Store for help dialog (even if no updates, for beta status display)
+            self.update_info = update_info
 
-                # Update main window label
-                from core import update_checker
-                text, url = update_checker.get_main_window_update_message(update_info)
-                self.update_notification_label.setText(f'<a href="{url}" style="color: #FFD700; text-decoration: underline;">{text}</a>')
-                self.update_notification_label.setVisible(True)
-                print(f"[Update Check] New version available: {update_info.get('version')}")
+            from core import update_checker
+
+            # Check if running beta (even without network)
+            is_beta = update_checker.is_prerelease_version(update_checker.VERSION_STRING)
+
+            if update_info:
+                # Log status based on version type
+                if is_beta:
+                    latest_stable = update_info.get('latest_stable', {})
+                    print(f"[Update Check] Running beta v{update_checker.VERSION_STRING}, latest stable: v{latest_stable.get('version', 'unknown')}")
+
+                # Check if there's an update to show
+                banner_info = update_checker.get_main_window_update_message(update_info)
+                if banner_info:
+                    text, url = banner_info
+                    self.update_notification_label.setText(
+                        f'<a href="{url}" style="color: #FFD700; text-decoration: underline;">{text}</a>'
+                    )
+                    self.update_notification_label.setVisible(True)
+                    print(f"[Update Check] {text}")
+                elif is_beta:
+                    # No update, but running beta - show beta banner with report link
+                    self._show_beta_banner()
+                else:
+                    print("[Update Check] You're up to date!")
             else:
-                # No update available - keep label hidden
-                print("[Update Check] You're up to date!")
+                # Network error - still show beta banner if running beta
+                if is_beta:
+                    self._show_beta_banner()
+                print("[Update Check] Could not check for updates")
 
         # Create and start background thread
         self.update_thread = UpdateChecker()
         self.update_thread.update_checked.connect(on_update_checked)
         self.update_thread.start()
+
+    def _show_beta_banner(self):
+        """Show beta version banner with report bugs link."""
+        from version_info import VERSION_STRING
+        issues_url = "https://github.com/RyanSeanPhillips/PhysioMetrics/issues"
+
+        self.update_notification_label.setText(
+            f'<span style="color: #FFD700;">Beta v{VERSION_STRING}</span> · '
+            f'<a href="{issues_url}" style="color: #FFD700; text-decoration: underline;">Report Bug / Request Feature</a>'
+        )
+        self.update_notification_label.setVisible(True)
+        print(f"[Update Check] Running beta v{VERSION_STRING} - showing beta banner")
 
     def on_spectral_analysis_clicked(self):
         """Open spectral analysis dialog and optionally apply notch filter."""
@@ -6677,6 +7593,12 @@ Sweeps: {sweeps}"""
 
         print(f"[master-list] Opening file for analysis: {file_path}")
 
+        # Add to recent files so it appears in Browse dropdown
+        self._add_recent_file(str(file_path))
+        self._add_recent_folder(str(Path(file_path).parent))
+        self.settings.sync()  # Force save to disk
+        print(f"[master-list] Added to recent files: {file_path}")
+
         # Track which row is being analyzed
         self._active_master_list_row = row
 
@@ -7717,8 +8639,76 @@ if __name__ == "__main__":
     from PyQt6.QtWidgets import QSplashScreen, QProgressBar, QVBoxLayout, QLabel, QWidget
     from PyQt6.QtGui import QPixmap
     from PyQt6.QtCore import Qt, QTimer
+    from version_info import VERSION_STRING
 
     app = QApplication(sys.argv)
+
+    # Check for first launch and show welcome dialog
+    from core import config as app_config
+    if app_config.is_first_launch():
+        from dialogs import FirstLaunchDialog
+        first_launch_dialog = FirstLaunchDialog()
+        if first_launch_dialog.exec():
+            # User clicked Continue - save preferences
+            telemetry_enabled, crash_reports_enabled = first_launch_dialog.get_preferences()
+            cfg = app_config.load_config()
+            cfg['telemetry_enabled'] = telemetry_enabled
+            cfg['crash_reports_enabled'] = crash_reports_enabled
+            cfg['first_launch'] = False
+            app_config.save_config(cfg)
+        else:
+            # User closed dialog - use defaults and continue
+            app_config.mark_first_launch_complete()
+
+    # Initialize telemetry (after first-launch dialog)
+    telemetry.init_telemetry()
+
+    # Initialize error reporter (writes session lock, registers cleanup)
+    from core import error_reporting
+    error_reporter = error_reporting.init_error_reporter()
+
+    # Check if previous session crashed (before installing new hook)
+    previous_crash = error_reporting.was_previous_session_crashed()
+    pending_report = error_reporting.get_appropriate_crash_report() if previous_crash else None
+
+    # Install global exception handler for crash tracking
+    def exception_hook(exctype, value, tb):
+        """Catch unhandled exceptions, save report, and optionally show dialog."""
+        import traceback
+
+        # Log crash to GA4 telemetry
+        telemetry.log_crash(
+            error_message=f"{exctype.__name__}: {str(value)[:100]}",
+            traceback_depth=len(traceback.extract_tb(tb))
+        )
+
+        # Save crash report locally
+        if app_config.is_crash_reports_enabled():
+            try:
+                session_data = telemetry.get_session_data()
+                crash_path = error_reporting.save_crash_report(
+                    exctype, value, tb, session_data
+                )
+
+                # Try to show crash report dialog
+                try:
+                    app_instance = QApplication.instance()
+                    if app_instance:
+                        from dialogs.crash_report_dialog import CrashReportDialog
+                        report = error_reporting.ErrorReporter.get_instance().load_crash_report(crash_path)
+                        if report:
+                            dialog = CrashReportDialog(report, on_startup=False)
+                            dialog.exec()
+                except Exception as dialog_error:
+                    print(f"[Crash Report] Could not show dialog: {dialog_error}")
+
+            except Exception as save_error:
+                print(f"[Crash Report] Failed to save: {save_error}")
+
+        # Call default handler to print traceback
+        sys.__excepthook__(exctype, value, tb)
+
+    sys.excepthook = exception_hook
 
     # Create splash screen
     # Try to load icon (with fallback path handling)
@@ -7737,18 +8727,18 @@ if __name__ == "__main__":
 
     if splash_pix is None or splash_pix.isNull():
         # Fallback: create simple splash with text
-        splash_pix = QPixmap(200, 150)
+        splash_pix = QPixmap(250, 190)
         splash_pix.fill(Qt.GlobalColor.darkGray)
 
-    # Scale to smaller size for faster display
-    splash_pix = splash_pix.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    # Scale to reasonable size for display (increased ~25% from original 150 to 190)
+    splash_pix = splash_pix.scaled(190, 190, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
     splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
     splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
 
     # Add loading message
     splash.showMessage(
-        "Loading PhysioMetrics...",
+        f"Loading PhysioMetrics v{VERSION_STRING}...",
         Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
         Qt.GlobalColor.white
     )
@@ -7761,5 +8751,15 @@ if __name__ == "__main__":
     # Close splash and show main window
     splash.finish(w)
     w.show()
+
+    # Check for previous crash and show dialog (after window is visible)
+    if pending_report and app_config.is_crash_reports_enabled():
+        from dialogs.crash_report_dialog import show_crash_report_dialog
+
+        def show_previous_crash_dialog():
+            show_crash_report_dialog(pending_report, on_startup=True, parent=w)
+
+        # Delay to let the main window fully initialize
+        QTimer.singleShot(500, show_previous_crash_dialog)
 
     sys.exit(app.exec())

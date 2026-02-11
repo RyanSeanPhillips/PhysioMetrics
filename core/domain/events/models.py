@@ -31,6 +31,7 @@ class EventMarker:
         end_time: End time in seconds (only for PAIRED markers)
         category: Category key ('respiratory', 'behavior', 'stimulus', etc.)
         label: Specific label within category ('lick_bout', 'inspiratory_onset', etc.)
+        condition: Experimental condition (e.g., 'baseline', 'iso', 'awake', 'treatment')
         source_channel: Channel name used for detection (if auto-detected)
         detection_method: How marker was created ('manual', 'threshold', 'ttl', 'peak')
         detection_params: Parameters used for auto-detection
@@ -51,6 +52,7 @@ class EventMarker:
     # Classification
     category: str = "custom"
     label: str = "marker"
+    condition: Optional[str] = None  # Experimental condition (e.g., "baseline", "iso", "awake")
 
     # Detection metadata
     source_channel: Optional[str] = None
@@ -59,6 +61,7 @@ class EventMarker:
 
     # Display
     color_override: Optional[str] = None
+    line_width: Optional[int] = None  # Custom line width (None = use default)
     notes: Optional[str] = None
 
     # Grouping
@@ -139,10 +142,12 @@ class EventMarker:
             'end_time': self.end_time,
             'category': self.category,
             'label': self.label,
+            'condition': self.condition,
             'source_channel': self.source_channel,
             'detection_method': self.detection_method,
             'detection_params': self.detection_params,
             'color_override': self.color_override,
+            'line_width': self.line_width,
             'notes': self.notes,
             'group_id': self.group_id,
         }
@@ -162,10 +167,12 @@ class EventMarker:
             end_time=data.get('end_time'),
             category=data.get('category', 'custom'),
             label=data.get('label', 'marker'),
+            condition=data.get('condition'),
             source_channel=data.get('source_channel'),
             detection_method=data.get('detection_method', 'manual'),
             detection_params=data.get('detection_params', {}),
             color_override=data.get('color_override'),
+            line_width=data.get('line_width'),
             notes=data.get('notes'),
             group_id=data.get('group_id'),
         )
@@ -177,6 +184,7 @@ class EventMarker:
         return new_marker
 
     def __repr__(self) -> str:
+        cond_str = f"[{self.condition}]" if self.condition else ""
         if self.is_paired:
-            return f"EventMarker({self.id}, {self.category}/{self.label}, {self.start_time:.3f}-{self.end_time:.3f}s)"
-        return f"EventMarker({self.id}, {self.category}/{self.label}, {self.start_time:.3f}s)"
+            return f"EventMarker({self.id}, {self.category}/{self.label}{cond_str}, {self.start_time:.3f}-{self.end_time:.3f}s)"
+        return f"EventMarker({self.id}, {self.category}/{self.label}{cond_str}, {self.start_time:.3f}s)"

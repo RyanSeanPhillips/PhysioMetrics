@@ -13,10 +13,12 @@ import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QTabWidget, QWidget, QTextEdit, QPushButton,
-    QScrollArea, QFrame, QGroupBox
+    QScrollArea, QFrame, QGroupBox, QFileDialog, QMessageBox, QApplication,
+    QMenu
 )
-from PyQt6.QtGui import QPixmap, QFont
+from PyQt6.QtGui import QPixmap, QFont, QPainter, QAction
 from PyQt6.QtCore import Qt
+from PyQt6.QtPrintSupport import QPrinter
 from core.ml_training import TrainingResult
 
 
@@ -32,6 +34,57 @@ class TrainingResultsDialog(QDialog):
         self._init_ui()
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self._setup_context_menu()
+
+    def _setup_context_menu(self):
+        """Set up right-click context menu for export options."""
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _show_context_menu(self, pos):
+        """Show context menu with export options."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3e3e42;
+                margin: 4px 10px;
+            }
+        """)
+
+        # Export submenu
+        export_menu = menu.addMenu("Export...")
+
+        png_action = QAction("Export as PNG (High Resolution)", self)
+        png_action.triggered.connect(self._export_screenshot)
+        export_menu.addAction(png_action)
+
+        pdf_action = QAction("Export as PDF (Vector)", self)
+        pdf_action.triggered.connect(self._export_pdf)
+        export_menu.addAction(pdf_action)
+
+        jpg_action = QAction("Export as JPEG", self)
+        jpg_action.triggered.connect(lambda: self._export_image('jpg'))
+        export_menu.addAction(jpg_action)
+
+        export_menu.addSeparator()
+
+        clipboard_action = QAction("Copy to Clipboard", self)
+        clipboard_action.triggered.connect(self._copy_to_clipboard)
+        export_menu.addAction(clipboard_action)
+
+        menu.exec(self.mapToGlobal(pos))
 
     def _enable_dark_title_bar(self):
         """Enable dark title bar on Windows 10/11."""
@@ -84,8 +137,31 @@ class TrainingResultsDialog(QDialog):
 
         layout.addWidget(tabs)
 
+        # Store tabs reference for screenshot
+        self.tabs = tabs
+
         # Buttons
         button_layout = QHBoxLayout()
+
+        # Export buttons on the left
+        export_label = QLabel("Export:")
+        export_label.setStyleSheet("color: #888;")
+        button_layout.addWidget(export_label)
+
+        # PNG export button
+        self.export_png_btn = QPushButton("PNG")
+        self.export_png_btn.setToolTip("Export as high-resolution PNG image")
+        self.export_png_btn.setFixedWidth(60)
+        self.export_png_btn.clicked.connect(self._export_screenshot)
+        button_layout.addWidget(self.export_png_btn)
+
+        # PDF export button
+        self.export_pdf_btn = QPushButton("PDF")
+        self.export_pdf_btn.setToolTip("Export as PDF document (vector quality)")
+        self.export_pdf_btn.setFixedWidth(60)
+        self.export_pdf_btn.clicked.connect(self._export_pdf)
+        button_layout.addWidget(self.export_pdf_btn)
+
         button_layout.addStretch()
 
         self.save_model_btn = QPushButton("Save Model...")
@@ -400,3 +476,214 @@ class TrainingResultsDialog(QDialog):
                 padding: 10px;
             }
         """)
+
+    def _export_screenshot(self):
+        """Export the dialog as a high-resolution screenshot."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox, QApplication
+        from PyQt6.QtCore import QTimer
+
+        # Default filename based on model name
+        safe_model_name = self.result.model_name.replace(" ", "_").replace("/", "-")
+        default_name = f"ML_Training_{safe_model_name}.png"
+
+        # Show save dialog
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Screenshot",
+            default_name,
+            "PNG Image (*.png);;JPEG Image (*.jpg);;All Files (*)"
+        )
+
+        if not filepath:
+            return  # User cancelled
+
+        # Ensure correct extension
+        if not (filepath.lower().endswith('.png') or filepath.lower().endswith('.jpg')):
+            filepath += '.png'
+
+        try:
+            # Get device pixel ratio for high-DPI displays
+            screen = QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio() if screen else 1.0
+
+            # Capture at higher resolution (2x for publication quality)
+            scale_factor = max(2.0, dpr)
+
+            # Grab the dialog content
+            pixmap = self.grab()
+
+            # Scale up for higher resolution if needed
+            if scale_factor > 1.0:
+                from PyQt6.QtCore import Qt as QtCore
+                scaled_size = pixmap.size() * scale_factor
+                pixmap = pixmap.scaled(
+                    scaled_size,
+                    QtCore.AspectRatioMode.KeepAspectRatio,
+                    QtCore.TransformationMode.SmoothTransformation
+                )
+
+            # Save
+            quality = 95 if filepath.lower().endswith('.jpg') else -1
+            success = pixmap.save(filepath, quality=quality)
+
+            if success:
+                QMessageBox.information(
+                    self,
+                    "Screenshot Saved",
+                    f"Screenshot exported to:\n{filepath}\n\n"
+                    f"Resolution: {pixmap.width()} x {pixmap.height()} pixels"
+                )
+                print(f"[ml-training] Screenshot saved: {filepath} ({pixmap.width()}x{pixmap.height()})")
+            else:
+                raise Exception("Failed to save image")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Failed to export screenshot:\n{str(e)}"
+            )
+            print(f"[ml-training] Screenshot export failed: {e}")
+
+    def _export_pdf(self):
+        """Export the dialog as a PDF document with vector quality."""
+        # Default filename based on model name
+        safe_model_name = self.result.model_name.replace(" ", "_").replace("/", "-")
+        default_name = f"ML_Training_{safe_model_name}.pdf"
+
+        # Show save dialog
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export as PDF",
+            default_name,
+            "PDF Document (*.pdf);;All Files (*)"
+        )
+
+        if not filepath:
+            return  # User cancelled
+
+        # Ensure correct extension
+        if not filepath.lower().endswith('.pdf'):
+            filepath += '.pdf'
+
+        try:
+            # Set up printer for PDF output
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(filepath)
+
+            # Set page size to match dialog aspect ratio
+            from PyQt6.QtCore import QMarginsF
+            from PyQt6.QtGui import QPageSize, QPageLayout
+
+            # Use A4 landscape for better fit
+            printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+
+            # Create painter and render
+            painter = QPainter()
+            if not painter.begin(printer):
+                raise Exception("Failed to initialize PDF painter")
+
+            # Calculate scaling to fit dialog on page
+            page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            dialog_size = self.size()
+
+            scale_x = page_rect.width() / dialog_size.width()
+            scale_y = page_rect.height() / dialog_size.height()
+            scale = min(scale_x, scale_y) * 0.95  # 95% to add margins
+
+            # Center on page
+            offset_x = (page_rect.width() - dialog_size.width() * scale) / 2
+            offset_y = (page_rect.height() - dialog_size.height() * scale) / 2
+
+            painter.translate(offset_x, offset_y)
+            painter.scale(scale, scale)
+
+            # Render the dialog
+            self.render(painter)
+
+            painter.end()
+
+            QMessageBox.information(
+                self,
+                "PDF Saved",
+                f"PDF exported to:\n{filepath}"
+            )
+            print(f"[ml-training] PDF saved: {filepath}")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Failed to export PDF:\n{str(e)}"
+            )
+            print(f"[ml-training] PDF export failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _export_image(self, format: str):
+        """Export dialog as image in specified format."""
+        safe_model_name = self.result.model_name.replace(" ", "_").replace("/", "-")
+        default_name = f"ML_Training_{safe_model_name}.{format}"
+
+        format_filters = {
+            'png': "PNG Image (*.png)",
+            'jpg': "JPEG Image (*.jpg)",
+            'bmp': "Bitmap Image (*.bmp)"
+        }
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Export as {format.upper()}",
+            default_name,
+            format_filters.get(format, "All Files (*)")
+        )
+
+        if not filepath:
+            return
+
+        if not filepath.lower().endswith(f'.{format}'):
+            filepath += f'.{format}'
+
+        try:
+            # Capture at 2x resolution
+            pixmap = self.grab()
+            scaled_size = pixmap.size() * 2
+            pixmap = pixmap.scaled(
+                scaled_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            quality = 95 if format == 'jpg' else -1
+            if pixmap.save(filepath, quality=quality):
+                QMessageBox.information(self, "Export Successful",
+                    f"Image exported to:\n{filepath}\n\nResolution: {pixmap.width()} x {pixmap.height()}")
+            else:
+                raise Exception("Failed to save image")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export image:\n{str(e)}")
+
+    def _copy_to_clipboard(self):
+        """Copy dialog screenshot to clipboard."""
+        try:
+            # Capture at 2x resolution for better quality
+            pixmap = self.grab()
+            scaled_size = pixmap.size() * 2
+            pixmap = pixmap.scaled(
+                scaled_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            clipboard = QApplication.clipboard()
+            clipboard.setPixmap(pixmap)
+
+            QMessageBox.information(self, "Copied",
+                f"Screenshot copied to clipboard!\n\nResolution: {pixmap.width()} x {pixmap.height()} pixels\n\n"
+                "You can now paste (Ctrl+V) into any application.")
+            print(f"[ml-training] Copied to clipboard ({pixmap.width()}x{pixmap.height()})")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Copy Failed", f"Failed to copy to clipboard:\n{str(e)}")

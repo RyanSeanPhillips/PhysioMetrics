@@ -21,8 +21,10 @@ from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 import matplotlib.pyplot as plt
 
+from dialogs.export_mixin import ExportMixin
 
-class SpectralAnalysisDialog(QDialog):
+
+class SpectralAnalysisDialog(ExportMixin, QDialog):
     def __init__(self, parent=None, t=None, y=None, sr_hz=None, stim_spans=None, parent_window=None, use_zscore=True):
         super().__init__(parent)
         self.setWindowTitle("Spectral Analysis & Notch Filter")
@@ -149,6 +151,7 @@ class SpectralAnalysisDialog(QDialog):
         # Apply dark theme and title bar
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
     def _apply_dark_theme(self):
         """Apply dark theme styling to match main application."""

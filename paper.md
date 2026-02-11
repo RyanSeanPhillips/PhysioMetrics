@@ -15,7 +15,7 @@ authors:
 affiliations:
   - name: Seattle Children's Research Institute, Norcliffe Foundation Center for Integrative Brain Research, Seattle, WA, USA
     index: 1
-date: 10 November 2024
+date: 29 December 2024
 bibliography: paper.bib
 ---
 
@@ -54,8 +54,10 @@ Preliminary validation on rodent plethysmography data (n=500 breaths from 10 ani
 PhysioMetrics provides a comprehensive graphical interface for data exploration and manual curation:
 
 - **Manual Peak Editing**: Add, delete, or move detected peaks with keyboard shortcuts and click-based interaction
-- **Region Marking**: Mark sniffing bouts, artifact regions, or data segments for exclusion from analysis
-- **Real-time Visual Feedback**: Automatic overlays show eupnea (green), apnea (red), and sniffing (purple) regions
+- **Event Marking System**: Drag-and-drop region marking for sniffing bouts, artifact regions, or custom event types with configurable visualization
+- **Channel Manager**: Multi-channel display configuration with automatic channel type detection (plethysmography, stimulus, raw signal)
+- **Real-time Visual Feedback**: Automatic overlays show eupnea (green), apnea (red), and sniffing (purple) regions with configurable display modes
+- **3D UMAP Visualization**: Advanced peak editor with dimensionality reduction for exploring breath feature space
 - **Spectral Analysis**: Power spectrum and wavelet scalogram visualization for frequency-domain analysis
 
 ## Signal Processing
@@ -66,12 +68,13 @@ PhysioMetrics provides a comprehensive graphical interface for data exploration 
 
 ## Comprehensive Metrics and Export
 
-PhysioMetrics computes 35+ breathing metrics per breath, including:
+PhysioMetrics computes 60+ breathing metrics per breath, including:
 
 - **Timing Metrics**: Instantaneous frequency, inspiratory time (Ti), expiratory time (Te), interbreath interval
 - **Amplitude Metrics**: Inspiratory amplitude, expiratory amplitude, peak-to-trough distance
 - **Pattern Metrics**: Breathing regularity score (RMSSD-based), ventilation proxy (frequency × amplitude)
 - **Waveform Metrics**: Maximum inspiratory/expiratory derivatives, area under curve, breath shape metrics
+- **ML Features**: Neighbor comparison features, merge detection metrics, classification probabilities
 
 Export options include:
 - **CSV Files**: Per-breath metrics, time-aligned metric traces, event intervals
@@ -83,7 +86,7 @@ Export options include:
 
 PhysioMetrics is implemented in Python 3.11 with a PyQt6 graphical user interface. Core signal processing leverages NumPy [@Harris2020] and SciPy [@Virtanen2020] for filtering and peak detection. Machine learning classification uses scikit-learn [@Pedregosa2011] for Random Forest models and XGBoost [@Chen2016] for gradient boosting. Data visualization is provided by matplotlib [@Hunter2007] with interactive navigation and real-time plot updates.
 
-The software follows a modular architecture with clear separation between signal processing (`core/`), machine learning (`core/ml/`), file I/O (`core/io/`), and user interface (`dialogs/`, `editing/`, `ui/`). This design enables extension to other physiological signals beyond respiratory analysis. A headless Python API (in development) will enable scripted batch processing without the graphical interface.
+The software follows a modular architecture with clear separation between signal processing (`core/`), machine learning (`core/ml_training.py`, `core/ml_prediction.py`), file I/O (`core/io/`), and user interface (`dialogs/`, `editing/`, `ui/`). This design enables extension to other physiological signals beyond respiratory analysis. Parallel processing (4-8x speedup) accelerates peak detection and data export for large recordings. A headless Python API (in development) will enable scripted batch processing without the graphical interface.
 
 Example usage (GUI):
 ```python
@@ -123,8 +126,9 @@ PhysioMetrics is currently in use for:
 - Pharmacological experiments (assessing drug effects on breathing patterns)
 - Developmental studies (characterizing breathing maturation in neonatal rodents)
 - Stress response experiments (analyzing breathing regularity changes)
+- Fiber photometry experiments (in development: correlating neural activity with breathing patterns)
 
-The software handles recordings ranging from 30 seconds to several hours in duration and supports multi-sweep experiments with 10+ repeated trials.
+The software handles recordings ranging from 30 seconds to several hours in duration and supports multi-sweep experiments with 10+ repeated trials. Version 1.0.14 is the first public release with a Zenodo DOI (10.5281/zenodo.17575911).
 
 # Acknowledgments
 

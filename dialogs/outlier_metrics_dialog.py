@@ -13,8 +13,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from dialogs.export_mixin import ExportMixin
 
-class OutlierMetricsDialog(QDialog):
+
+class OutlierMetricsDialog(ExportMixin, QDialog):
     def __init__(self, parent=None, available_metrics=None, selected_metrics=None, outlier_sd=3.0):
         from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QCheckBox,
                                     QPushButton, QScrollArea, QWidget)
@@ -27,6 +29,7 @@ class OutlierMetricsDialog(QDialog):
         # Apply dark theme
         self._apply_dark_theme()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
         # Store available metrics
         self.available_metrics = available_metrics or []

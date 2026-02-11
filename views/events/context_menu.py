@@ -114,6 +114,13 @@ class EventMarkerContextMenu(QMenu):
     add_paired_requested = pyqtSignal(float)  # start_time
     auto_detect_requested = pyqtSignal(str)   # channel_name
     settings_requested = pyqtSignal()
+    delete_all_requested = pyqtSignal()  # delete all markers everywhere
+    delete_all_type_requested = pyqtSignal(str, str)  # category, label
+    delete_all_sweep_requested = pyqtSignal()  # delete all in current sweep
+    delete_category_sweep_requested = pyqtSignal(str)  # category - delete category in current sweep
+    delete_category_all_requested = pyqtSignal(str)    # category - delete category in all sweeps
+    derivative_toggle_changed = pyqtSignal(bool)  # show_derivative_on_drag toggle
+    generate_cta_requested = pyqtSignal()  # generate photometry CTA dialog
 
     def __init__(
         self,
@@ -122,6 +129,7 @@ class EventMarkerContextMenu(QMenu):
         parent: Optional[QWidget] = None,
         existing_actions: Optional[List[QAction]] = None,
         channel_names: Optional[List[str]] = None,
+        show_derivative_on_drag: bool = False,
     ):
         """
         Initialize the context menu.
@@ -132,12 +140,14 @@ class EventMarkerContextMenu(QMenu):
             parent: Parent widget
             existing_actions: Existing actions to preserve (Auto Scale Y, etc.)
             channel_names: Available channel names for auto-detection
+            show_derivative_on_drag: Current state of derivative overlay toggle
         """
         super().__init__(parent)
         self._viewmodel = viewmodel
         self._click_time = click_time
         self._existing_actions = existing_actions or []
         self._channel_names = channel_names or []
+        self._show_derivative_on_drag = show_derivative_on_drag
 
         self._build_menu()
 
@@ -152,13 +162,11 @@ class EventMarkerContextMenu(QMenu):
         self.addSeparator()
 
         # Add Single Marker
-        add_single = self.addAction("Add Single Marker")
-        add_single.setShortcut("S")  # Show shortcut hint
+        add_single = self.addAction("Add Single Marker (S+Click)")
         add_single.triggered.connect(lambda: self.add_single_requested.emit(self._click_time))
 
-        # Add Paired Marker
-        add_paired = self.addAction("Add Paired Marker")
-        add_paired.setShortcut("P")  # Show shortcut hint
+        # Add Paired Marker (D for Double)
+        add_paired = self.addAction("Add Paired Marker (D+Click)")
         add_paired.triggered.connect(lambda: self.add_paired_requested.emit(self._click_time))
 
         self.addSeparator()
@@ -186,6 +194,92 @@ class EventMarkerContextMenu(QMenu):
 
         self.addSeparator()
 
+        # Delete submenu (only show if there are markers)
+        if self._viewmodel.marker_count > 0:
+            delete_menu = self.addMenu("Delete Markers...")
+
+            total_count = self._viewmodel.marker_count
+
+            # Delete all markers everywhere
+            delete_all = delete_menu.addAction(f"Delete All ({total_count})")
+            delete_all.triggered.connect(self.delete_all_requested.emit)
+
+            # Delete all in this sweep
+            delete_sweep = delete_menu.addAction("Delete All (This Sweep)")
+            delete_sweep.triggered.connect(self.delete_all_sweep_requested.emit)
+
+            delete_menu.addSeparator()
+
+            # Delete by Category submenu
+            delete_by_cat_menu = delete_menu.addMenu("Delete by Category...")
+
+            # This Sweep submenu
+            this_sweep_menu = delete_by_cat_menu.addMenu("This Sweep")
+
+            # All Sweeps submenu
+            all_sweeps_menu = delete_by_cat_menu.addMenu("All Sweeps")
+
+            # Get all unique categories that have markers
+            existing_categories = set()
+            for m in self._viewmodel.store.all():
+                existing_categories.add(m.category)
+
+            if existing_categories:
+                for cat_name in sorted(existing_categories):
+                    # Get display name for category
+                    cat_obj = self._viewmodel.service.registry.get(cat_name)
+                    cat_display = cat_obj.display_name if cat_obj else cat_name.title()
+
+                    # Count markers in this category
+                    cat_markers = self._viewmodel.store.get_by_category(cat_name)
+                    count = len(cat_markers)
+
+                    # Add to "This Sweep" menu
+                    action_sweep = this_sweep_menu.addAction(f"{cat_display} ({count})")
+                    action_sweep.triggered.connect(
+                        lambda checked, c=cat_name: self.delete_category_sweep_requested.emit(c)
+                    )
+
+                    # Add to "All Sweeps" menu
+                    action_all = all_sweeps_menu.addAction(f"{cat_display} ({count})")
+                    action_all.triggered.connect(
+                        lambda checked, c=cat_name: self.delete_category_all_requested.emit(c)
+                    )
+            else:
+                # No markers - disable menus
+                this_sweep_menu.setEnabled(False)
+                all_sweeps_menu.setEnabled(False)
+
+        self.addSeparator()
+
+        # Generate CTA (only show if there are markers and photometry data is available)
+        if self._viewmodel.marker_count > 0:
+            generate_cta = self.addAction("Generate Photometry CTA...")
+            generate_cta.setToolTip(
+                "Generate Condition-Triggered Averages aligned to event markers.\n"
+                "Useful for analyzing photometry signals around behavioral events."
+            )
+            generate_cta.triggered.connect(self.generate_cta_requested.emit)
+
+        self.addSeparator()
+
+        # View Options
+        view_menu = self.addMenu("View Options")
+
+        # Derivative overlay toggle
+        derivative_toggle = view_menu.addAction("Show Derivative on Drag")
+        derivative_toggle.setCheckable(True)
+        derivative_toggle.setChecked(self._show_derivative_on_drag)
+        derivative_toggle.setToolTip(
+            "Show smoothed derivative (dV/dt) overlay when dragging markers.\n"
+            "Tip: You can also hold Shift while dragging to show it temporarily."
+        )
+        derivative_toggle.triggered.connect(
+            lambda checked: self.derivative_toggle_changed.emit(checked)
+        )
+
+        self.addSeparator()
+
         # Settings
         settings = self.addAction("Marker Settings...")
         settings.triggered.connect(self.settings_requested.emit)
@@ -209,9 +303,15 @@ class MarkerContextMenu(QMenu):
     label_changed = pyqtSignal(str, str)       # marker_id, new_label
     color_requested = pyqtSignal(str)          # marker_id
     note_requested = pyqtSignal(str)           # marker_id
+    line_width_changed = pyqtSignal(str, int)  # marker_id, width
+    grab_width_changed = pyqtSignal(str, int)  # marker_id, grab_width_px
     convert_requested = pyqtSignal(str, str)   # marker_id, new_type ('single' or 'paired')
     delete_requested = pyqtSignal(str)         # marker_id
+    delete_all_requested = pyqtSignal()  # delete all markers everywhere
     delete_all_type_requested = pyqtSignal(str, str)  # category, label
+    delete_all_sweep_requested = pyqtSignal()  # delete all in current sweep
+    delete_category_sweep_requested = pyqtSignal(str)  # category - delete category in current sweep
+    delete_category_all_requested = pyqtSignal(str)    # category - delete category in all sweeps
 
     def __init__(
         self,
@@ -267,6 +367,29 @@ class MarkerContextMenu(QMenu):
         color = self.addAction("Set Color...")
         color.triggered.connect(lambda: self.color_requested.emit(self._marker_id))
 
+        # Line Thickness submenu
+        thickness_menu = self.addMenu("Line Thickness")
+        current_width = marker.line_width  # None means default
+        for label_text, width in [("Thin (1px)", 1), ("Medium (2px)", 2), ("Thick (3px)", 3), ("Extra Thick (4px)", 4)]:
+            action = thickness_menu.addAction(label_text)
+            action.setCheckable(True)
+            action.setChecked(
+                (current_width == width) or
+                (current_width is None and width == (1 if marker.is_single else 2))
+            )
+            action.triggered.connect(
+                lambda checked, w=width: self.line_width_changed.emit(self._marker_id, w)
+            )
+
+        # Edge Grab Width submenu (only for paired markers)
+        if marker.is_paired:
+            grab_menu = self.addMenu("Edge Grab Width")
+            for label_text, grab_w in [("Narrow (10px)", 10), ("Medium (20px)", 20), ("Wide (35px)", 35)]:
+                action = grab_menu.addAction(label_text)
+                action.triggered.connect(
+                    lambda checked, gw=grab_w: self.grab_width_changed.emit(self._marker_id, gw)
+                )
+
         # Add Note
         note = self.addAction("Add Note...")
         note.triggered.connect(lambda: self.note_requested.emit(self._marker_id))
@@ -287,16 +410,76 @@ class MarkerContextMenu(QMenu):
 
         self.addSeparator()
 
-        # Delete
+        # Delete this marker
         delete = self.addAction("Delete Marker")
         delete.triggered.connect(lambda: self.delete_requested.emit(self._marker_id))
 
-        # Delete all of type
-        cat_display = current_cat.get_display_label(marker.label)
-        delete_all = self.addAction(f"Delete All [{cat_display}]")
-        delete_all.triggered.connect(
+        # Delete submenu for bulk operations
+        delete_menu = self.addMenu("Delete Multiple...")
+
+        total_count = len(self._viewmodel.store)
+
+        # Delete all markers everywhere
+        delete_all = delete_menu.addAction(f"Delete All ({total_count})")
+        delete_all.triggered.connect(self.delete_all_requested.emit)
+
+        # Delete all in this sweep
+        delete_all_sweep = delete_menu.addAction("Delete All (This Sweep)")
+        delete_all_sweep.triggered.connect(self.delete_all_sweep_requested.emit)
+
+        delete_menu.addSeparator()
+
+        # Delete all of this exact type (category + label)
+        # Use marker's actual category and label for display
+        marker_cat_display = current_cat.display_name if current_cat else marker.category.title()
+        marker_label_display = current_cat.get_display_label(marker.label) if current_cat else marker.label.title()
+        type_count = len(self._viewmodel.store.get_by_label(marker.category, marker.label))
+        delete_all_type = delete_menu.addAction(f"Delete All [{marker_cat_display}: {marker_label_display}] ({type_count})")
+        delete_all_type.triggered.connect(
             lambda: self.delete_all_type_requested.emit(marker.category, marker.label)
         )
+
+        delete_menu.addSeparator()
+
+        # Delete by Category submenu
+        delete_by_cat_menu = delete_menu.addMenu("Delete by Category...")
+
+        # This Sweep submenu
+        this_sweep_menu = delete_by_cat_menu.addMenu("This Sweep")
+
+        # All Sweeps submenu
+        all_sweeps_menu = delete_by_cat_menu.addMenu("All Sweeps")
+
+        # Get all unique categories that have markers
+        existing_categories = set()
+        for m in self._viewmodel.store.all():
+            existing_categories.add(m.category)
+
+        if existing_categories:
+            for cat_name in sorted(existing_categories):
+                # Get display name for category (don't use get_or_default to avoid "Custom" fallback)
+                cat_obj = self._viewmodel.service.registry.get(cat_name)
+                cat_display = cat_obj.display_name if cat_obj else cat_name.title()
+
+                # Count markers in this category
+                cat_markers = self._viewmodel.store.get_by_category(cat_name)
+                count = len(cat_markers)
+
+                # Add to "This Sweep" menu
+                action_sweep = this_sweep_menu.addAction(f"{cat_display} ({count})")
+                action_sweep.triggered.connect(
+                    lambda checked, c=cat_name: self.delete_category_sweep_requested.emit(c)
+                )
+
+                # Add to "All Sweeps" menu
+                action_all = all_sweeps_menu.addAction(f"{cat_display} ({count})")
+                action_all.triggered.connect(
+                    lambda checked, c=cat_name: self.delete_category_all_requested.emit(c)
+                )
+        else:
+            # No markers - disable menus
+            this_sweep_menu.setEnabled(False)
+            all_sweeps_menu.setEnabled(False)
 
 
 def create_color_icon(color: str, size: int = 16) -> QIcon:

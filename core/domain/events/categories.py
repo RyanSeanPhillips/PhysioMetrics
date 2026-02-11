@@ -107,22 +107,15 @@ class EventCategory:
 
 
 # Built-in category definitions
+# Simplified to core categories: Hargreaves, Stimulus, Movement, Artifact, Custom
 BUILTIN_CATEGORIES: Dict[str, EventCategory] = {
-    'respiratory': EventCategory(
-        name='respiratory',
-        display_name='Respiratory',
-        color='#4CAF50',  # Green
-        default_marker_type=MarkerType.SINGLE,
-        labels=['inspiratory_onset', 'expiratory_onset', 'sigh', 'apnea_start', 'apnea_end'],
-        is_builtin=True,
-    ),
-    'behavior': EventCategory(
-        name='behavior',
-        display_name='Behavior',
-        color='#2196F3',  # Blue
+    'hargreaves': EventCategory(
+        name='hargreaves',
+        display_name='Hargreaves',
+        color='#F44336',  # Red
         default_marker_type=MarkerType.PAIRED,
-        labels=['lick_bout', 'movement', 'grooming', 'sniffing'],
-        channel_hints=['lick', 'motion', 'movement'],
+        labels=['heat_onset', 'withdrawal', 'test'],
+        channel_hints=['temp', 'thermal', 'hargreaves'],
         is_builtin=True,
     ),
     'stimulus': EventCategory(
@@ -130,18 +123,18 @@ BUILTIN_CATEGORIES: Dict[str, EventCategory] = {
         display_name='Stimulus',
         color='#FF9800',  # Orange
         default_marker_type=MarkerType.SINGLE,
-        labels=['stim_onset', 'stim_offset', 'ttl_trigger'],
+        labels=['stim_on', 'stim_off', 'ttl'],
         channel_hints=['stim', 'ttl', 'trigger'],
         default_detection_method='ttl',
         is_builtin=True,
     ),
-    'thermal': EventCategory(
-        name='thermal',
-        display_name='Thermal/Hargreaves',
-        color='#F44336',  # Red
+    'movement': EventCategory(
+        name='movement',
+        display_name='Movement',
+        color='#2196F3',  # Blue
         default_marker_type=MarkerType.PAIRED,
-        labels=['heat_onset', 'withdrawal', 'hargreaves'],
-        channel_hints=['temp', 'thermal', 'hargreaves'],
+        labels=['movement', 'grooming', 'sniffing'],
+        channel_hints=['motion', 'movement', 'accel'],
         is_builtin=True,
     ),
     'artifact': EventCategory(
@@ -157,7 +150,7 @@ BUILTIN_CATEGORIES: Dict[str, EventCategory] = {
         display_name='Custom',
         color='#9C27B0',  # Purple
         default_marker_type=MarkerType.SINGLE,
-        labels=['marker', 'event', 'region'],
+        labels=['marker', 'event'],
         is_builtin=True,
     ),
 }

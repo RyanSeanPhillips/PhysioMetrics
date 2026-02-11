@@ -401,7 +401,7 @@ def _snap_to_signal_features(time_point, is_onset, main_window):
         search_region = event_data[search_start:search_end]
 
         # Find local minima
-        minima_idx, _ = find_peaks(-search_region, distance=int(0.1 * st.sr_hz))
+        minima_idx, _ = find_peaks(-search_region, distance=max(1, int(0.1 * st.sr_hz)))
 
         if len(minima_idx) > 0:
             # Find closest minimum to our detected point

@@ -13,8 +13,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from dialogs.export_mixin import ExportMixin
 
-class PeakNavigatorDialog(QDialog):
+
+class PeakNavigatorDialog(ExportMixin, QDialog):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -131,6 +133,7 @@ class PeakNavigatorDialog(QDialog):
 
         self._setup_ui()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
     def _enable_dark_title_bar(self):
         """Enable dark title bar on Windows 10/11."""

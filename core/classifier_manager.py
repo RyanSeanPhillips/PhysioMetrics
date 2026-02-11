@@ -205,15 +205,25 @@ class ClassifierManager:
                         print(f"[Classifier] Model {matching_keys[0]} found! Proceeding...")
 
             # Re-run peak detection to apply new classifier
-            if self.state.analyze_chan and self.state.peaks_by_sweep:
+            if self.state.analyze_chan and self.state.all_peaks_by_sweep:
                 self.mw.statusBar().showMessage(f"Switching to {text} classifier...", 2000)
                 self.update_displayed_peaks_from_classifier()
                 if hasattr(self.mw, 'plot_manager'):
                     self.mw.redraw_main_plot()
+            elif not self.state.all_peaks_by_sweep:
+                self.mw.statusBar().showMessage(
+                    f"Classifier set to {text}. Run peak detection to see results.", 3000
+                )
 
     def update_displayed_peaks_from_classifier(self):
         """Update peaks_by_sweep and breath_by_sweep based on active classifier."""
         st = self.state
+        fallback_used = False
+        predictions_computed = False
+
+        # If switching to an ML classifier, try to compute predictions on-demand
+        if st.active_classifier in ['xgboost', 'rf', 'mlp']:
+            predictions_computed = self._compute_ml_predictions_if_needed(st.active_classifier)
 
         for s in st.all_peaks_by_sweep.keys():
             all_peaks_data = st.all_peaks_by_sweep[s]
@@ -225,10 +235,13 @@ class ClassifierManager:
                 print(f"[Classifier Update] Sweep {s}: Copied {active_labels_key_ro} to 'labels', "
                       f"found {np.sum(all_peaks_data['labels'] == 1)} breaths")
             else:
+                # ML predictions not available - need to fall back
+                fallback_used = True
                 if 'labels_threshold_ro' in all_peaks_data and all_peaks_data['labels_threshold_ro'] is not None:
                     all_peaks_data['labels'] = all_peaks_data['labels_threshold_ro'].copy()
                     all_peaks_data['label_source'] = np.array(['auto'] * len(all_peaks_data['labels']))
-                    print(f"[Classifier Update] Sweep {s}: Falling back to threshold")
+                    if s == 0:
+                        print(f"[Classifier Update] WARNING: {st.active_classifier} predictions not found, using threshold")
                 else:
                     print(f"[Classifier Update] Sweep {s}: WARNING - No predictions available!")
                     continue
@@ -243,6 +256,221 @@ class ClassifierManager:
             import core.peaks as peakdet
             breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
             st.breath_by_sweep[s] = breaths
+
+        # Warn user if fallback was used
+        if fallback_used and st.active_classifier != 'threshold':
+            self.mw.statusBar().showMessage(
+                f"WARNING: {st.active_classifier.upper()} predictions failed. Using threshold instead.", 5000
+            )
+        elif predictions_computed:
+            self.mw.statusBar().showMessage(
+                f"Computed {st.active_classifier.upper()} predictions for all sweeps.", 3000
+            )
+
+    def _compute_ml_predictions_if_needed(self, algorithm: str) -> bool:
+        """Compute ML predictions for the given algorithm if not already available.
+
+        Returns True if predictions were computed, False if already available or failed.
+        """
+        import core.ml_prediction as ml_prediction
+        st = self.state
+
+        # Check if we have models loaded
+        if not st.loaded_ml_models:
+            print(f"[ML Prediction] No models loaded")
+            return False
+
+        model_key_prefix = f'model1_{algorithm}'
+        matching_keys = [k for k in st.loaded_ml_models.keys() if k.startswith(model_key_prefix)]
+        if not matching_keys:
+            print(f"[ML Prediction] No {algorithm} model found")
+            return False
+
+        # Check if predictions already exist for first sweep
+        first_sweep = next(iter(st.all_peaks_by_sweep.keys()), None)
+        if first_sweep is None:
+            return False
+
+        labels_key = f'labels_{algorithm}_ro'
+        if labels_key in st.all_peaks_by_sweep[first_sweep] and st.all_peaks_by_sweep[first_sweep][labels_key] is not None:
+            print(f"[ML Prediction] {algorithm} predictions already exist")
+            return False
+
+        print(f"[ML Prediction] Computing {algorithm} predictions on-demand...")
+        self.mw.statusBar().showMessage(f"Computing {algorithm.upper()} predictions...", 0)
+
+        # Process events to show status message
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        computed_count = 0
+        for s in st.all_peaks_by_sweep.keys():
+            all_peaks_data = st.all_peaks_by_sweep[s]
+
+            # Get peak metrics (should have been computed during initial detection)
+            if 'peak_metrics' not in all_peaks_data or all_peaks_data['peak_metrics'] is None:
+                # Need to recompute peak metrics
+                y_proc = self.mw._get_processed_for(st.analyze_chan, s)
+                all_peak_indices = all_peaks_data['indices']
+                all_breaths = st.breath_by_sweep.get(s, {})
+
+                import core.peaks as peakdet
+                peak_metrics = peakdet.compute_peak_candidate_metrics(
+                    y=y_proc,
+                    all_peak_indices=all_peak_indices,
+                    breath_events=all_breaths,
+                    sr_hz=st.sr_hz
+                )
+                all_peaks_data['peak_metrics'] = peak_metrics
+
+            peak_metrics = all_peaks_data['peak_metrics']
+
+            try:
+                predictions = ml_prediction.predict_with_cascade(
+                    peak_metrics=peak_metrics,
+                    models=st.loaded_ml_models,
+                    algorithm=algorithm,
+                    debug=(s == 0)
+                )
+                all_peaks_data[f'labels_{algorithm}_ro'] = predictions['final_labels']
+
+                # Also store eupnea/sniff and sigh predictions if available
+                if 'eupnea_sniff_class' in predictions:
+                    all_peaks_data[f'eupnea_sniff_{algorithm}_ro'] = predictions['eupnea_sniff_class']
+                if 'sigh_class' in predictions:
+                    all_peaks_data[f'sigh_{algorithm}_ro'] = predictions['sigh_class']
+
+                computed_count += 1
+
+                if s == 0:
+                    n_breaths = np.sum(predictions['final_labels'] == 1)
+                    print(f"[ML-{algorithm}] Sweep {s}: {n_breaths} breaths detected")
+
+            except Exception as e:
+                print(f"[ML-{algorithm}] Sweep {s} prediction failed: {e}")
+                all_peaks_data[f'labels_{algorithm}_ro'] = None
+
+        print(f"[ML Prediction] Computed {algorithm} predictions for {computed_count} sweeps")
+        return computed_count > 0
+
+    def _compute_model3_predictions_if_needed(self, algorithm: str) -> bool:
+        """Compute Model 3 (eupnea/sniff) predictions for the given algorithm if not already available.
+
+        This runs ONLY Model 3, using the existing breath labels from the current Model 1 classifier.
+        Returns True if predictions were computed, False if already available or failed.
+        """
+        import core.ml_prediction as ml_prediction
+        st = self.state
+
+        # Check if we have models loaded
+        if not st.loaded_ml_models:
+            print(f"[Model3 Prediction] No models loaded")
+            return False
+
+        model_key_prefix = f'model3_{algorithm}'
+        matching_keys = [k for k in st.loaded_ml_models.keys() if k.startswith(model_key_prefix)]
+        if not matching_keys:
+            print(f"[Model3 Prediction] No {algorithm} model found for Model 3")
+            return False
+
+        # Check if predictions already exist for first sweep
+        first_sweep = next(iter(st.all_peaks_by_sweep.keys()), None)
+        if first_sweep is None:
+            return False
+
+        eupnea_sniff_key = f'eupnea_sniff_{algorithm}_ro'
+        if eupnea_sniff_key in st.all_peaks_by_sweep[first_sweep] and st.all_peaks_by_sweep[first_sweep][eupnea_sniff_key] is not None:
+            print(f"[Model3 Prediction] {algorithm} eupnea/sniff predictions already exist")
+            return False
+
+        print(f"[Model3 Prediction] Computing {algorithm} eupnea/sniff predictions on-demand...")
+        self.mw.statusBar().showMessage(f"Computing {algorithm.upper()} eupnea/sniff predictions...", 0)
+
+        # Process events to show status message
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        # Get Model 3 model and metadata
+        model3_key = matching_keys[0]
+        model3 = st.loaded_ml_models[model3_key]['model']
+        model3_metadata = st.loaded_ml_models[model3_key]['metadata']
+        feature_names = model3_metadata.get('feature_names', [])
+
+        computed_count = 0
+        for s in st.all_peaks_by_sweep.keys():
+            all_peaks_data = st.all_peaks_by_sweep[s]
+
+            # Get current breath labels (from whichever Model 1 classifier is active)
+            labels = all_peaks_data.get('labels')
+            if labels is None:
+                # Try to get from active classifier
+                labels_key = f'labels_{st.active_classifier}_ro'
+                labels = all_peaks_data.get(labels_key)
+            if labels is None:
+                print(f"[Model3 Prediction] Sweep {s}: No breath labels available")
+                continue
+
+            # Get indices of breaths (label == 1)
+            breath_mask = (labels == 1)
+            breath_indices = np.where(breath_mask)[0]
+
+            if len(breath_indices) == 0:
+                # No breaths to classify
+                all_peaks_data[eupnea_sniff_key] = np.full(len(labels), -1, dtype=np.int8)
+                continue
+
+            # Get or compute peak metrics
+            if 'peak_metrics' not in all_peaks_data or all_peaks_data['peak_metrics'] is None:
+                y_proc = self.mw._get_processed_for(st.analyze_chan, s)
+                all_peak_indices = all_peaks_data['indices']
+
+                import core.peaks as peakdet
+                peak_metrics = peakdet.compute_peak_candidate_metrics(
+                    y=y_proc,
+                    all_peak_indices=all_peak_indices,
+                    breath_events=st.breath_by_sweep.get(s, {}),
+                    sr_hz=st.sr_hz
+                )
+                all_peaks_data['peak_metrics'] = peak_metrics
+            else:
+                peak_metrics = all_peaks_data['peak_metrics']
+
+            # Extract features for breath peaks only
+            breath_metrics = [peak_metrics[i] for i in breath_indices]
+
+            try:
+                X = ml_prediction.extract_features_for_prediction(
+                    breath_metrics, feature_names, debug=(s == 0)
+                )
+
+                if len(X) > 0:
+                    predictions = model3.predict(X)
+
+                    # Create full array with -1 for non-breaths
+                    eupnea_sniff_class = np.full(len(labels), -1, dtype=np.int8)
+                    for i, breath_idx in enumerate(breath_indices):
+                        eupnea_sniff_class[breath_idx] = predictions[i]  # 0=eupnea, 1=sniffing
+
+                    all_peaks_data[eupnea_sniff_key] = eupnea_sniff_class
+                    computed_count += 1
+
+                    if s == 0:
+                        n_eupnea = np.sum(eupnea_sniff_class == 0)
+                        n_sniff = np.sum(eupnea_sniff_class == 1)
+                        print(f"[Model3-{algorithm}] Sweep {s}: Eupnea={n_eupnea}, Sniffing={n_sniff}")
+
+            except Exception as e:
+                print(f"[Model3-{algorithm}] Sweep {s} prediction failed: {e}")
+                import traceback
+                traceback.print_exc()
+                all_peaks_data[eupnea_sniff_key] = None
+
+        print(f"[Model3 Prediction] Computed {algorithm} eupnea/sniff for {computed_count} sweeps")
+        if computed_count > 0:
+            self.mw.statusBar().showMessage(
+                f"Computed {algorithm.upper()} eupnea/sniff predictions for all sweeps.", 3000
+            )
+        return computed_count > 0
 
     # =========================================================================
     # Model 3: Eupnea/Sniff Classifier
@@ -280,6 +508,7 @@ class ClassifierManager:
                 self.mw._run_automatic_gmm_clustering()
             self.update_eupnea_sniff_from_classifier()
         else:
+            # ML classifier (xgboost, rf, mlp)
             model_key_prefix = f'model3_{new_classifier}'
             matching_keys = [k for k in self.state.loaded_ml_models.keys()
                            if k.startswith(model_key_prefix)]
@@ -293,6 +522,8 @@ class ClassifierManager:
                 self.state.active_eupnea_sniff_classifier = "gmm"
                 return
 
+            # Compute Model 3 predictions on-demand if needed
+            self._compute_model3_predictions_if_needed(new_classifier)
             self.update_eupnea_sniff_from_classifier()
 
         # Rebuild regions for display
@@ -356,6 +587,123 @@ class ClassifierManager:
 
         st.sniff_regions_by_sweep.clear()
 
+    def _compute_model2_predictions_if_needed(self, algorithm: str) -> bool:
+        """Compute Model 2 (sigh) predictions for the given algorithm if not already available.
+
+        This runs ONLY Model 2, using the existing breath labels from the current Model 1 classifier.
+        Returns True if predictions were computed, False if already available or failed.
+        """
+        import core.ml_prediction as ml_prediction
+        st = self.state
+
+        # Check if we have models loaded
+        if not st.loaded_ml_models:
+            print(f"[Model2 Prediction] No models loaded")
+            return False
+
+        model_key_prefix = f'model2_{algorithm}'
+        matching_keys = [k for k in st.loaded_ml_models.keys() if k.startswith(model_key_prefix)]
+        if not matching_keys:
+            print(f"[Model2 Prediction] No {algorithm} model found for Model 2")
+            return False
+
+        # Check if predictions already exist for first sweep
+        first_sweep = next(iter(st.all_peaks_by_sweep.keys()), None)
+        if first_sweep is None:
+            return False
+
+        sigh_key = f'sigh_{algorithm}_ro'
+        if sigh_key in st.all_peaks_by_sweep[first_sweep] and st.all_peaks_by_sweep[first_sweep][sigh_key] is not None:
+            print(f"[Model2 Prediction] {algorithm} sigh predictions already exist")
+            return False
+
+        print(f"[Model2 Prediction] Computing {algorithm} sigh predictions on-demand...")
+        self.mw.statusBar().showMessage(f"Computing {algorithm.upper()} sigh predictions...", 0)
+
+        # Process events to show status message
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        # Get Model 2 model and metadata
+        model2_key = matching_keys[0]
+        model2 = st.loaded_ml_models[model2_key]['model']
+        model2_metadata = st.loaded_ml_models[model2_key]['metadata']
+        feature_names = model2_metadata.get('feature_names', [])
+
+        computed_count = 0
+        for s in st.all_peaks_by_sweep.keys():
+            all_peaks_data = st.all_peaks_by_sweep[s]
+
+            # Get current breath labels
+            labels = all_peaks_data.get('labels')
+            if labels is None:
+                labels_key = f'labels_{st.active_classifier}_ro'
+                labels = all_peaks_data.get(labels_key)
+            if labels is None:
+                print(f"[Model2 Prediction] Sweep {s}: No breath labels available")
+                continue
+
+            # Get indices of breaths (label == 1)
+            breath_mask = (labels == 1)
+            breath_indices = np.where(breath_mask)[0]
+
+            if len(breath_indices) == 0:
+                all_peaks_data[sigh_key] = np.full(len(labels), -1, dtype=np.int8)
+                continue
+
+            # Get or compute peak metrics
+            if 'peak_metrics' not in all_peaks_data or all_peaks_data['peak_metrics'] is None:
+                y_proc = self.mw._get_processed_for(st.analyze_chan, s)
+                all_peak_indices = all_peaks_data['indices']
+
+                import core.peaks as peakdet
+                peak_metrics = peakdet.compute_peak_candidate_metrics(
+                    y=y_proc,
+                    all_peak_indices=all_peak_indices,
+                    breath_events=st.breath_by_sweep.get(s, {}),
+                    sr_hz=st.sr_hz
+                )
+                all_peaks_data['peak_metrics'] = peak_metrics
+            else:
+                peak_metrics = all_peaks_data['peak_metrics']
+
+            # Extract features for breath peaks only
+            breath_metrics = [peak_metrics[i] for i in breath_indices]
+
+            try:
+                X = ml_prediction.extract_features_for_prediction(
+                    breath_metrics, feature_names, debug=(s == 0)
+                )
+
+                if len(X) > 0:
+                    predictions = model2.predict(X)
+
+                    # Create full array with -1 for non-breaths
+                    sigh_class = np.full(len(labels), -1, dtype=np.int8)
+                    for i, breath_idx in enumerate(breath_indices):
+                        sigh_class[breath_idx] = predictions[i]  # 0=normal, 1=sigh
+
+                    all_peaks_data[sigh_key] = sigh_class
+                    computed_count += 1
+
+                    if s == 0:
+                        n_normal = np.sum(sigh_class == 0)
+                        n_sigh = np.sum(sigh_class == 1)
+                        print(f"[Model2-{algorithm}] Sweep {s}: Normal={n_normal}, Sigh={n_sigh}")
+
+            except Exception as e:
+                print(f"[Model2-{algorithm}] Sweep {s} prediction failed: {e}")
+                import traceback
+                traceback.print_exc()
+                all_peaks_data[sigh_key] = None
+
+        print(f"[Model2 Prediction] Computed {algorithm} sigh for {computed_count} sweeps")
+        if computed_count > 0:
+            self.mw.statusBar().showMessage(
+                f"Computed {algorithm.upper()} sigh predictions for all sweeps.", 3000
+            )
+        return computed_count > 0
+
     # =========================================================================
     # Model 2: Sigh Classifier
     # =========================================================================
@@ -382,6 +730,7 @@ class ClassifierManager:
         elif new_classifier == 'manual':
             self.update_sigh_from_classifier()
         else:
+            # ML classifier (xgboost, rf, mlp)
             model_key_prefix = f'model2_{new_classifier}'
             matching_keys = [k for k in self.state.loaded_ml_models.keys()
                            if k.startswith(model_key_prefix)]
@@ -395,6 +744,8 @@ class ClassifierManager:
                 self.state.active_sigh_classifier = "manual"
                 return
 
+            # Compute Model 2 predictions on-demand if needed
+            self._compute_model2_predictions_if_needed(new_classifier)
             self.update_sigh_from_classifier()
 
         if hasattr(self.mw, 'plot_manager'):

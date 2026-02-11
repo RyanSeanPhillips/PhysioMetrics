@@ -73,7 +73,7 @@ def get_ml_npz_path_for_channel(data_path: Path, channel_name: str) -> Path:
     return ml_folder / f"{base}.{safe_channel}.ml.npz"
 
 
-def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None) -> None:
+def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None) -> None:
     """
     Save complete analysis state to .pleth.npz file.
 
@@ -254,6 +254,13 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         # Save as JSON (list of dicts)
         data[f'bout_sweep_{sweep_idx}_json'] = json.dumps(bouts)
 
+    # ===== EVENT MARKERS (new MVVM system) =====
+    if event_markers is not None:
+        # event_markers is a dict from EventMarkerService.to_npz_dict()
+        # Contains: event_markers_version (np.array) and event_markers_json (str)
+        for key, value in event_markers.items():
+            data[key] = value
+
     # ===== GMM PROBABILITIES (per-sweep) =====
     gmm_sweep_indices = sorted(state.gmm_sniff_probabilities.keys())
     data['gmm_sweep_indices'] = np.array(gmm_sweep_indices, dtype=int)
@@ -328,7 +335,7 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
 
 
 def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
-                        alternative_data_path: Path = None) -> Tuple[AppState, bool, Optional[Dict], Optional[Dict]]:
+                        alternative_data_path: Path = None) -> Tuple[AppState, bool, Optional[Dict], Optional[Dict], Optional[Dict]]:
     """
     Load complete analysis state from .pleth.npz file.
 
@@ -340,11 +347,12 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                               (useful when original file has moved)
 
     Returns:
-        (state, raw_data_loaded, gmm_cache, app_settings)
+        (state, raw_data_loaded, gmm_cache, app_settings, event_markers)
         - state: Restored AppState instance
         - raw_data_loaded: True if raw data was loaded (either from file or NPZ)
         - gmm_cache: Restored GMM cache dict (or None if not saved)
         - app_settings: Restored app-level settings dict (or None if not saved)
+        - event_markers: Event markers data dict (or None if not saved)
 
     Raises:
         FileNotFoundError: If original data file not found (and not embedded)
@@ -606,6 +614,14 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             bouts = json.loads(bouts_json)
             state.bout_annotations[int(sweep_idx)] = bouts
 
+    # ===== EVENT MARKERS (new MVVM system) =====
+    event_markers = None
+    if 'event_markers_version' in data:
+        event_markers = {
+            'event_markers_version': data['event_markers_version'],
+            'event_markers_json': str(data['event_markers_json']),
+        }
+
     # ===== GMM PROBABILITIES (per-sweep) =====
     if 'gmm_sweep_indices' in data:
         gmm_indices = data['gmm_sweep_indices']
@@ -673,7 +689,7 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             metrics = json.loads(metrics_json)
             state.stim_metrics_by_sweep[int(sweep_idx)] = metrics
 
-    return state, raw_data_loaded, gmm_cache, app_settings
+    return state, raw_data_loaded, gmm_cache, app_settings, event_markers
 
 
 def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:

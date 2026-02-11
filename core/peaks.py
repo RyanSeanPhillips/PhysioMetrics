@@ -1353,7 +1353,7 @@ def compute_peak_candidate_metrics(y: np.ndarray,
                 next_peak_ti = (next_pk - next_onset_idx) / sr_hz
 
         prev_peak_ti = None
-        if i > 0 and prev_pk is not None:
+        if i > 0 and prev_pk is not None and (i-1) < len(onsets):
             prev_onset_idx = onsets[i-1]
             if prev_onset_idx is not None:
                 prev_peak_ti = (prev_pk - prev_onset_idx) / sr_hz

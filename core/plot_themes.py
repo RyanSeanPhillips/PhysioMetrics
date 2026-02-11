@@ -12,8 +12,8 @@ from typing import Dict
 # Dark Theme - Optimized for long viewing sessions
 DARK_THEME = {
     # Background
-    'figure_facecolor': '#1e1e1e',  # VS Code editor background
-    'axes_facecolor': '#252526',    # Slightly lighter for contrast
+    'figure_facecolor': '#000000',  # True black for sharp appearance
+    'axes_facecolor': '#000000',    # True black for plot area
 
     # Grid and borders
     'grid_color': '#3e3e42',

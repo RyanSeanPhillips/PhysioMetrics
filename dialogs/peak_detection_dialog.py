@@ -17,8 +17,10 @@ from matplotlib.figure import Figure
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
 
+from dialogs.export_mixin import ExportMixin
 
-class PeakDetectionDialog(QDialog):
+
+class PeakDetectionDialog(ExportMixin, QDialog):
     """Advanced peak detection options and auto-threshold testing dialog."""
 
     def __init__(self, parent=None, y_data=None, sr_hz=None, current_thresh=None, current_prom=None, current_min_dist=None):
@@ -44,6 +46,7 @@ class PeakDetectionDialog(QDialog):
 
         self._setup_ui()
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
         # Calculate auto-thresholds if data provided
         if y_data is not None and len(y_data) > 0:
@@ -226,7 +229,7 @@ class PeakDetectionDialog(QDialog):
 
         try:
             y = self.y_data
-            min_dist_samples = int(0.01 * self.sr_hz)
+            min_dist_samples = max(1, int(0.01 * self.sr_hz))  # Ensure at least 1 for low sample rates
 
             # Find ALL peaks with very low prominence threshold
             peaks, props = find_peaks(y, prominence=0.001, distance=min_dist_samples)

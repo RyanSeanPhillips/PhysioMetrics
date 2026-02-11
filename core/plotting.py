@@ -234,6 +234,21 @@ class PlotHost(QWidget):
             x_pos = canvas_width - toolbar_width - margin
             self.toolbar.move(max(10, x_pos), 10)  # Ensure minimum 10px from left
 
+    def set_preserve_y(self, preserve: bool):
+        """Set Y-axis preservation mode (for Auto Y Scale toggle)."""
+        self._preserve_y = bool(preserve)
+        if not preserve:
+            # Clear stored Y limits when disabling preservation
+            self._last_single["ylim"] = None
+            self._last_grid["ylims"] = []
+
+    def clear_saved_view(self, mode: str = None):
+        """Clear saved view state to force auto-range on next draw."""
+        if mode is None or mode == "single":
+            self._last_single = {"xlim": None, "ylim": None}
+        if mode is None or mode == "grid":
+            self._last_grid = {"xlim": None, "ylims": []}
+
     def set_plot_theme(self, theme_name):
         """
         Apply a plot theme (dark or light mode) to the current plot.

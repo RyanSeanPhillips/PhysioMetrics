@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>PhotometryImportDialog</class>
+ <widget class="QDialog" name="PhotometryImportDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1400</width>
+    <height>900</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>1200</width>
+    <height>800</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>Import Photometry Data</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">/* VS Code Dark+ Theme */
+QDialog {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+}
+
+QTabWidget::pane {
+    border: 1px solid #3e3e42;
+    background-color: #1e1e1e;
+}
+
+QTabBar::tab {
+    background-color: #2d2d30;
+    color: #cccccc;
+    border: 1px solid #3e3e42;
+    padding: 8px 20px;
+    margin-right: 2px;
+    font-weight: bold;
+}
+
+QTabBar::tab:selected {
+    background-color: #094771;
+    color: #ffffff;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #3e3e42;
+}
+
+QPushButton {
+    background-color: #2d2d30;
+    color: #cccccc;
+    border: 1px solid #3e3e42;
+    padding: 6px 12px;
+    border-radius: 3px;
+}
+
+QPushButton:hover {
+    background-color: #3e3e42;
+}
+
+QPushButton:pressed {
+    background-color: #094771;
+}
+
+QPushButton#btn_cancel {
+    background-color: #3e3e42;
+}
+
+QLabel {
+    color: #d4d4d4;
+}
+
+QGroupBox {
+    border: 1px solid #3e3e42;
+    border-radius: 5px;
+    margin-top: 10px;
+    padding-top: 10px;
+    color: #d4d4d4;
+    font-weight: bold;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+}
+
+QLineEdit {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    border-radius: 3px;
+    padding: 4px;
+}
+
+QComboBox {
+    background-color: #2d2d30;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    border-radius: 3px;
+    padding: 4px;
+}
+
+QSpinBox, QDoubleSpinBox {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    border-radius: 3px;
+    padding: 4px;
+}
+
+QCheckBox {
+    color: #d4d4d4;
+}
+
+QTableWidget {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    gridline-color: #3e3e42;
+}
+
+QTableWidget::item {
+    padding: 4px;
+}
+
+QHeaderView::section {
+    background-color: #2d2d30;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    padding: 4px;
+}
+
+QScrollArea {
+    border: none;
+    background-color: #1e1e1e;
+}
+
+QSplitter::handle {
+    background-color: #3e3e42;
+}
+
+QSplitter::handle:hover {
+    background-color: #0e639c;
+}
+</string>
+  </property>
+  <layout class="QVBoxLayout" name="main_layout">
+   <property name="spacing">
+    <number>0</number>
+   </property>
+   <property name="leftMargin">
+    <number>0</number>
+   </property>
+   <property name="topMargin">
+    <number>0</number>
+   </property>
+   <property name="rightMargin">
+    <number>0</number>
+   </property>
+   <property name="bottomMargin">
+    <number>0</number>
+   </property>
+   <item>
+    <widget class="QTabWidget" name="tab_widget">
+     <property name="currentIndex">
+      <number>0</number>
+     </property>
+     <!-- Tabs are added programmatically -->
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

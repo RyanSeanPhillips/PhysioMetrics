@@ -13,8 +13,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from dialogs.export_mixin import ExportMixin
 
-class ExportOptionsDialog(QDialog):
+
+class ExportOptionsDialog(ExportMixin, QDialog):
     """Dialog for selecting which metrics to export."""
 
     # Signal emitted when user saves changes
@@ -96,6 +98,7 @@ class ExportOptionsDialog(QDialog):
         self._apply_dark_theme()
         self._enable_dark_title_bar()
         self._load_current_settings()
+        self.setup_export_menu()
 
     def _get_default_options(self):
         """Get default enabled metrics based on DEFAULT_ENABLED groups."""

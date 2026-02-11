@@ -186,6 +186,74 @@ class ExportManager:
                 return True
         return False
 
+    def validate_breath_data(self):
+        """
+        Validate breath data before export to catch potential issues.
+
+        Checks for:
+        - Missing breath events
+        - Onset/offset array length mismatches
+        - Out-of-bounds indices
+        - Overlapping breaths
+
+        Returns:
+            tuple: (is_valid, issues_list) where is_valid is True if no critical issues
+        """
+        st = self.window.state
+        issues = []
+        warnings = []
+
+        if st.t is None or len(st.t) == 0:
+            issues.append("No time array available")
+            return False, issues
+
+        max_idx = len(st.t) - 1
+
+        for sweep_idx in st.peaks_by_sweep.keys():
+            breath_data = st.breath_by_sweep.get(sweep_idx, {})
+            if not breath_data:
+                continue
+
+            onsets = breath_data.get('onsets', np.array([]))
+            offsets = breath_data.get('offsets', np.array([]))
+            expmins = breath_data.get('expmins', np.array([]))
+            expoffs = breath_data.get('expoffs', np.array([]))
+
+            # Convert to numpy arrays if needed
+            onsets = np.asarray(onsets, dtype=int) if len(onsets) > 0 else np.array([], dtype=int)
+            offsets = np.asarray(offsets, dtype=int) if len(offsets) > 0 else np.array([], dtype=int)
+
+            # Check array length mismatches (warning, not critical)
+            if len(onsets) > 0 and len(offsets) > 0:
+                if len(onsets) != len(offsets):
+                    warnings.append(f"Sweep {sweep_idx}: onset/offset count mismatch ({len(onsets)} vs {len(offsets)})")
+
+            # Check for out-of-bounds indices
+            if len(onsets) > 0:
+                bad_onsets = np.sum((onsets < 0) | (onsets > max_idx))
+                if bad_onsets > 0:
+                    issues.append(f"Sweep {sweep_idx}: {bad_onsets} onset indices out of bounds")
+
+            if len(offsets) > 0:
+                bad_offsets = np.sum((offsets < 0) | (offsets > max_idx))
+                if bad_offsets > 0:
+                    issues.append(f"Sweep {sweep_idx}: {bad_offsets} offset indices out of bounds")
+
+            # Check for overlapping breaths (onset[i+1] <= offset[i])
+            if len(onsets) > 1 and len(offsets) > 0:
+                for i in range(min(len(onsets) - 1, len(offsets))):
+                    if onsets[i + 1] <= offsets[i]:
+                        warnings.append(f"Sweep {sweep_idx}, breath {i}: possible overlap with next breath")
+                        break  # Only report first overlap per sweep
+
+        # Critical issues prevent export
+        is_valid = len(issues) == 0
+
+        # Combine issues and warnings for display
+        all_issues = issues + warnings
+
+        return is_valid, all_issues
+
     def _show_message_box(self, icon, title, text, parent=None):
         """
         Show a message box with selectable text for easy copying.
@@ -1528,6 +1596,34 @@ class ExportManager:
             self._show_message_box(QMessageBox.Icon.Warning, "View Summary" if preview_only else "Save analyzed data", "No analyzed data available.")
             return
 
+        # Validate breath data before export
+        is_valid, validation_issues = self.validate_breath_data()
+        if validation_issues:
+            issue_text = "\n".join(f"- {issue}" for issue in validation_issues[:10])
+            if len(validation_issues) > 10:
+                issue_text += f"\n... and {len(validation_issues) - 10} more issues"
+
+            if not is_valid:
+                # Critical issues - cannot export
+                self._show_message_box(
+                    QMessageBox.Icon.Warning,
+                    "Data Validation Failed",
+                    f"Cannot export due to critical issues:\n\n{issue_text}\n\n"
+                    "Please fix these issues before exporting."
+                )
+                return
+            else:
+                # Warnings only - ask user if they want to continue
+                msg = QMessageBox(self.window)
+                msg.setIcon(QMessageBox.Icon.Warning)
+                msg.setWindowTitle("Data Validation Warnings")
+                msg.setText(f"The following issues were detected:\n\n{issue_text}\n\n"
+                           "Do you want to continue anyway? Problematic breaths will be skipped.")
+                msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+                if msg.exec() != QMessageBox.StandardButton.Yes:
+                    return
+
         # -------------------- Preview caching (skip computation if unchanged) --------------------
         if preview_only:
             # Generate fingerprint of current state
@@ -2578,18 +2674,39 @@ class ExportManager:
                             # This breath (starting at on[j]) comes after a long gap
                             is_apnea_per_breath[j] = 1
 
+                # Track skipped breaths for logging
+                skipped_breaths = 0
+
                 for i, idx in enumerate(mids, start=1):
                     # Skip breaths in omitted regions
                     if is_sample_in_omitted_region(s, int(idx), st.omitted_ranges):
                         continue
 
-                    t_rel = float(st.t[int(idx)] - (global_s0 if have_global_stim else 0.0))
+                    # Validate index bounds before accessing
+                    if int(idx) < 0 or int(idx) >= len(st.t):
+                        skipped_breaths += 1
+                        continue  # Skip out-of-bounds breath
+
                     breath_idx = i - 1  # 0-indexed for accessing arrays
-                    sigh_flag = str(int(is_sigh_per_breath[breath_idx]))
-                    sniff_flag = str(int(is_sniffing_per_breath[breath_idx]))
-                    eupnea_flag = str(int(is_eupnea_per_breath[breath_idx]))
-                    apnea_flag = str(int(is_apnea_per_breath[breath_idx]))
-    
+
+                    # Validate breath_idx bounds
+                    if breath_idx < 0 or breath_idx >= len(is_sigh_per_breath):
+                        skipped_breaths += 1
+                        continue  # Skip if arrays are mismatched
+
+                    try:
+                        t_rel = float(st.t[int(idx)] - (global_s0 if have_global_stim else 0.0))
+                        sigh_flag = str(int(is_sigh_per_breath[breath_idx]))
+                        sniff_flag = str(int(is_sniffing_per_breath[breath_idx]))
+                        eupnea_flag = str(int(is_eupnea_per_breath[breath_idx]))
+                        apnea_flag = str(int(is_apnea_per_breath[breath_idx]))
+                    except (IndexError, ValueError) as e:
+                        # Log error and skip this breath
+                        from core import error_reporting
+                        error_reporting.log_error(e, context=f"export_sweep_{s}_breath_{i}")
+                        skipped_breaths += 1
+                        continue
+
                     # ----- RAW: ALL
                     row_all = [str(s + 1), str(i), f"{t_rel:.9g}", "all", sigh_flag, sniff_flag, eupnea_flag, apnea_flag]
                     for k in need_keys:
@@ -2694,7 +2811,11 @@ class ExportManager:
                         if region == "Baseline": rows_bl_E.append(row_regE)
                         elif region == "Stim":  rows_st_E.append(row_regE)
                         else:                   rows_po_E.append(row_regE)
-    
+
+                # Log if any breaths were skipped due to errors
+                if skipped_breaths > 0:
+                    print(f"[CSV] Warning: Skipped {skipped_breaths} breath(s) in sweep {s} due to invalid data")
+
             def _pad_row(row, want_len):
                 if row is None: return [""] * want_len
                 if len(row) < want_len: return row + [""] * (want_len - len(row))
@@ -6347,7 +6468,135 @@ class ExportManager:
         # Show dialog non-modally so both pulse and standard previews can be viewed side-by-side
         dialog.show()
 
+    # =========================================================================
+    # CTA TIME SERIES EXPORT
+    # =========================================================================
 
+    def export_cta_timeseries_csv(
+        self,
+        output_dir: Path,
+        markers: list = None,
+        signal_key: str = 'dff',
+        signal_label: str = 'dF/F',
+    ) -> list:
+        """
+        Export CTA time series as CSV files.
+
+        Exports one CSV per alignment (onset/withdrawal) per event category with columns:
+        time, sweep_1, sweep_2, ..., sweep_N, mean, sem
+
+        Args:
+            output_dir: Directory to save CSV files
+            markers: List of EventMarker objects (uses state.event_markers if None)
+            signal_key: Key for the signal to export (e.g., 'dff', 'signal')
+            signal_label: Human-readable label for the signal
+
+        Returns:
+            List of paths to exported CSV files
+        """
+        from core.services.cta_service import CTAService
+        from core.domain.cta import CTAConfig
+
+        st = self.window.state
+        cta_service = CTAService()
+
+        # Use markers from state if not provided
+        if markers is None:
+            if not hasattr(st, 'event_markers') or st.event_markers is None:
+                print("[CTA Export] No event markers found")
+                return []
+            markers = st.event_markers.get_all()
+
+        if not markers:
+            print("[CTA Export] No markers to export")
+            return []
+
+        # Get the signal to use
+        # Try photometry dF/F first, then fall back to pleth signal
+        signal = None
+        time_array = st.t
+
+        if signal_key == 'dff' and hasattr(st, 'sweeps'):
+            # Look for dF/F channel
+            for name, data in st.sweeps.items():
+                if 'dff' in name.lower() or 'df/f' in name.lower():
+                    signal = data[:, 0] if data.ndim > 1 else data
+                    signal_label = name
+                    break
+
+        if signal is None and hasattr(st, 'sweeps') and st.analyze_chan in st.sweeps:
+            # Use the primary analysis channel
+            signal = st.sweeps[st.analyze_chan][:, 0] if st.sweeps[st.analyze_chan].ndim > 1 else st.sweeps[st.analyze_chan]
+            signal_label = st.analyze_chan
+
+        if signal is None:
+            print("[CTA Export] No signal found for CTA export")
+            return []
+
+        # Default CTA config
+        config = CTAConfig(
+            window_before=5.0,
+            window_after=15.0,
+            n_points=500,
+            zscore_baseline=True,
+            baseline_start=-5.0,
+            baseline_end=-1.0,
+        )
+
+        # Calculate CTAs
+        signals_dict = {signal_key: signal}
+        metric_labels = {signal_key: signal_label}
+
+        collection = cta_service.calculate_for_markers(
+            markers=markers,
+            signals=signals_dict,
+            time_array=time_array,
+            metric_labels=metric_labels,
+            config=config,
+        )
+
+        # Export each result to CSV
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        exported_files = []
+
+        for result in collection.results:
+            if result.mean is None or len(result.mean) == 0:
+                continue
+
+            # Build filename
+            category = result.category or 'unknown'
+            label = result.label or 'event'
+            alignment = result.alignment or 'onset'
+            safe_category = re.sub(r'[^\w\-]', '_', category)
+            safe_label = re.sub(r'[^\w\-]', '_', label)
+            filename = f"CTA_{safe_category}_{safe_label}_{alignment}.csv"
+            filepath = output_dir / filename
+
+            # Build DataFrame
+            data = {'time': result.time_common}
+
+            # Add individual traces
+            interp_traces = []
+            for i, trace in enumerate(result.traces):
+                if len(trace.time) > 1:
+                    interp_vals = np.interp(
+                        result.time_common, trace.time, trace.values,
+                        left=np.nan, right=np.nan
+                    )
+                    data[f'sweep_{i+1}'] = interp_vals
+                    interp_traces.append(interp_vals)
+
+            # Add mean and SEM
+            data['mean'] = result.mean
+            data['sem'] = result.sem if result.sem is not None else np.zeros_like(result.mean)
+
+            df = pd.DataFrame(data)
+            df.to_csv(filepath, index=False)
+            exported_files.append(filepath)
+            print(f"[CTA Export] Saved: {filename} ({len(interp_traces)} sweeps)")
+
+        return exported_files
 
     def _sigh_sample_indices(self, s: int, pks: np.ndarray | None) -> set[int]:
         """

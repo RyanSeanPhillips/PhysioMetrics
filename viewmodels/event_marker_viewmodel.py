@@ -165,6 +165,10 @@ class EventMarkerViewModel(QObject):
         start_time: float,
         sweep_idx: int = 0,
         visible_range: Optional[Tuple[float, float]] = None,
+        end_time: Optional[float] = None,
+        category: Optional[str] = None,
+        label: Optional[str] = None,
+        detection_method: str = 'manual',
     ) -> EventMarker:
         """
         Add a paired marker at the current type.
@@ -173,6 +177,10 @@ class EventMarkerViewModel(QObject):
             start_time: Start time position in seconds
             sweep_idx: Sweep index
             visible_range: Visible x-range for calculating end offset
+            end_time: Explicit end time (if None, calculated from offset)
+            category: Category (uses selected_type if None)
+            label: Label (uses selected_type if None)
+            detection_method: How the marker was created ('manual', 'threshold', etc.)
 
         Returns:
             Created marker
@@ -181,6 +189,10 @@ class EventMarkerViewModel(QObject):
             start_time=start_time,
             sweep_idx=sweep_idx,
             visible_range=visible_range,
+            end_time=end_time,
+            category=category,
+            label=label,
+            detection_method=detection_method,
         )
         self._emit_undo_state()
         return marker
@@ -201,7 +213,9 @@ class EventMarkerViewModel(QObject):
         marker_id: str,
         category: Optional[str] = None,
         label: Optional[str] = None,
+        condition: Optional[str] = None,
         color_override: Optional[str] = None,
+        line_width: Optional[int] = None,
         notes: Optional[str] = None,
     ) -> bool:
         """Update marker properties."""
@@ -209,7 +223,9 @@ class EventMarkerViewModel(QObject):
             marker_id=marker_id,
             category=category,
             label=label,
+            condition=condition,
             color_override=color_override,
+            line_width=line_width,
             notes=notes,
         )
         if result:
@@ -253,6 +269,58 @@ class EventMarkerViewModel(QObject):
         """Delete all markers of the currently selected type."""
         category, label = self._service.selected_type
         count = self._service.delete_all_of_type(category, label)
+        if count > 0:
+            self._selected_ids.clear()
+            self.selection_changed.emit([])
+            self._emit_undo_state()
+        return count
+
+    def delete_all_for_sweep(self, sweep_idx: int) -> int:
+        """
+        Delete all markers for a specific sweep.
+
+        Args:
+            sweep_idx: Sweep index to delete markers for
+
+        Returns:
+            Number of markers deleted
+        """
+        count = self._service.delete_all_for_sweep(sweep_idx)
+        if count > 0:
+            self._selected_ids.clear()
+            self.selection_changed.emit([])
+            self._emit_undo_state()
+        return count
+
+    def delete_category_all_sweeps(self, category: str) -> int:
+        """
+        Delete all markers of a category across all sweeps.
+
+        Args:
+            category: Category to delete
+
+        Returns:
+            Number of markers deleted
+        """
+        count = self._service.delete_category_all_sweeps(category)
+        if count > 0:
+            self._selected_ids.clear()
+            self.selection_changed.emit([])
+            self._emit_undo_state()
+        return count
+
+    def delete_category_for_sweep(self, category: str, sweep_idx: int) -> int:
+        """
+        Delete all markers of a category in a specific sweep.
+
+        Args:
+            category: Category to delete
+            sweep_idx: Sweep index to delete from
+
+        Returns:
+            Number of markers deleted
+        """
+        count = self._service.delete_category_for_sweep(category, sweep_idx)
         if count > 0:
             self._selected_ids.clear()
             self.selection_changed.emit([])

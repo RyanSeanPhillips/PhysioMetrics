@@ -1,0 +1,952 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>DataAssemblyWidget</class>
+ <widget class="QWidget" name="DataAssemblyWidget">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1350</width>
+    <height>1600</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="main_layout">
+   <property name="spacing">
+    <number>8</number>
+   </property>
+   <property name="leftMargin">
+    <number>8</number>
+   </property>
+   <property name="topMargin">
+    <number>8</number>
+   </property>
+   <property name="rightMargin">
+    <number>8</number>
+   </property>
+   <property name="bottomMargin">
+    <number>8</number>
+   </property>
+   <item>
+    <widget class="QScrollArea" name="scroll_area">
+     <property name="widgetResizable">
+      <bool>true</bool>
+     </property>
+     <property name="frameShape">
+      <enum>QFrame::NoFrame</enum>
+     </property>
+     <widget class="QWidget" name="scroll_content">
+      <layout class="QVBoxLayout" name="scroll_layout">
+       <property name="spacing">
+        <number>16</number>
+       </property>
+       <property name="leftMargin">
+        <number>4</number>
+       </property>
+       <property name="topMargin">
+        <number>4</number>
+       </property>
+       <property name="rightMargin">
+        <number>4</number>
+       </property>
+       <property name="bottomMargin">
+        <number>4</number>
+       </property>
+
+       <!-- Section 1: Source Files -->
+       <item>
+        <widget class="QWidget" name="source_section">
+         <layout class="QVBoxLayout" name="source_layout">
+          <property name="spacing">
+           <number>8</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="header_source">
+            <property name="text">
+             <string>Step 1: Select Files &amp; Map Columns</string>
+            </property>
+            <property name="styleSheet">
+             <string>font-size: 14px; font-weight: bold; color: #ffffff; padding: 8px 0px;</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="source_files_group">
+            <property name="title">
+             <string>Source Files</string>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>380</height>
+             </size>
+            </property>
+            <layout class="QGridLayout" name="source_grid">
+             <property name="spacing">
+              <number>12</number>
+             </property>
+             <property name="leftMargin">
+              <number>12</number>
+             </property>
+             <property name="topMargin">
+              <number>16</number>
+             </property>
+             <property name="rightMargin">
+              <number>12</number>
+             </property>
+             <property name="bottomMargin">
+              <number>12</number>
+             </property>
+
+             <!-- Row 0, Col 0: Photometry Data -->
+             <item row="0" column="0">
+              <widget class="QFrame" name="fp_frame">
+               <property name="styleSheet">
+                <string>QFrame { background-color: #252526; border: 1px solid #3e3e42; border-radius: 4px; }</string>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>160</height>
+                </size>
+               </property>
+               <layout class="QVBoxLayout" name="fp_layout">
+                <property name="spacing">
+                 <number>8</number>
+                </property>
+                <property name="margin">
+                 <number>12</number>
+                </property>
+                <item>
+                 <widget class="QLabel" name="fp_header">
+                  <property name="text">
+                   <string>Photometry Data (FP)</string>
+                  </property>
+                  <property name="styleSheet">
+                   <string>font-weight: bold; color: #569cd6; border: none; font-size: 12px;</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <layout class="QHBoxLayout" name="fp_file_row">
+                  <item>
+                   <widget class="QLineEdit" name="fp_data_edit">
+                    <property name="readOnly">
+                     <bool>true</bool>
+                    </property>
+                    <property name="placeholderText">
+                     <string>Select FP_data CSV...</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="btn_fp_browse">
+                    <property name="text">
+                     <string>...</string>
+                    </property>
+                    <property name="maximumSize">
+                     <size>
+                      <width>32</width>
+                      <height>16777215</height>
+                     </size>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <widget class="QWidget" name="fp_columns_container" native="true"/>
+                </item>
+                <item>
+                 <widget class="QTableWidget" name="fp_preview_table">
+                  <property name="minimumSize">
+                   <size>
+                    <width>0</width>
+                    <height>80</height>
+                   </size>
+                  </property>
+                  <property name="maximumSize">
+                   <size>
+                    <width>16777215</width>
+                    <height>100</height>
+                   </size>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+
+             <!-- Row 1, Col 0: Analog Inputs -->
+             <item row="1" column="0">
+              <widget class="QFrame" name="ai_frame">
+               <property name="styleSheet">
+                <string>QFrame { background-color: #252526; border: 1px solid #3e3e42; border-radius: 4px; }</string>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>160</height>
+                </size>
+               </property>
+               <layout class="QVBoxLayout" name="ai_layout">
+                <property name="spacing">
+                 <number>8</number>
+                </property>
+                <property name="margin">
+                 <number>12</number>
+                </property>
+                <item>
+                 <widget class="QLabel" name="ai_header">
+                  <property name="text">
+                   <string>Analog Inputs (AI)</string>
+                  </property>
+                  <property name="styleSheet">
+                   <string>font-weight: bold; color: #4ec9b0; border: none; font-size: 12px;</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <layout class="QHBoxLayout" name="ai_file_row">
+                  <item>
+                   <widget class="QLineEdit" name="ai_data_edit">
+                    <property name="readOnly">
+                     <bool>true</bool>
+                    </property>
+                    <property name="placeholderText">
+                     <string>Optional: AI data CSV</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="btn_ai_browse">
+                    <property name="text">
+                     <string>...</string>
+                    </property>
+                    <property name="maximumSize">
+                     <size>
+                      <width>32</width>
+                      <height>16777215</height>
+                     </size>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <widget class="QWidget" name="ai_columns_container" native="true"/>
+                </item>
+                <item>
+                 <widget class="QTableWidget" name="ai_preview_table">
+                  <property name="minimumSize">
+                   <size>
+                    <width>0</width>
+                    <height>80</height>
+                   </size>
+                  </property>
+                  <property name="maximumSize">
+                   <size>
+                    <width>16777215</width>
+                    <height>100</height>
+                   </size>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+
+             <!-- Row 0, Col 1: Timestamps -->
+             <item row="0" column="1">
+              <widget class="QFrame" name="ts_frame">
+               <property name="styleSheet">
+                <string>QFrame { background-color: #252526; border: 1px solid #3e3e42; border-radius: 4px; }</string>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>160</height>
+                </size>
+               </property>
+               <layout class="QVBoxLayout" name="ts_layout">
+                <property name="spacing">
+                 <number>8</number>
+                </property>
+                <property name="margin">
+                 <number>12</number>
+                </property>
+                <item>
+                 <widget class="QLabel" name="ts_header">
+                  <property name="text">
+                   <string>Timestamps</string>
+                  </property>
+                  <property name="styleSheet">
+                   <string>font-weight: bold; color: #dcdcaa; border: none; font-size: 12px;</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <layout class="QHBoxLayout" name="ts_file_row">
+                  <item>
+                   <widget class="QLineEdit" name="timestamps_edit">
+                    <property name="readOnly">
+                     <bool>true</bool>
+                    </property>
+                    <property name="placeholderText">
+                     <string>Auto-detected from FP folder</string>
+                    </property>
+                    <property name="styleSheet">
+                     <string>QLineEdit { background-color: #1e1e1e; color: #888888; }</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="btn_ts_browse">
+                    <property name="text">
+                     <string>...</string>
+                    </property>
+                    <property name="maximumSize">
+                     <size>
+                      <width>32</width>
+                      <height>16777215</height>
+                     </size>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <widget class="QLabel" name="ts_info_label">
+                  <property name="text">
+                   <string>No timestamps loaded</string>
+                  </property>
+                  <property name="styleSheet">
+                   <string>color: #888888; font-size: 11px; border: none;</string>
+                  </property>
+                  <property name="wordWrap">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <spacer name="ts_spacer">
+                  <property name="orientation">
+                   <enum>Qt::Vertical</enum>
+                  </property>
+                  <property name="sizeHint" stdset="0">
+                   <size>
+                    <width>20</width>
+                    <height>40</height>
+                   </size>
+                  </property>
+                 </spacer>
+                </item>
+               </layout>
+              </widget>
+             </item>
+
+             <!-- Row 1, Col 1: Notes -->
+             <item row="1" column="1">
+              <widget class="QFrame" name="notes_frame">
+               <property name="styleSheet">
+                <string>QFrame { background-color: #252526; border: 1px solid #3e3e42; border-radius: 4px; }</string>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>160</height>
+                </size>
+               </property>
+               <layout class="QVBoxLayout" name="notes_layout">
+                <property name="spacing">
+                 <number>8</number>
+                </property>
+                <property name="margin">
+                 <number>12</number>
+                </property>
+                <item>
+                 <layout class="QHBoxLayout" name="notes_header_row">
+                  <item>
+                   <widget class="QLabel" name="notes_header">
+                    <property name="text">
+                     <string>Notes File</string>
+                    </property>
+                    <property name="styleSheet">
+                     <string>font-weight: bold; color: #ce9178; border: none; font-size: 12px;</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <spacer name="notes_header_spacer">
+                    <property name="orientation">
+                     <enum>Qt::Horizontal</enum>
+                    </property>
+                    <property name="sizeHint" stdset="0">
+                     <size>
+                      <width>40</width>
+                      <height>20</height>
+                     </size>
+                    </property>
+                   </spacer>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="btn_notes_view">
+                    <property name="text">
+                     <string>View</string>
+                    </property>
+                    <property name="enabled">
+                     <bool>false</bool>
+                    </property>
+                    <property name="maximumSize">
+                     <size>
+                      <width>50</width>
+                      <height>16777215</height>
+                     </size>
+                    </property>
+                    <property name="styleSheet">
+                     <string>QPushButton { background-color: #0e639c; color: white; border: none; border-radius: 3px; padding: 4px 8px; font-size: 11px; }
+QPushButton:hover { background-color: #1177bb; }
+QPushButton:disabled { background-color: #3e3e42; color: #888888; }</string>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <layout class="QHBoxLayout" name="notes_file_row">
+                  <item>
+                   <widget class="QLineEdit" name="notes_edit">
+                    <property name="readOnly">
+                     <bool>true</bool>
+                    </property>
+                    <property name="placeholderText">
+                     <string>Optional: .txt, .csv, .xlsx, .docx</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="btn_notes_browse">
+                    <property name="text">
+                     <string>...</string>
+                    </property>
+                    <property name="maximumSize">
+                     <size>
+                      <width>32</width>
+                      <height>16777215</height>
+                     </size>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <widget class="QLabel" name="notes_preview_label">
+                  <property name="text">
+                   <string>No notes file selected</string>
+                  </property>
+                  <property name="styleSheet">
+                   <string>color: #888888; font-size: 11px; border: none; padding: 8px; background-color: #1e1e1e; border-radius: 3px;</string>
+                  </property>
+                  <property name="wordWrap">
+                   <bool>true</bool>
+                  </property>
+                  <property name="minimumSize">
+                   <size>
+                    <width>0</width>
+                    <height>50</height>
+                   </size>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <spacer name="notes_spacer">
+                  <property name="orientation">
+                   <enum>Qt::Vertical</enum>
+                  </property>
+                  <property name="sizeHint" stdset="0">
+                   <size>
+                    <width>20</width>
+                    <height>20</height>
+                   </size>
+                  </property>
+                 </spacer>
+                </item>
+               </layout>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- Section 2: Signal Preview -->
+       <item>
+        <widget class="QWidget" name="preview_section">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>300</height>
+          </size>
+         </property>
+         <layout class="QVBoxLayout" name="preview_layout">
+          <property name="spacing">
+           <number>8</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <layout class="QHBoxLayout" name="preview_header_row">
+            <item>
+             <widget class="QLabel" name="preview_header">
+              <property name="text">
+               <string>Signal Preview</string>
+              </property>
+              <property name="styleSheet">
+               <string>font-size: 14px; font-weight: bold; color: #ffffff; padding: 8px 0px;</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="loading_label">
+              <property name="text">
+               <string></string>
+              </property>
+              <property name="styleSheet">
+               <string>color: #ffcc00; font-style: italic;</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="preview_header_spacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QWidget" name="toolbar_container" native="true"/>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QTabWidget" name="preview_tab_widget">
+            <property name="styleSheet">
+             <string>QTabWidget::pane { border: 1px solid #3e3e42; background-color: #1e1e1e; }
+QTabBar::tab { background-color: #2d2d30; color: #d4d4d4; padding: 6px 16px; border: 1px solid #3e3e42; border-bottom: none; margin-right: 2px; }
+QTabBar::tab:selected { background-color: #1e1e1e; border-bottom: 1px solid #1e1e1e; }
+QTabBar::tab:hover:!selected { background-color: #3e3e42; }</string>
+            </property>
+            <widget class="QWidget" name="all_channels_tab">
+             <attribute name="title">
+              <string>All Channels</string>
+             </attribute>
+             <layout class="QVBoxLayout" name="all_channels_layout">
+              <property name="spacing">
+               <number>0</number>
+              </property>
+              <property name="margin">
+               <number>0</number>
+              </property>
+              <item>
+               <widget class="QWidget" name="canvas_container" native="true">
+                <property name="minimumSize">
+                 <size>
+                  <width>0</width>
+                  <height>200</height>
+                 </size>
+                </property>
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Expanding" vsizetype="MinimumExpanding">
+                  <horstretch>0</horstretch>
+                  <verstretch>1</verstretch>
+                 </sizepolicy>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </widget>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="preview_controls_row">
+            <property name="spacing">
+             <number>12</number>
+            </property>
+            <item>
+             <spacer name="preview_controls_spacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QCheckBox" name="chk_normalize_time">
+              <property name="text">
+               <string>Normalize time (start at t=0)</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
+              </property>
+              <property name="toolTip">
+               <string>Align all signals to start at time 0</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="btn_update_preview">
+              <property name="text">
+               <string>Update Preview</string>
+              </property>
+              <property name="styleSheet">
+               <string>QPushButton { background-color: #0e639c; color: white; font-weight: bold; padding: 8px 16px; border: none; border-radius: 3px; }
+QPushButton:hover { background-color: #1177bb; }
+QPushButton:pressed { background-color: #094771; }</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- Section 3: Channel Assignment -->
+       <item>
+        <widget class="QWidget" name="channel_section">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>150</height>
+          </size>
+         </property>
+         <layout class="QVBoxLayout" name="channel_layout">
+          <property name="spacing">
+           <number>8</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QGroupBox" name="channel_group">
+            <property name="title">
+             <string>Channel Assignment</string>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>100</height>
+             </size>
+            </property>
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="MinimumExpanding">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <layout class="QVBoxLayout" name="channel_group_layout">
+             <property name="spacing">
+              <number>8</number>
+             </property>
+             <property name="leftMargin">
+              <number>12</number>
+             </property>
+             <property name="topMargin">
+              <number>16</number>
+             </property>
+             <property name="rightMargin">
+              <number>12</number>
+             </property>
+             <property name="bottomMargin">
+              <number>12</number>
+             </property>
+             <item>
+              <layout class="QHBoxLayout" name="exp_row">
+               <item>
+                <widget class="QLabel" name="exp_label">
+                 <property name="text">
+                  <string>Number of experiments/animals:</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QSpinBox" name="spin_num_experiments">
+                 <property name="minimum">
+                  <number>1</number>
+                 </property>
+                 <property name="maximum">
+                  <number>10</number>
+                 </property>
+                 <property name="value">
+                  <number>1</number>
+                 </property>
+                 <property name="fixedWidth">
+                  <number>60</number>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <spacer name="exp_spacer">
+                 <property name="orientation">
+                  <enum>Qt::Horizontal</enum>
+                 </property>
+                 <property name="sizeHint" stdset="0">
+                  <size>
+                   <width>40</width>
+                   <height>20</height>
+                  </size>
+                 </property>
+                </spacer>
+               </item>
+              </layout>
+             </item>
+             <item>
+              <widget class="QTableWidget" name="channel_table">
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>80</height>
+                </size>
+               </property>
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Expanding" vsizetype="MinimumExpanding">
+                 <horstretch>0</horstretch>
+                 <verstretch>1</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="columnCount">
+                <number>4</number>
+               </property>
+               <column>
+                <property name="text">
+                 <string>Channel</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Label</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Assign To</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Type</string>
+                </property>
+               </column>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- Section 4: Output Files + Data Options -->
+       <item>
+        <widget class="QWidget" name="output_section">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>180</height>
+          </size>
+         </property>
+         <layout class="QHBoxLayout" name="output_layout">
+          <property name="spacing">
+           <number>12</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QGroupBox" name="output_group">
+            <property name="title">
+             <string>Output File</string>
+            </property>
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+              <horstretch>2</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>100</height>
+             </size>
+            </property>
+            <layout class="QVBoxLayout" name="output_group_layout">
+             <property name="spacing">
+              <number>8</number>
+             </property>
+             <property name="leftMargin">
+              <number>12</number>
+             </property>
+             <property name="topMargin">
+              <number>16</number>
+             </property>
+             <property name="rightMargin">
+              <number>12</number>
+             </property>
+             <property name="bottomMargin">
+              <number>12</number>
+             </property>
+             <item>
+              <widget class="QLabel" name="output_files_label">
+               <property name="text">
+                <string>Load data to see output file...</string>
+               </property>
+               <property name="styleSheet">
+                <string>color: #cccccc; font-size: 11px; padding: 8px; background-color: #252526; border-radius: 3px;</string>
+               </property>
+               <property name="wordWrap">
+                <bool>true</bool>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>50</height>
+                </size>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- Bottom Button Row (inside scroll area) -->
+       <item>
+        <widget class="QWidget" name="button_section">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>60</height>
+          </size>
+         </property>
+         <layout class="QHBoxLayout" name="button_row">
+          <property name="spacing">
+           <number>12</number>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>8</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>8</number>
+          </property>
+          <item>
+           <spacer name="button_spacer">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>40</width>
+              <height>20</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_save_data">
+            <property name="text">
+             <string>Save Data File</string>
+            </property>
+            <property name="styleSheet">
+             <string>QPushButton { background-color: #0e639c; color: white; font-weight: bold; padding: 10px 20px; border: none; border-radius: 4px; font-size: 12px; }
+QPushButton:hover { background-color: #1177bb; }
+QPushButton:pressed { background-color: #094771; }
+QPushButton:disabled { background-color: #3e3e42; color: #888888; }</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_save_and_load">
+            <property name="text">
+             <string>Save &amp; Load into App</string>
+            </property>
+            <property name="styleSheet">
+             <string>QPushButton { background-color: #2ea043; color: white; font-weight: bold; padding: 10px 20px; border: none; border-radius: 4px; font-size: 12px; }
+QPushButton:hover { background-color: #3fb950; }
+QPushButton:pressed { background-color: #238636; }
+QPushButton:disabled { background-color: #3e3e42; color: #888888; }</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

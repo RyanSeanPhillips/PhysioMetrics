@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Optional, Dict, List
 import json
 
+from dialogs.export_mixin import ExportMixin
+
 
 class AIWorker(QThread):
     """Background worker for AI API calls."""
@@ -47,7 +49,7 @@ class AIWorker(QThread):
             self.finished.emit(e)
 
 
-class AISettingsDialog(QDialog):
+class AISettingsDialog(ExportMixin, QDialog):
     """Dialog for configuring AI integration settings."""
 
     def __init__(self, parent=None, files_metadata: List[Dict] = None):
@@ -61,6 +63,7 @@ class AISettingsDialog(QDialog):
 
         self._setup_ui()
         self._load_settings()
+        self.setup_export_menu()
 
     def _setup_ui(self):
         """Create the dialog UI."""

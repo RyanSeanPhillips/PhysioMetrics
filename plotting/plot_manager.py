@@ -4,6 +4,7 @@ PlotManager - Orchestrates all plotting operations for the main window.
 This module extracts plotting logic from main.py to improve maintainability.
 """
 
+import weakref
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
@@ -471,7 +472,15 @@ class PlotManager:
         trace_color = '#d4d4d4' if is_dark else '#000000'
         opto_trace_color = '#4682E0' if is_dark else '#2563EB'  # Blue for opto stim channel
         text_color = '#d4d4d4' if is_dark else '#000000'
-        bg_color = '#1e1e1e' if is_dark else '#ffffff'
+        bg_color = '#000000' if is_dark else '#ffffff'
+
+        # Photometry-specific colors (matching Tab 2 of photometry dialog)
+        photometry_colors = {
+            'iso': '#5555ff',      # Isosbestic (415nm) - blue/purple
+            'gcamp': '#00cc00',    # GCaMP (470nm) - green
+            'dff': '#ff9900',      # ΔF/F - orange
+            'thermal': '#ff4444',  # Thermal stim - red
+        }
 
         # Check if we should force auto-range (e.g., after snap to sweep)
         force_autorange = getattr(self.plot_host, '_force_autorange', False)
@@ -547,19 +556,29 @@ class PlotManager:
             plot.setMenuEnabled(False)
             plot.vb.setMenuEnabled(False)  # Also disable on ViewBox
 
-            # Style axes
-            plot.getAxis('bottom').setTextPen(text_color)
+            # Style axes (only style bottom axis on last panel since others are hidden)
             plot.getAxis('left').setTextPen(text_color)
-            plot.getAxis('bottom').setPen(text_color)
             plot.getAxis('left').setPen(text_color)
+            if i == n_panels - 1:
+                plot.getAxis('bottom').setTextPen(text_color)
+                plot.getAxis('bottom').setPen(text_color)
+
+            # Set fixed Y-axis width to ensure all panels align visually
+            # This is critical for x-axis synchronization - setXLink() only syncs data range,
+            # not visual positioning. Different label widths would cause misalignment.
+            plot.getAxis('left').setWidth(70)
 
             # Link x-axis to first plot
             if i > 0 and plots:
                 plot.setXLink(plots[0])
 
-            # Hide x-axis labels except on bottom
+            # Hide x-axis entirely except on bottom panel (they share x-axis via setXLink)
             if i < n_panels - 1:
-                plot.getAxis('bottom').setStyle(showValues=False)
+                plot.hideAxis('bottom')
+
+            # Configure mouse behavior: X-axis only zoom, shift required for pan
+            if hasattr(self.plot_host, '_configure_plot_mouse'):
+                self.plot_host._configure_plot_mouse(plot)
 
             plots.append(plot)
             self.plot_host._subplots.append(plot)
@@ -591,8 +610,21 @@ class PlotManager:
             if config.is_primary_pleth:
                 primary_y_data = y_data
 
-            # Choose trace color based on channel type
-            channel_trace_color = opto_trace_color if config.channel_type == "Opto Stim" else trace_color
+            # Choose trace color based on channel type and name
+            # Check for photometry channels first (by name)
+            ch_lower = config.name.lower()
+            if 'iso' in ch_lower or '415' in ch_lower:
+                channel_trace_color = photometry_colors['iso']
+            elif 'gcamp' in ch_lower or '470' in ch_lower:
+                channel_trace_color = photometry_colors['gcamp']
+            elif 'δf/f' in ch_lower or 'dff' in ch_lower or 'df/f' in ch_lower:
+                channel_trace_color = photometry_colors['dff']
+            elif 'therm' in ch_lower and config.channel_type == "Opto Stim":
+                channel_trace_color = photometry_colors['thermal']
+            elif config.channel_type == "Opto Stim":
+                channel_trace_color = opto_trace_color
+            else:
+                channel_trace_color = trace_color
 
             # Plot trace with optimal settings for signal fidelity
             # clipToView=True only sends visible data to GPU (main performance optimization)
@@ -788,6 +820,8 @@ class PlotManager:
         add_markers(breath.get('offsets'), (243, 156, 18), 't1')
         # Exp mins (blue squares)
         add_markers(breath.get('expmins'), (31, 120, 180), 's')
+        # Exp offs (purple diamonds)
+        add_markers(breath.get('expoffs'), (155, 89, 182), 'd')
 
     def _draw_sigh_markers_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw sigh markers (gold stars) on PyQtGraph plot."""
@@ -1242,13 +1276,24 @@ class PlotManager:
         y2_viewbox.addItem(y2_line)
         self.plot_host._y2_line = y2_line
 
+        # Set high Z-value so Y2 renders on top of other plot elements
+        y2_viewbox.setZValue(100)
+
         # Update viewbox geometry when main plot changes
+        # Use weakref to prevent accessing deleted ViewBox objects
+        y2_viewbox_ref = weakref.ref(y2_viewbox)
+        main_plot_vb_ref = weakref.ref(main_plot.vb)
+
         def update_views():
+            vb = y2_viewbox_ref()
+            main_vb = main_plot_vb_ref()
+            if vb is None or main_vb is None:
+                return  # ViewBox has been deleted
             try:
-                y2_viewbox.setGeometry(main_plot.vb.sceneBoundingRect())
-                y2_viewbox.linkedViewChanged(main_plot.vb, y2_viewbox.XAxis)
-            except RuntimeError:
-                # ViewBox may have been deleted
+                vb.setGeometry(main_vb.sceneBoundingRect())
+                vb.linkedViewChanged(main_vb, vb.XAxis)
+            except (RuntimeError, AttributeError, ReferenceError):
+                # ViewBox may have been deleted or is in invalid state
                 pass
 
         main_plot.vb.sigResized.connect(update_views)

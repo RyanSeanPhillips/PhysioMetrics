@@ -16,6 +16,8 @@ from PyQt6.QtGui import QStandardItemModel, QStandardItem
 from PyQt6.uic import loadUi
 from pathlib import Path
 
+from dialogs.export_mixin import ExportMixin
+
 
 class CheckableComboBox(QComboBox):
     """A combobox with checkable items for multi-selection."""
@@ -108,11 +110,18 @@ class CheckableComboBox(QComboBox):
         self._update_display_text()
 
 
-class AnalysisOptionsDialog(QDialog):
+class AnalysisOptionsDialog(ExportMixin, QDialog):
     """Multi-tabbed dialog for all analysis configuration options."""
 
     def __init__(self, state, parent=None):
         super().__init__(parent)
+
+        # Add minimize and maximize buttons to title bar
+        self.setWindowFlags(
+            self.windowFlags() |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint
+        )
 
         self.state = state
         self.parent_window = parent
@@ -173,6 +182,7 @@ class AnalysisOptionsDialog(QDialog):
 
         # Enable dark title bar on Windows
         self._enable_dark_title_bar()
+        self.setup_export_menu()
 
     def _enable_dark_title_bar(self):
         """Enable dark title bar on Windows 10/11."""
@@ -1106,6 +1116,93 @@ class AnalysisOptionsDialog(QDialog):
 
         # Auto-load ML models from last used directory (if available)
         self._auto_load_ml_models()
+
+    def _toggle_ml_tab_theme(self, use_light):
+        """Toggle between light and dark theme for ML tab."""
+        self._ml_tab_dark_theme = not use_light
+
+        if use_light:
+            # Light theme colors
+            bg_color = "#ffffff"
+            text_color = "#1e1e1e"
+            border_color = "#cccccc"
+            group_bg = "#f5f5f5"
+            input_bg = "#ffffff"
+            accent_color = "#0078d4"
+        else:
+            # Dark theme colors
+            bg_color = "#1e1e1e"
+            text_color = "#d4d4d4"
+            border_color = "#3e3e42"
+            group_bg = "#2d2d30"
+            input_bg = "#3c3c3c"
+            accent_color = "#4ec9b0"
+
+        # Update main container
+        if hasattr(self, 'tab_ml_settings'):
+            self.tab_ml_settings.setStyleSheet(f"background-color: {bg_color}; color: {text_color};")
+
+        # Update group boxes
+        group_style = f"""
+            QGroupBox {{
+                border: 2px solid {border_color};
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                font-weight: bold;
+                background-color: {group_bg};
+                color: {text_color};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: {text_color};
+            }}
+        """
+
+        for group in [self.comparison_group]:
+            if hasattr(self, 'comparison_group'):
+                self.comparison_group.setStyleSheet(group_style)
+
+        # Update labels
+        label_style = f"color: {text_color};"
+        if hasattr(self, 'loaded_models_status'):
+            self.loaded_models_status.setStyleSheet(f"color: {'#666' if use_light else '#888'}; font-style: italic;")
+        if hasattr(self, 'training_status_label'):
+            self.training_status_label.setStyleSheet(f"color: {accent_color}; font-style: italic;")
+        if hasattr(self, 'filter_count_label'):
+            self.filter_count_label.setStyleSheet(f"color: {accent_color}; margin-top: 4px;")
+
+        # Update input fields
+        input_style = f"""
+            QLineEdit {{
+                background-color: {input_bg};
+                color: {text_color};
+                border: 1px solid {border_color};
+                padding: 4px;
+            }}
+        """
+        if hasattr(self, 'training_data_path_edit'):
+            self.training_data_path_edit.setStyleSheet(input_style)
+
+        # Update text areas
+        if hasattr(self, 'file_list_display'):
+            self.file_list_display.setStyleSheet(f"""
+                background-color: {input_bg};
+                color: {text_color};
+                font-family: monospace;
+                font-size: 9pt;
+                border: 1px solid {border_color};
+            """)
+
+        # Update results widget
+        if hasattr(self, 'results_widget'):
+            self.results_widget.setStyleSheet(f"background-color: {bg_color};")
+
+        # Update theme toggle text color
+        if hasattr(self, 'theme_toggle'):
+            self.theme_toggle.setStyleSheet(f"color: {'#666' if use_light else '#888'}; font-size: 9pt;")
 
     def _auto_load_ml_models(self):
         """Silently load ML models from last used directory on startup."""

@@ -60,10 +60,11 @@ def load_son64(path: str, progress_callback=None) -> Tuple[float, Dict[str, np.n
         if progress_callback:
             progress_callback(20, 100, f"Found {len(waveform_channels)} waveform channels...")
 
-        # Find the channel with the LOWEST sample rate to use as the reference
-        # This avoids upsampling which causes interpolation artifacts with gapped data
-        min_rate_channel = min(waveform_channels, key=lambda ch: ch['sample_rate_hz'])
-        sr_hz = float(min_rate_channel['sample_rate_hz'])
+        # Find the channel with the HIGHEST sample rate to use as the reference
+        # This preserves full resolution of high-rate channels (e.g., pleth at 20kHz)
+        # Lower-rate channels will be upsampled via interpolation
+        max_rate_channel = max(waveform_channels, key=lambda ch: ch['sample_rate_hz'])
+        sr_hz = float(max_rate_channel['sample_rate_hz'])
 
         # Find maximum duration to determine target time range
         max_duration = max(ch['duration_sec'] for ch in waveform_channels)

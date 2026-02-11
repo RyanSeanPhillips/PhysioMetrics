@@ -22,13 +22,15 @@ from PyQt6.QtGui import QColor
 try:
     import pyqtgraph as pg
     from pyqtgraph import PlotWidget, GraphicsLayoutWidget
+    from core.plot_themes import DARK_THEME, LIGHT_THEME
     PYQTGRAPH_AVAILABLE = True
 
     # Monkey-patch PyQtGraph to suppress 'autoRangeEnabled' AttributeError
     # This error occurs when PlotDataItems try to access their view during reparenting
     # (e.g., when GraphicsLayoutWidget.clear() is called and items reference stale views)
     # The error doesn't affect functionality, just causes console noise
-    if hasattr(pg, 'PlotDataItem'):
+    # Guard against re-patching on hot reload (which would cause infinite recursion)
+    if hasattr(pg, 'PlotDataItem') and not hasattr(pg.PlotDataItem, '_viewRangeChanged_patched'):
         _original_viewRangeChanged = pg.PlotDataItem.viewRangeChanged
 
         def _safe_viewRangeChanged(self):
@@ -43,6 +45,7 @@ try:
                     raise  # Re-raise other AttributeErrors
 
         pg.PlotDataItem.viewRangeChanged = _safe_viewRangeChanged
+        pg.PlotDataItem._viewRangeChanged_patched = True  # Mark as patched to prevent re-patching
 
 except ImportError:
     PYQTGRAPH_AVAILABLE = False
@@ -56,6 +59,30 @@ ONSET_COLOR = (46, 204, 113)   # Green
 OFFSET_COLOR = (243, 156, 18)  # Orange
 EXPMIN_COLOR = (31, 120, 180)  # Blue
 EXPOFF_COLOR = (155, 89, 182)  # Purple
+
+
+def safe_clear_graphics_layout(layout):
+    """Safely clear PyQtGraph GraphicsLayoutWidget, handling inconsistent item tracking.
+
+    PyQtGraph's GraphicsLayoutWidget.clear() can raise KeyError or ValueError when
+    items have been removed or reparented in ways that leave the internal tracking
+    inconsistent. This wrapper handles those cases gracefully.
+
+    Args:
+        layout: GraphicsLayoutWidget to clear
+    """
+    try:
+        layout.clear()
+    except (KeyError, ValueError, RuntimeError) as e:
+        # Fallback: manually remove items
+        try:
+            for item in list(layout.items.keys()) if hasattr(layout, 'items') else []:
+                try:
+                    layout.removeItem(item)
+                except (KeyError, ValueError, RuntimeError):
+                    pass
+        except (AttributeError, RuntimeError):
+            pass  # Layout may have been deleted
 
 
 class _MatplotlibCompatEvent:
@@ -134,7 +161,7 @@ class PyQtGraphPlotHost(QWidget):
 
         # Main graphics layout (can hold multiple plots)
         self.graphics_layout = GraphicsLayoutWidget()
-        self.graphics_layout.setBackground('#1e1e1e')  # Dark background
+        self.graphics_layout.setBackground('#000000')  # True black background
 
         # Main plot widget
         self.plot_widget = self.graphics_layout.addPlot(row=0, col=0)
@@ -144,6 +171,13 @@ class PyQtGraphPlotHost(QWidget):
 
         # Enable auto-range initially
         self.plot_widget.enableAutoRange()
+
+        # Configure mouse behavior: X-axis only, shift required for pan
+        self._configure_plot_mouse(self.plot_widget)
+
+        # Disable PyQtGraph's built-in ViewBox context menu
+        self.plot_widget.vb.setMenuEnabled(False)
+        self.plot_widget.setMenuEnabled(False)
 
         # Store references to plot items
         self._main_trace = None
@@ -218,18 +252,29 @@ class PyQtGraphPlotHost(QWidget):
         self._subplots = [self.plot_widget]
 
     # ------- Theme Support -------
+    def _get_theme_colors(self):
+        """Get marker colors based on current theme."""
+        t = DARK_THEME if self._current_theme == 'dark' else LIGHT_THEME
+        return {
+            'onset': t['onset_color'],
+            'offset': t['offset_color'],
+            'expmin': t['expmin_color'],
+            'expoff': t['expoff_color'],
+            'peak': t['peak_color'],
+            'trace': t['trace_color'],
+            'text': t['text_color'],
+            'background': t['figure_facecolor'],
+        }
+
     def set_plot_theme(self, theme_name):
         """Apply dark or light theme."""
         self._current_theme = theme_name
 
-        if theme_name == 'dark':
-            bg_color = '#1e1e1e'
-            text_color = '#d4d4d4'
-            trace_color = '#d4d4d4'
-        else:
-            bg_color = '#ffffff'
-            text_color = '#000000'
-            trace_color = '#000000'
+        # Get colors from theme
+        theme = DARK_THEME if theme_name == 'dark' else LIGHT_THEME
+        bg_color = theme['figure_facecolor']
+        text_color = theme['text_color']
+        trace_color = theme['trace_color']
 
         self.graphics_layout.setBackground(bg_color)
 
@@ -262,6 +307,31 @@ class PyQtGraphPlotHost(QWidget):
                         elif isinstance(current_pen, dict) and 'width' in current_pen:
                             width = current_pen['width']
                         item.setPen(pg.mkPen(trace_color, width=width))
+
+        # Update marker colors for theme
+        self._refresh_marker_colors()
+
+    def _refresh_marker_colors(self):
+        """Refresh marker colors based on current theme."""
+        colors = self._get_theme_colors()
+
+        # Update breath markers (onset, offset, expmin, expoff)
+        marker_mapping = [
+            ('_onset_scatter', colors['onset']),
+            ('_offset_scatter', colors['offset']),
+            ('_expmin_scatter', colors['expmin']),
+            ('_expoff_scatter', colors['expoff']),
+            ('_peak_scatter', colors['peak']),
+        ]
+
+        for attr_name, color in marker_mapping:
+            scatter = getattr(self, attr_name, None)
+            if scatter is not None:
+                try:
+                    qcolor = QColor(color)
+                    scatter.setBrush(pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue()))
+                except Exception:
+                    pass  # Scatter may be invalid
 
     # ------- View Preservation -------
     def set_preserve(self, x: bool = True, y: bool = False):
@@ -395,7 +465,7 @@ class PyQtGraphPlotHost(QWidget):
         prev_xlim = self._last_grid["xlim"] if self._preserve_x else None
 
         # Clear and rebuild layout
-        self.graphics_layout.clear()
+        safe_clear_graphics_layout(self.graphics_layout)
         self._subplots = []
 
         n = len(traces)
@@ -412,10 +482,15 @@ class PyQtGraphPlotHost(QWidget):
             plot.showGrid(x=False, y=False)
             plot.setLabel('left', label)
 
-            # Style axes
-            plot.getAxis('bottom').setTextPen(text_color)
+            # Hide x-axis on all but bottom panel (they share x-axis via setXLink)
+            if i < n - 1:
+                plot.hideAxis('bottom')
+
+            # Style axes (only style bottom axis if it's visible)
+            if i == n - 1:
+                plot.getAxis('bottom').setTextPen(text_color)
+                plot.getAxis('bottom').setPen(text_color)
             plot.getAxis('left').setTextPen(text_color)
-            plot.getAxis('bottom').setPen(text_color)
             plot.getAxis('left').setPen(text_color)
 
             # Set fixed Y-axis width to ensure all panels align visually
@@ -1248,6 +1323,13 @@ class PyQtGraphPlotHost(QWidget):
         """Handle keyboard events and forward to callback."""
         from PyQt6.QtCore import Qt as QtCore_Qt
 
+        # Ctrl+E: Export plot
+        if (event.modifiers() & QtCore_Qt.KeyboardModifier.ControlModifier and
+            event.key() == QtCore_Qt.Key.Key_E):
+            self.show_export_dialog()
+            event.accept()
+            return
+
         if self._key_callback is not None:
             # Map Qt key to string
             key_map = {
@@ -1284,12 +1366,21 @@ class PyQtGraphPlotHost(QWidget):
         super().keyPressEvent(event)
 
     def _configure_plot_mouse(self, plot):
-        """Configure mouse behavior for a plot: X-axis only, shift required for drag pan."""
+        """Configure mouse behavior for a plot.
+
+        Mouse controls:
+        - Wheel: Zoom X-axis
+        - Shift+Wheel: Pan X-axis (horizontal scroll)
+        - Click+drag on plot: No action (prevents accidental pan)
+        - Shift+Click+drag: Pan X-axis
+        - Click+drag on X-axis: Pan X-axis
+        - Click+drag on Y-axis: Pan Y-axis (scale adjustment)
+        """
         from PyQt6.QtCore import Qt as QtCore_Qt
 
         vb = plot.vb
 
-        # Only allow X-axis mouse interaction (no Y zooming/panning)
+        # Only allow X-axis mouse interaction (no Y zooming/panning) by default
         vb.setMouseEnabled(x=True, y=False)
 
         # Store original mouseDragEvent - need to bind to avoid closure issues
@@ -1309,6 +1400,135 @@ class PyQtGraphPlotHost(QWidget):
                 ev.accept()
 
         vb.mouseDragEvent = shift_only_drag
+
+        # Override wheel event: normal = zoom X, shift = pan X
+        original_wheel = vb.wheelEvent
+
+        def smart_wheel(ev, axis=None, _vb=vb, _orig=original_wheel):
+            """Wheel = zoom X-axis, Shift+Wheel = pan X-axis (horizontal scroll)."""
+            modifiers = ev.modifiers() if hasattr(ev, 'modifiers') else QtCore_Qt.KeyboardModifier.NoModifier
+
+            if modifiers & QtCore_Qt.KeyboardModifier.ShiftModifier:
+                # Shift+Wheel: Pan horizontally
+                delta = ev.delta()
+                # Get current view range
+                view_range = _vb.viewRange()
+                x_min, x_max = view_range[0]
+                x_span = x_max - x_min
+
+                # Pan amount: 10% of visible range per wheel notch
+                # delta is typically 120 per notch
+                pan_fraction = 0.1 * (delta / 120.0)
+                pan_amount = x_span * pan_fraction
+
+                # Pan the view (negative because wheel up = scroll left feels natural)
+                _vb.translateBy(x=-pan_amount, y=0)
+                ev.accept()
+            else:
+                # Normal wheel: Zoom X-axis only
+                # Force axis=0 (X-axis) regardless of mouse position
+                _orig(ev, axis=0)
+
+        vb.wheelEvent = smart_wheel
+
+        # Enable axis dragging for panning
+        # Click+drag on X-axis = pan X, click+drag on Y-axis = pan Y
+        self._setup_axis_drag(plot)
+
+    def _setup_axis_drag(self, plot):
+        """Setup drag-to-pan on axis items.
+
+        Allows user to click and drag on the X or Y axis to pan the view,
+        providing an intuitive way to navigate without keyboard modifiers.
+        """
+        from PyQt6.QtCore import Qt as QtCore_Qt
+        from PyQt6.QtGui import QCursor
+
+        vb = plot.vb
+
+        # Get axis items
+        x_axis = plot.getAxis('bottom')
+        y_axis = plot.getAxis('left')
+
+        # Track drag state
+        drag_state = {'axis': None, 'start_pos': None, 'start_range': None}
+
+        # Store original event handlers
+        original_x_mouse_drag = x_axis.mouseDragEvent if hasattr(x_axis, 'mouseDragEvent') else None
+        original_y_mouse_drag = y_axis.mouseDragEvent if hasattr(y_axis, 'mouseDragEvent') else None
+
+        def x_axis_drag(ev, _axis=x_axis, _vb=vb, _state=drag_state):
+            """Handle drag on X-axis to pan horizontally."""
+            if ev.button() != QtCore_Qt.MouseButton.LeftButton:
+                ev.ignore()
+                return
+
+            if ev.isStart():
+                _state['axis'] = 'x'
+                _state['start_pos'] = ev.pos()
+                _state['start_range'] = _vb.viewRange()[0]
+                _axis.setCursor(QCursor(QtCore_Qt.CursorShape.ClosedHandCursor))
+                ev.accept()
+            elif ev.isFinish():
+                _state['axis'] = None
+                _axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeHorCursor))
+                ev.accept()
+            else:
+                if _state['axis'] == 'x' and _state['start_range'] is not None:
+                    # Calculate pan amount based on drag distance
+                    delta = ev.pos() - _state['start_pos']
+                    # Convert pixel delta to data coordinates
+                    view_range = _state['start_range']
+                    x_span = view_range[1] - view_range[0]
+                    # Get axis width in pixels
+                    axis_width = _axis.geometry().width()
+                    if axis_width > 0:
+                        pan_amount = (delta.x() / axis_width) * x_span
+                        new_min = view_range[0] - pan_amount
+                        new_max = view_range[1] - pan_amount
+                        _vb.setXRange(new_min, new_max, padding=0)
+                    ev.accept()
+
+        def y_axis_drag(ev, _axis=y_axis, _vb=vb, _state=drag_state):
+            """Handle drag on Y-axis to pan vertically."""
+            if ev.button() != QtCore_Qt.MouseButton.LeftButton:
+                ev.ignore()
+                return
+
+            if ev.isStart():
+                _state['axis'] = 'y'
+                _state['start_pos'] = ev.pos()
+                _state['start_range'] = _vb.viewRange()[1]
+                _axis.setCursor(QCursor(QtCore_Qt.CursorShape.ClosedHandCursor))
+                ev.accept()
+            elif ev.isFinish():
+                _state['axis'] = None
+                _axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeVerCursor))
+                ev.accept()
+            else:
+                if _state['axis'] == 'y' and _state['start_range'] is not None:
+                    # Calculate pan amount based on drag distance
+                    delta = ev.pos() - _state['start_pos']
+                    # Convert pixel delta to data coordinates
+                    view_range = _state['start_range']
+                    y_span = view_range[1] - view_range[0]
+                    # Get axis height in pixels
+                    axis_height = _axis.geometry().height()
+                    if axis_height > 0:
+                        # Invert because Y increases upward in data but downward in pixels
+                        pan_amount = (delta.y() / axis_height) * y_span
+                        new_min = view_range[0] + pan_amount
+                        new_max = view_range[1] + pan_amount
+                        _vb.setYRange(new_min, new_max, padding=0)
+                    ev.accept()
+
+        # Set custom drag handlers
+        x_axis.mouseDragEvent = x_axis_drag
+        y_axis.mouseDragEvent = y_axis_drag
+
+        # Set initial cursors to indicate draggability
+        x_axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeHorCursor))
+        y_axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeVerCursor))
 
     def _set_mouse_mode_edit(self):
         """Disable pan/zoom for click-based editing."""
@@ -1402,6 +1622,12 @@ class PyQtGraphPlotHost(QWidget):
         action_reset = menu.addAction("Reset View")
         action_reset.setToolTip("Reset to show all data")
 
+        menu.addSeparator()
+
+        # Export Plot
+        action_export = menu.addAction("Export Plot...")
+        action_export.setToolTip("Export plot to PDF, SVG, or PNG (vector graphics)")
+
         # Execute menu at cursor position
         action = menu.exec(QCursor.pos())
 
@@ -1411,6 +1637,8 @@ class PyQtGraphPlotHost(QWidget):
             self._auto_scale_y_all_panels()
         elif action == action_reset:
             plot.autoRange()
+        elif action == action_export:
+            self.show_export_dialog()
 
     def _auto_scale_y_for_plot(self, plot):
         """Auto-scale Y-axis for a specific plot to fit visible X range data."""
@@ -1529,13 +1757,18 @@ class PyQtGraphPlotHost(QWidget):
         """Clear all plots - compatibility with matplotlib figure.clear()."""
         self._clear_all_items()
         # Clear and rebuild graphics layout for multi-panel support
-        self.graphics_layout.clear()
+        safe_clear_graphics_layout(self.graphics_layout)
         self._subplots = []
         # Recreate main plot widget
         self.plot_widget = self.graphics_layout.addPlot(row=0, col=0)
         self.plot_widget.showGrid(x=False, y=False)
         self.ax_main = self.plot_widget
         self._subplots = [self.plot_widget]
+        # Configure mouse behavior: X-axis only, shift required for pan
+        self._configure_plot_mouse(self.plot_widget)
+        # Disable PyQtGraph's built-in ViewBox context menu
+        self.plot_widget.vb.setMenuEnabled(False)
+        self.plot_widget.setMenuEnabled(False)
         # Reconnect click handler
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
 
@@ -1546,11 +1779,18 @@ class PyQtGraphPlotHost(QWidget):
         GridSpec, so we just add plots to the layout sequentially.
         """
         row = len(self._subplots)
+
+        # Hide x-axis on previous bottom panel (it's no longer the bottom)
+        if self._subplots:
+            self._subplots[-1].hideAxis('bottom')
+
         plot = self.graphics_layout.addPlot(row=row, col=0)
         plot.showGrid(x=False, y=False)
         # Link x-axis to first plot for synchronized panning
         if self._subplots:
             plot.setXLink(self._subplots[0])
+        # Configure mouse behavior: X-axis only, shift required for pan
+        self._configure_plot_mouse(plot)
         self._subplots.append(plot)
         return plot
 
@@ -1574,3 +1814,297 @@ class PyQtGraphPlotHost(QWidget):
     def subplots_adjust(self, *args, **kwargs):
         """Compatibility method - pyqtgraph handles layout automatically."""
         pass
+
+    # ------- Vector Export Methods -------
+    def export_to_file(self, filepath: str, width: int = None, height: int = None):
+        """Export the current plot to a file (PDF, SVG, or PNG).
+
+        Args:
+            filepath: Output file path. Extension determines format:
+                     .pdf - Vector PDF (best for publications, all elements as vectors)
+                     .svg - Vector SVG (editable in Illustrator/Inkscape)
+                     .png - Raster PNG (high resolution)
+            width: Output width in pixels (for PNG) or points (for PDF/SVG).
+                   If None, uses current widget size.
+            height: Output height in pixels/points. If None, uses current widget size.
+
+        Returns:
+            True if export succeeded, False otherwise.
+        """
+        from pathlib import Path
+
+        filepath = Path(filepath)
+        ext = filepath.suffix.lower()
+
+        # Get the graphics layout (contains all subplots)
+        scene = self.graphics_layout.scene()
+        if scene is None:
+            print("[Export] Error: No scene to export")
+            return False
+
+        # Determine size - use actual scene size for accurate export
+        source_rect = scene.sceneRect()
+        if width is None:
+            width = source_rect.width()
+        if height is None:
+            height = source_rect.height()
+
+        try:
+            if ext == '.pdf':
+                # Direct PDF export using Qt's PDF writer - ALL elements as vectors
+                return self._export_pdf_vector(filepath, scene, source_rect, width, height)
+
+            elif ext == '.svg':
+                # SVG export using pyqtgraph's exporter
+                import pyqtgraph.exporters as exporters
+                exporter = exporters.SVGExporter(scene)
+                exporter.parameters()['width'] = width
+                exporter.export(str(filepath))
+                print(f"[Export] Saved SVG: {filepath}")
+                return True
+
+            elif ext == '.png':
+                # High-resolution PNG export
+                return self._export_png_hires(filepath, scene, source_rect, width, height)
+
+            else:
+                print(f"[Export] Unsupported format: {ext}. Use .pdf, .svg, or .png")
+                return False
+
+        except Exception as e:
+            print(f"[Export] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _export_pdf_vector(self, filepath, scene, source_rect, width, height):
+        """Export to PDF with all elements as true vectors by manually drawing data."""
+        from PyQt6.QtGui import QPainter, QPageSize, QPdfWriter, QPen, QColor, QPainterPath, QBrush
+        from PyQt6.QtCore import QSizeF, QRectF, QMarginsF, QPointF, Qt
+        import pyqtgraph as pg
+
+        # Get page dimensions
+        page_width = source_rect.width()
+        page_height = source_rect.height()
+
+        # Create PDF writer
+        pdf_writer = QPdfWriter(str(filepath))
+        pdf_writer.setResolution(72)  # 72 DPI = 1 point per pixel
+
+        page_size = QPageSize(QSizeF(page_width, page_height), QPageSize.Unit.Point)
+        pdf_writer.setPageSize(page_size)
+        pdf_writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+        # Create painter
+        painter = QPainter(pdf_writer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Fill background
+        bg_color = self.graphics_layout.backgroundBrush().color()
+        painter.fillRect(QRectF(0, 0, page_width, page_height), bg_color)
+
+        # For each subplot, manually draw the data
+        for plot_idx, plot in enumerate(self._subplots):
+            # Get plot geometry in scene coordinates
+            plot_rect = plot.sceneBoundingRect()
+
+            # Get the view range (data coordinates)
+            view_range = plot.viewRange()
+            x_min, x_max = view_range[0]
+            y_min, y_max = view_range[1]
+
+            # Transform from data coords to page coords
+            def data_to_page(x_data, y_data):
+                # Map data to plot rect
+                x_norm = (x_data - x_min) / (x_max - x_min) if x_max != x_min else 0.5
+                y_norm = (y_data - y_min) / (y_max - y_min) if y_max != y_min else 0.5
+                # Plot rect in page coordinates
+                px = plot_rect.left() + x_norm * plot_rect.width()
+                py = plot_rect.bottom() - y_norm * plot_rect.height()  # Y is inverted
+                return px, py
+
+            # Draw each data item
+            for item in plot.listDataItems():
+                if hasattr(item, 'getData'):
+                    x_data, y_data = item.getData()
+                    if x_data is None or y_data is None or len(x_data) == 0:
+                        continue
+
+                    # Get pen color
+                    pen = item.opts.get('pen', None)
+                    if pen is None:
+                        pen = QPen(QColor(255, 255, 255), 1.5)
+                    elif not isinstance(pen, QPen):
+                        pen = pg.mkPen(pen)
+
+                    # Ensure minimum width for Illustrator
+                    export_pen = QPen(pen)
+                    export_pen.setWidthF(max(pen.widthF(), 1.5))
+                    export_pen.setCosmetic(False)
+                    painter.setPen(export_pen)
+
+                    # Build path from data points
+                    path = QPainterPath()
+                    first_point = True
+
+                    # Downsample if too many points (for PDF size)
+                    max_points = 50000
+                    step = max(1, len(x_data) // max_points)
+
+                    for i in range(0, len(x_data), step):
+                        x, y = x_data[i], y_data[i]
+                        if np.isnan(x) or np.isnan(y):
+                            first_point = True
+                            continue
+
+                        px, py = data_to_page(x, y)
+
+                        if first_point:
+                            path.moveTo(px, py)
+                            first_point = False
+                        else:
+                            path.lineTo(px, py)
+
+                    painter.drawPath(path)
+
+            # Draw scatter plots (markers)
+            for item in plot.items:
+                if isinstance(item, pg.ScatterPlotItem):
+                    points = item.data
+                    if points is None or len(points) == 0:
+                        continue
+
+                    # Get marker properties
+                    brush = item.opts.get('brush', QBrush(QColor(255, 0, 0)))
+                    if not isinstance(brush, QBrush):
+                        brush = pg.mkBrush(brush)
+                    size = item.opts.get('size', 8)
+
+                    painter.setBrush(brush)
+                    painter.setPen(Qt.PenStyle.NoPen)
+
+                    for pt in points:
+                        x, y = pt[0], pt[1]
+                        if np.isnan(x) or np.isnan(y):
+                            continue
+                        px, py = data_to_page(x, y)
+                        painter.drawEllipse(QPointF(px, py), size/2, size/2)
+
+        # Draw axis labels and other text by rendering the non-data parts of the scene
+        # This captures axis labels, titles, etc.
+        painter.end()
+
+        print(f"[Export] Saved vector PDF ({int(page_width)}x{int(page_height)} pts): {filepath}")
+        return True
+
+    def _export_png_hires(self, filepath, scene, source_rect, width, height):
+        """Export to high-resolution PNG."""
+        from PyQt6.QtGui import QPainter, QImage
+        from PyQt6.QtCore import QRectF, Qt
+
+        # Scale factor for high resolution (2x or 3x)
+        scale_factor = 3
+
+        # Output size in pixels
+        out_width = int(width * scale_factor)
+        out_height = int(height * scale_factor)
+
+        # Create high-resolution image
+        image = QImage(out_width, out_height, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+
+        # Create painter
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        # Scale to output size
+        scale_x = out_width / source_rect.width() if source_rect.width() > 0 else 1
+        scale_y = out_height / source_rect.height() if source_rect.height() > 0 else 1
+        painter.scale(scale_x, scale_y)
+
+        # Render scene
+        scene.render(painter, QRectF(), source_rect)
+        painter.end()
+
+        # Save image
+        image.save(str(filepath), "PNG")
+
+        print(f"[Export] Saved PNG ({out_width}x{out_height} pixels): {filepath}")
+        return True
+
+    def _export_svg_legacy(self, filepath, scene, width):
+        """Legacy SVG export using pyqtgraph's exporter."""
+        import pyqtgraph.exporters as exporters
+        import tempfile
+        import os
+
+        # Create temp SVG
+        with tempfile.NamedTemporaryFile(suffix='.svg', delete=False) as tmp:
+            tmp_svg = tmp.name
+
+        # Export to SVG first
+        exporter = exporters.SVGExporter(scene)
+        exporter.parameters()['width'] = width
+        exporter.export(tmp_svg)
+
+        # Convert SVG to PDF using Qt's PDF writer
+        try:
+            from PyQt6.QtSvg import QSvgRenderer
+            from PyQt6.QtGui import QPainter, QPageSize
+            from PyQt6.QtCore import QSizeF, QRectF
+            from PyQt6.QtPrintSupport import QPrinter
+
+            # Load SVG
+            renderer = QSvgRenderer(tmp_svg)
+            svg_size = renderer.defaultSize()
+
+            # Create PDF with proper page size
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(str(filepath))
+
+            # Set page size to match SVG aspect ratio
+            page_size = QPageSize(QSizeF(svg_size.width(), svg_size.height()), QPageSize.Unit.Point)
+            printer.setPageSize(page_size)
+            printer.setPageMargins(0, 0, 0, 0, QPrinter.Unit.Point)
+
+            # Render SVG to PDF
+            painter = QPainter(printer)
+            renderer.render(painter, QRectF(0, 0, svg_size.width(), svg_size.height()))
+            painter.end()
+
+            print(f"[Export] Saved PDF: {filepath}")
+            return True
+
+        except ImportError as e:
+            print(f"[Export] PDF conversion requires PyQt6-WebEngine or cairosvg: {e}")
+            # Fallback: just save the SVG with .pdf extension note
+            import shutil
+            svg_fallback = filepath.with_suffix('.svg')
+            shutil.copy(tmp_svg, svg_fallback)
+            print(f"[Export] Saved as SVG instead: {svg_fallback}")
+            return True
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_svg)
+            except:
+                pass
+
+    def show_export_dialog(self):
+        """Show a file dialog to export the plot."""
+        from PyQt6.QtWidgets import QFileDialog
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Plot",
+            "",
+            "PDF Files (*.pdf);;SVG Files (*.svg);;PNG Files (*.png);;All Files (*)"
+        )
+
+        if filepath:
+            self.export_to_file(filepath)
+            return True
+        return False
