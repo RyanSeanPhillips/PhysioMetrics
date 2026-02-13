@@ -477,6 +477,7 @@ class MainWindow(QMainWindow):
 
         # --- Mark Events button (event detection settings) ---
         self.MarkEventsButton.clicked.connect(self.on_mark_events_clicked)
+        self.MarkEventsButton.setVisible(False)  # Hidden — unused in current UI
 
         # --- Sigh overlay artists ---
         self._sigh_artists = []         # matplotlib artists for sigh overlay
@@ -1410,10 +1411,8 @@ class MainWindow(QMainWindow):
         self.mark_events_btn.setToolTip("Open Event Detection dialog (requires Event channel)")
         self.mark_events_btn.clicked.connect(self.on_mark_events_clicked)
 
-        # Add to Channel Manager header layout (next to expand button)
-        if hasattr(self, 'channelManagerHeaderLayout'):
-            # Insert before the expand button (index 1)
-            self.channelManagerHeaderLayout.insertWidget(1, self.mark_events_btn)
+        # Hidden — unused in current UI, kept for potential future use
+        self.mark_events_btn.setVisible(False)
 
     def _setup_new_event_markers(self):
         """Setup the new modular event marker system with right-click UX."""
@@ -6264,9 +6263,9 @@ class MainWindow(QMainWindow):
             "Right-click on any panel to auto-scale Y-axis."
         )
 
-        # Allow user to choose backend - matplotlib useful for figure export
-        use_pyqtgraph = self.settings.value("use_pyqtgraph", True, type=bool)
-        self.pyqtgraph_checkbox.setChecked(use_pyqtgraph)
+        # Force pyqtgraph as the only backend (matplotlib doesn't support event markers)
+        self.pyqtgraph_checkbox.setChecked(True)
+        self.settings.setValue("use_pyqtgraph", True)
 
         # Update state
         self.state.plotting_backend = 'pyqtgraph'
@@ -6274,17 +6273,8 @@ class MainWindow(QMainWindow):
         # Connect handler (kept for future use)
         self.pyqtgraph_checkbox.toggled.connect(self.on_pyqtgraph_toggled)
 
-        # Add checkbox to UI - allows switching to matplotlib for figure export
-        if hasattr(self, 'checkBox') and self.checkBox.parent():
-            parent_layout = self.checkBox.parent().layout()
-            if parent_layout:
-                for i in range(parent_layout.count()):
-                    item = parent_layout.itemAt(i)
-                    if item and item.widget() == self.checkBox:
-                        parent_layout.insertWidget(i + 1, self.pyqtgraph_checkbox)
-                        break
-                else:
-                    parent_layout.addWidget(self.pyqtgraph_checkbox)
+        # Hidden from users — pyqtgraph is the only supported backend
+        self.pyqtgraph_checkbox.setVisible(False)
 
     def _create_plot_host(self, backend: str):
         """Create the appropriate plot host widget based on backend selection.

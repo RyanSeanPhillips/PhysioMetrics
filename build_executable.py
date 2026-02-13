@@ -58,10 +58,10 @@ def check_dependencies():
     for module in required_modules:
         try:
             __import__(module)
-            print(f"  ✓ {module}")
+            print(f"  [OK] {module}")
         except ImportError:
             missing_modules.append(module)
-            print(f"  ✗ {module} - MISSING")
+            print(f"  [MISSING] {module} - MISSING")
 
     if missing_modules:
         print(f"\nERROR: Missing required modules: {', '.join(missing_modules)}")
@@ -85,10 +85,10 @@ def check_required_files():
     missing_files = []
     for file_path in required_files:
         if os.path.exists(file_path):
-            print(f"  ✓ {file_path}")
+            print(f"  [OK] {file_path}")
         else:
             missing_files.append(file_path)
-            print(f"  ✗ {file_path} - MISSING")
+            print(f"  [MISSING] {file_path} - MISSING")
 
     if missing_files:
         print(f"\nWARNING: Missing files: {', '.join(missing_files)}")
