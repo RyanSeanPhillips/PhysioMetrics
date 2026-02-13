@@ -155,7 +155,7 @@ class EditingModes:
         all_peaks['labels'][idx] = new_label
         all_peaks['label_source'][idx] = 'user'  # Track that this was manually edited
 
-        print(f"[label-edit] Toggled peak at sample {peak_sample_idx} (sweep {sweep_idx}): label {old_label} → {new_label}")
+        print(f"[label-edit] Toggled peak at sample {peak_sample_idx} (sweep {sweep_idx}): label {old_label} -> {new_label}")
 
     # ========================================================================
     # End of Label-Based Editing Helpers
@@ -1188,8 +1188,8 @@ class EditingModes:
         # Disallow moving peaks (only breath event markers can be moved)
         # Peaks should stay at detected positions; use add/delete to correct peak detection
         if point_type == 'peak':
-            print(f"[move-point] ✗ Cannot move peaks - use Add/Delete Peak buttons instead")
-            self.window._log_status_message("✗ Cannot move peaks - use Add/Delete instead", 2000)
+            print(f"[move-point] Cannot move peaks - use Add/Delete Peak buttons instead")
+            self.window._log_status_message("Cannot move peaks - use Add/Delete instead", 2000)
             return
 
         # Store selection (keep original_index for finding it later)

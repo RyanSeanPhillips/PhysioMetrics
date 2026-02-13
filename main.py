@@ -3091,7 +3091,7 @@ class MainWindow(QMainWindow):
             if result_data:
                 # Update with new processing
                 self._load_photometry_data(result_data)
-                print("[Photometry] Updated ΔF/F with new settings")
+                print("[Photometry] Updated dF/F with new settings")
 
                 # Persist updated dF/F params back to NPZ so they survive app restart
                 self._update_npz_dff_params()

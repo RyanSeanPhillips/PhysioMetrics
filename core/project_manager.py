@@ -475,7 +475,7 @@ class ProjectManager:
 
         config['recent_projects'] = recent
         self._save_config(config)
-        print(f"[project-manager] Updated project path: {old_path} → {new_path}")
+        print(f"[project-manager] Updated project path: {old_path} -> {new_path}")
 
     def remove_recent_project(self, project_path: Path):
         """Remove project from recent projects list."""

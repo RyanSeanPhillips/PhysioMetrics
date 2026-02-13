@@ -656,7 +656,7 @@ class ProminenceThresholdDialog(ExportMixin, QDialog):
             w_exp_init = 0.25
             w_g1_init = 0.40  # Eupnea typically more common than sniffing
 
-            print(f"[2-Gauss] Initial: λ={lambda_init:.3f}, μ1={mu1_init:.3f}, μ2={mu2_init:.3f}")
+            print(f"[2-Gauss] Initial: lam={lambda_init:.3f}, mu1={mu1_init:.3f}, mu2={mu2_init:.3f}")
 
             # Bounds
             bounds = ([0.001, bin_centers.min(), 0.001, mu1_init, 0.001, 0.0, 0.0],
@@ -680,7 +680,7 @@ class ProminenceThresholdDialog(ExportMixin, QDialog):
             ss_tot = np.sum((density - np.mean(density)) ** 2)
             r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
 
-            print(f"[2-Gauss] Fitted: λ={lambda_fit:.3f}, μ1={mu1_fit:.3f}, μ2={mu2_fit:.3f}, R²={r_squared:.3f}")
+            print(f"[2-Gauss] Fitted: lam={lambda_fit:.3f}, mu1={mu1_fit:.3f}, mu2={mu2_fit:.3f}, R2={r_squared:.3f}")
             print(f"[2-Gauss] Weights: exp={w_exp_fit:.3f}, g1={w_g1_fit:.3f}, g2={w_g2_fit:.3f}")
 
             # Reject if R² too low or weights are weird
@@ -751,7 +751,7 @@ class ProminenceThresholdDialog(ExportMixin, QDialog):
             sigma_init = np.sqrt(np.average((bin_centers - mu_init)**2, weights=counts + 1))
             w_exp_init = 0.3
 
-            print(f"[1-Gauss] Initial: λ={lambda_init:.3f}, μ={mu_init:.3f}, σ={sigma_init:.3f}")
+            print(f"[1-Gauss] Initial: lam={lambda_init:.3f}, mu={mu_init:.3f}, sig={sigma_init:.3f}")
 
             bounds = ([0.001, bin_centers.min(), 0.001, 0.0],
                      [100.0, bin_centers.max(), bin_centers.max(), 1.0])
@@ -773,7 +773,7 @@ class ProminenceThresholdDialog(ExportMixin, QDialog):
             ss_tot = np.sum((density - np.mean(density)) ** 2)
             r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
 
-            print(f"[1-Gauss] Fitted: λ={lambda_fit:.3f}, μ={mu_fit:.3f}, σ={sigma_fit:.3f}, R²={r_squared:.3f}")
+            print(f"[1-Gauss] Fitted: lam={lambda_fit:.3f}, mu={mu_fit:.3f}, sig={sigma_fit:.3f}, R2={r_squared:.3f}")
 
             # Find valley
             search_range = (bin_centers >= 0) & (bin_centers <= mu_fit)

@@ -1561,7 +1561,7 @@ def detrend_signal(
             b0 = late_mean
 
             if abs(a0) < 0.1:
-                print(f"[Photometry] No exponential decay detected (Δ={a0:.3f}%), skipping")
+                print(f"[Photometry] No exponential decay detected (delta={a0:.3f}%), skipping")
                 return signal.copy(), None, {'detrend_method': 'none (no decay)'}
 
             popt, pcov = curve_fit(exp_decay, t_for_fit, signal_for_fit,
@@ -1604,7 +1604,7 @@ def detrend_signal(
             b0 = late_mean
 
             if abs(total_decay) < 0.1:
-                print(f"[Photometry] No decay detected (Δ={total_decay:.3f}%), skipping biexp")
+                print(f"[Photometry] No decay detected (delta={total_decay:.3f}%), skipping biexp")
                 return signal.copy(), None, {'detrend_method': 'none (no decay)'}
 
             popt, pcov = curve_fit(biexp_decay, t_for_fit, signal_for_fit,

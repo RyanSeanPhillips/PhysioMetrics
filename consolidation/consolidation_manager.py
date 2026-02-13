@@ -1191,7 +1191,7 @@ class ConsolidationManager:
                 'windows': windows
             }
 
-        print(f"[NPZ] ✓ Fast consolidation complete")
+        print(f"[NPZ] Fast consolidation complete")
         return consolidated
 
 

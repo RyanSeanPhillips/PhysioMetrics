@@ -1324,7 +1324,7 @@ class ProjectBuilderManager:
         # For parent rows, ALWAYS create sub-rows instead of updating the parent
         # This keeps parent as a "header" row showing file-level info only
         if not is_sub_row:
-            print(f"[master-list] ✓ Parent row detected - creating sub-row for {channel_used}")
+            print(f"[master-list] Parent row detected - creating sub-row for {channel_used}")
 
             # If parent had existing completed analysis, move it to sub-row first
             if existing_channel and existing_status == 'completed':

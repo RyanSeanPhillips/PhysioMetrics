@@ -349,7 +349,7 @@ class ExportManager:
                 print(f"[Pulse Detection] Sweep {s} has pulse_width={pulse_width}s (need <1.0s) - NOT a pulse experiment")
                 return False
 
-        print(f"[Pulse Detection] ✓ All {len(kept_sweeps)} sweeps have exactly 1 pulse <1.0s - IS a pulse experiment")
+        print(f"[Pulse Detection] [OK] All {len(kept_sweeps)} sweeps have exactly 1 pulse <1.0s - IS a pulse experiment")
         return True
 
     def _load_save_dialog_history(self) -> dict:
@@ -583,7 +583,7 @@ class ExportManager:
             self._export_all_analyzed_data(preview_only=False, progress_dialog=progress)
             # Show completion message with elapsed time
             t_elapsed = time.time() - t_start
-            self.window._log_status_message(f"✓ Data export complete ({t_elapsed:.1f}s)", 3000)
+            self.window._log_status_message(f"[OK] Data export complete ({t_elapsed:.1f}s)", 3000)
 
             # Count eupnea and sniffing breaths for telemetry
             st = self.window.state
@@ -627,7 +627,7 @@ class ExportManager:
                         print("[Export] No save directory found, skipping rescan")
         except Exception as e:
             t_elapsed = time.time() - t_start
-            self.window._log_status_message(f"✗ Data export failed ({t_elapsed:.1f}s)", 3000)
+            self.window._log_status_message(f"[FAIL] Data export failed ({t_elapsed:.1f}s)", 3000)
             raise
         finally:
             progress.close()
@@ -678,7 +678,7 @@ class ExportManager:
             # Timing message is shown when dialog appears, not when user closes it
         except Exception as e:
             t_elapsed = time.time() - t_start
-            self.window._log_status_message(f"✗ Summary failed ({t_elapsed:.1f}s)", 3000)
+            self.window._log_status_message(f"[FAIL] Summary failed ({t_elapsed:.1f}s)", 3000)
             raise
         finally:
             progress.close()
@@ -1390,7 +1390,7 @@ class ExportManager:
             del trace_cache
 
             waveform_cutouts = np.array(cutouts, dtype=np.float32)  # [n_peaks, window_samples]
-            print(f"[ML training] ✓ Extracted {len(cutouts)} waveform cutouts ({waveform_cutouts.shape})")
+            print(f"[ML training] [OK] Extracted {len(cutouts)} waveform cutouts ({waveform_cutouts.shape})")
 
         # Collect merge decisions
         merge_data = []
@@ -1502,39 +1502,39 @@ class ExportManager:
         n_breaths_eupnea = sum(1 for r in breaths_only_data if r['is_eupnea'] == 1)
         n_breaths_sniffing = sum(1 for r in breaths_only_data if r['is_sniffing'] == 1)
 
-        print(f"[ML training] ✓ Dataset 1 (ALL_PEAKS): {n_total} peaks ({n_breaths} breaths, {n_rejected} rejected)")
-        print(f"[ML training]   → {n_sighs} sighs, {n_eupnea} eupnea, {n_sniffing} sniffing")
-        print(f"[ML training]   → Merge labels: {n_merged_away} peaks merged away, {n_merge_with_next} peaks merged with next")
-        print(f"[ML training] ✓ Dataset 2 (BREATHS_ONLY): {n_breaths_only} breaths (recalculated features)")
-        print(f"[ML training]   → {n_breaths_sighs} sighs, {n_breaths_eupnea} eupnea, {n_breaths_sniffing} sniffing")
+        print(f"[ML training] [OK] Dataset 1 (ALL_PEAKS): {n_total} peaks ({n_breaths} breaths, {n_rejected} rejected)")
+        print(f"[ML training]   -> {n_sighs} sighs, {n_eupnea} eupnea, {n_sniffing} sniffing")
+        print(f"[ML training]   -> Merge labels: {n_merged_away} peaks merged away, {n_merge_with_next} peaks merged with next")
+        print(f"[ML training] [OK] Dataset 2 (BREATHS_ONLY): {n_breaths_only} breaths (recalculated features)")
+        print(f"[ML training]   -> {n_breaths_sighs} sighs, {n_breaths_eupnea} eupnea, {n_breaths_sniffing} sniffing")
         if metadata:
-            print(f"[ML training]   → Timestamp: {metadata.get('timestamp', 'unknown')}")
-            print(f"[ML training]   → System: {metadata.get('system_username', 'unknown')}@{metadata.get('computer_name', 'unknown')}")
+            print(f"[ML training]   -> Timestamp: {metadata.get('timestamp', 'unknown')}")
+            print(f"[ML training]   -> System: {metadata.get('system_username', 'unknown')}@{metadata.get('computer_name', 'unknown')}")
             user_label = metadata.get('user_name', '')
             if user_label:
-                print(f"[ML training]   → User label: {user_label}")
+                print(f"[ML training]   -> User label: {user_label}")
             animal_state = metadata.get('animal_state', '')
             if animal_state:
-                print(f"[ML training]   → Animal state: {animal_state}")
+                print(f"[ML training]   -> Animal state: {animal_state}")
             anesthetic = metadata.get('anesthetic_type', '')
             if anesthetic:
-                print(f"[ML training]   → Anesthetic: {anesthetic}")
+                print(f"[ML training]   -> Anesthetic: {anesthetic}")
             drug = metadata.get('drug', '')
             if drug:
                 dose = metadata.get('drug_concentration', '')
                 dose_str = f" ({dose})" if dose else ""
-                print(f"[ML training]   → Drug: {drug}{dose_str}")
+                print(f"[ML training]   -> Drug: {drug}{dose_str}")
             gas = metadata.get('gas_condition', '')
             if gas:
-                print(f"[ML training]   → Gas: {gas}")
+                print(f"[ML training]   -> Gas: {gas}")
             notes = metadata.get('notes', '')
             if notes:
-                print(f"[ML training]   → Notes: {notes[:50]}{'...' if len(notes) > 50 else ''}")
-            print(f"[ML training]   → Quality score: {metadata.get('quality_score', 5)}/10")
-        print(f"[ML training]   → App version: {app_version}")
+                print(f"[ML training]   -> Notes: {notes[:50]}{'...' if len(notes) > 50 else ''}")
+            print(f"[ML training]   -> Quality score: {metadata.get('quality_score', 5)}/10")
+        print(f"[ML training]   -> App version: {app_version}")
         if include_waveforms:
-            print(f"[ML training] ✓ Waveforms: {waveform_cutouts.shape} @ {st.sr_hz:.1f} Hz")
-        print(f"[ML training] ✓ File size: {npz_path.stat().st_size / 1024:.1f} KB")
+            print(f"[ML training] [OK] Waveforms: {waveform_cutouts.shape} @ {st.sr_hz:.1f} Hz")
+        print(f"[ML training] [OK] File size: {npz_path.stat().st_size / 1024:.1f} KB")
 
         # Return counts for success message
         return {
@@ -1759,12 +1759,12 @@ class ExportManager:
                     return
                 chosen_path = Path(chosen)
 
-                # 1) If chosen folder is inside an ancestor named Pleth_App_analysis → save THERE (the ancestor)
+                # 1) If chosen folder is inside an ancestor named Pleth_App_analysis -> save THERE (the ancestor)
                 anc = _nearest_analysis_ancestor(chosen_path)
                 if anc is not None:
                     final_dir = anc
                 else:
-                    # 2) If the chosen folder already contains 'Pleth_App_analysis' or 'Pleth_App_Analysis' subfolder → use it
+                    # 2) If the chosen folder already contains 'Pleth_App_analysis' or 'Pleth_App_Analysis' subfolder -> use it
                     sub_exact   = chosen_path / "Pleth_App_analysis"
                     sub_variant = chosen_path / "Pleth_App_Analysis"
                     if sub_exact.is_dir():
@@ -2408,7 +2408,7 @@ class ExportManager:
 
             t_elapsed = time.time() - t_start
             if save_timeseries_csv:
-                print(f"[CSV] ✓ Time-series data written in {t_elapsed:.2f}s")
+                print(f"[CSV] [OK] Time-series data written in {t_elapsed:.2f}s")
             else:
                 print(f"[CSV] ⊘ Time-series CSV skipped (computed in {t_elapsed:.2f}s)")
 
@@ -2427,7 +2427,7 @@ class ExportManager:
 
             # Count total sniffing regions across all sweeps
             total_sniff_regions = sum(len(st.sniff_regions_by_sweep.get(s, [])) for s in kept_sweeps)
-            print(f"[NPZ] ✓ Enhanced bundle saved (v2) with timeseries data")
+            print(f"[NPZ] [OK] Enhanced bundle saved (v2) with timeseries data")
             print(f"      - {total_sniff_regions} sniffing region(s) saved across {S} sweep(s)")
 
             if progress_dialog:
@@ -2489,7 +2489,7 @@ class ExportManager:
                 # No need to compute masks - we'll check breaths directly using GMM results
 
             t_elapsed = time.time() - t_start
-            print(f"[CSV] ✓ Breath events processed in {t_elapsed:.2f}s")
+            print(f"[CSV] [OK] Breath events processed in {t_elapsed:.2f}s")
 
             # Now compute baselines by collecting breath values from eupneic periods
             # IMPORTANT: Cache traces to reuse in main export loop AND PDF generation
@@ -2580,7 +2580,7 @@ class ExportManager:
                     eupnea_b_by_k[k] = float(np.mean(fallback_vals)) if len(fallback_vals) > 0 else np.nan
 
             t_elapsed = time.time() - t_start
-            print(f"[CSV] ✓ Baselines and traces computed in {t_elapsed:.2f}s")
+            print(f"[CSV] [OK] Baselines and traces computed in {t_elapsed:.2f}s")
 
             t_start = time.time()
             print(f"[CSV] Writing breath-by-breath data...")
@@ -2891,7 +2891,7 @@ class ExportManager:
 
             t_elapsed = time.time() - t_start
             if save_breaths_csv:
-                print(f"[CSV] ✓ Breath data written in {t_elapsed:.2f}s")
+                print(f"[CSV] [OK] Breath data written in {t_elapsed:.2f}s")
             else:
                 print(f"[CSV] ⊘ Breaths CSV skipped (computed in {t_elapsed:.2f}s)")
 
@@ -2983,7 +2983,7 @@ class ExportManager:
                             return []
 
                         # Pad mask with zeros at both ends to detect edge transitions
-                        # Find transitions: 0→1 (region starts) and 1→0 (region ends)
+                        # Find transitions: 0->1 (region starts) and 1->0 (region ends)
                         padded = np.concatenate(([0], mask.astype(int), [0]))
                         diff = np.diff(padded)
                         starts = np.where(diff == 1)[0]      # indices where region begins
@@ -3124,7 +3124,7 @@ class ExportManager:
 
             t_elapsed = time.time() - t_start
             if save_events_csv:
-                print(f"[CSV] ✓ Events data written in {t_elapsed:.2f}s ({event_summary})")
+                print(f"[CSV] [OK] Events data written in {t_elapsed:.2f}s ({event_summary})")
             else:
                 print(f"[CSV] ⊘ Events CSV skipped (computed in {t_elapsed:.2f}s, {event_summary})")
 
@@ -3331,7 +3331,7 @@ class ExportManager:
 
             t_elapsed = time.time() - t_start
             if save_pdf:
-                print(f"[PDF] ✓ PDF saved in {t_elapsed:.2f}s")
+                print(f"[PDF] [OK] PDF saved in {t_elapsed:.2f}s")
             else:
                 print(f"[PDF] ⊘ PDF generation skipped ({t_elapsed:.2f}s saved)")
 
@@ -3361,9 +3361,9 @@ class ExportManager:
                     }
 
                     save_state_to_npz(st, session_path, include_raw_data=False, gmm_cache=gmm_cache, app_settings=app_settings)
-                    print(f"[session] ✓ Session state saved: {session_path.name}")
+                    print(f"[session] [OK] Session state saved: {session_path.name}")
                 except Exception as e:
-                    print(f"[session] ✗ Session save failed: {e}")
+                    print(f"[session] [FAIL] Session save failed: {e}")
                     session_path = None
 
             # Export ML training data if requested
@@ -3401,11 +3401,11 @@ class ExportManager:
                             include_waveforms=include_waveforms,
                             metadata=metadata
                         )
-                        print(f"[ML training] ✓ ML training data exported to {ml_training_path}")
+                        print(f"[ML training] [OK] ML training data exported to {ml_training_path}")
                     else:
                         print(f"[ML training] ⚠ ML training export cancelled by user")
                 except Exception as e:
-                    print(f"[ML training] ✗ ML training export failed: {e}")
+                    print(f"[ML training] [FAIL] ML training export failed: {e}")
                     import traceback
                     tb_str = traceback.format_exc()
                     print(tb_str)
@@ -3439,7 +3439,7 @@ class ExportManager:
                 file_list.append(f"{session_path.name} (session)")
             if save_ml_training and ml_training_path and ml_counts:
                 # Build detailed ML summary with counts
-                ml_summary = f"{ml_training_path.name} (ML training → {ml_training_path.parent.name}/)\n"
+                ml_summary = f"{ml_training_path.name} (ML training -> {ml_training_path.parent.name}/)\n"
                 ml_summary += f"  {ml_counts['n_breaths']} breaths: "
                 ml_summary += f"{ml_counts['n_eupnea']} eupnea, {ml_counts['n_sniffing']} sniffing, "
                 ml_summary += f"{ml_counts['n_sighs']} sighs, {ml_counts['n_rejected']} rejected\n"
@@ -3448,7 +3448,7 @@ class ExportManager:
                 file_list.append(ml_summary)
             elif save_ml_training and ml_training_path:
                 # Fallback if counts not available
-                file_list.append(f"{ml_training_path.name} (ML training → {ml_training_path.parent.name}/)")
+                file_list.append(f"{ml_training_path.name} (ML training -> {ml_training_path.parent.name}/)")
             msg = "Saved:\n" + "\n".join(f"- {name}" for name in file_list)
             print("[save]", msg)
             try:
@@ -3883,7 +3883,7 @@ class ExportManager:
             phase_norm = np.zeros_like(phases)
 
         # Colormap for phase gradient
-        cmap = cm.get_cmap('coolwarm')  # Blue (0) → Red (1)
+        cmap = cm.get_cmap('coolwarm')  # Blue (0) -> Red (1)
 
         # Calculate vertical spacing for traces
         # Find min/max amplitude across all traces to determine spacing
@@ -4770,7 +4770,7 @@ class ExportManager:
             plt.close(fig_3d_stim)
             plt.close(fig_prob)
 
-            print(f"[Pulse PDF] ✓ Pulse analysis PDF saved to {out_path.name}")
+            print(f"[Pulse PDF] [OK] Pulse analysis PDF saved to {out_path.name}")
 
         except Exception as e:
             print(f"[Pulse PDF] ERROR: {e}")
@@ -5443,7 +5443,7 @@ class ExportManager:
             pdf.savefig(fig, dpi=150)
         plt.close(fig)
 
-        print(f"[CTA PDF] ✓ Event-aligned CTA PDF saved to {out_path.name}")
+        print(f"[CTA PDF] [OK] Event-aligned CTA PDF saved to {out_path.name}")
 
     def _show_event_cta_preview_dialog(self, kept_sweeps, cached_traces_by_sweep, keys_for_csv, label_by_key):
         """Display interactive preview dialog with event-aligned CTA figure."""
@@ -5518,7 +5518,7 @@ class ExportManager:
         # Show timing message before dialog appears
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Summary generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
 
         # Show dialog modally
         dialog.exec()
@@ -5752,7 +5752,7 @@ class ExportManager:
         control_layout = QHBoxLayout()
         page_label = QLabel("Page 1 of 4 (CTA Overlay)")
         prev_btn = QPushButton("← Previous")
-        next_btn = QPushButton("Next →")
+        next_btn = QPushButton("Next ->")
         close_btn = QPushButton("Close")
 
         control_layout.addWidget(prev_btn)
@@ -5867,7 +5867,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
 
         # Clean up figures when dialog closes
         def cleanup():
@@ -5900,7 +5900,7 @@ class ExportManager:
         control_layout = QHBoxLayout()
         page_label = QLabel("Page 1 of 3 (CTA Overlay)")
         prev_btn = QPushButton("← Previous")
-        next_btn = QPushButton("Next →")
+        next_btn = QPushButton("Next ->")
         close_btn = QPushButton("Close")
 
         control_layout.addWidget(prev_btn)
@@ -5997,7 +5997,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
 
         # Show dialog modally
         dialog.exec()
@@ -6026,7 +6026,7 @@ class ExportManager:
         control_layout = QHBoxLayout()
         page_label = QLabel("Page 1 of 2 (CTA Overlay)")  # Will be updated by update_page()
         prev_btn = QPushButton("← Previous")
-        next_btn = QPushButton("Next →")
+        next_btn = QPushButton("Next ->")
         close_btn = QPushButton("Close")
 
         control_layout.addWidget(prev_btn)
@@ -6119,7 +6119,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Pulse analysis generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Pulse analysis generated ({t_elapsed:.1f}s)", 5000)
 
         dialog.exec()
 
@@ -6147,7 +6147,7 @@ class ExportManager:
         control_layout = QHBoxLayout()
         page_label = QLabel("Page 1 of 4 (Pulse CTA)")
         prev_btn = QPushButton("← Previous")
-        next_btn = QPushButton("Next →")
+        next_btn = QPushButton("Next ->")
         close_btn = QPushButton("Close")
 
         control_layout.addWidget(prev_btn)
@@ -6249,7 +6249,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Summary generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
 
         dialog.exec()
 
@@ -6302,7 +6302,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Preview generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Preview generated ({t_elapsed:.1f}s)", 5000)
 
         dialog.exec()
 
@@ -6340,7 +6340,7 @@ class ExportManager:
         control_layout = QHBoxLayout()
         page_label = QLabel("Page 1 of 3 (Raw)")
         prev_btn = QPushButton("← Previous")
-        next_btn = QPushButton("Next →")
+        next_btn = QPushButton("Next ->")
         close_btn = QPushButton("Close")
 
         control_layout.addWidget(prev_btn)
@@ -6455,7 +6455,7 @@ class ExportManager:
         # Show timing message before dialog appears
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"✓ Summary generated ({t_elapsed:.1f}s)", 5000)
+            self.window._log_status_message(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
 
         # Clean up figures when dialog closes
         def cleanup():

@@ -204,7 +204,7 @@ class PhotometryImportDialog(QDialog):
     - Save to *_photometry.npz file
 
     Tab 2 - Processing:
-    - Configure ΔF/F method (fitted vs simple)
+    - Configure dF/F method (fitted vs simple)
     - Configure detrending (none, linear, exponential, biexponential)
     - Set fit range
     - Preview processed signals
@@ -1003,7 +1003,7 @@ class PhotometryImportDialog(QDialog):
     # =========================================================================
 
     def _create_tab2_processing(self):
-        """Create Tab 2: ΔF/F Processing and Preview."""
+        """Create Tab 2: dF/F Processing and Preview."""
         tab = QWidget()
         tab_layout = QVBoxLayout(tab)
         main_layout = QHBoxLayout()
@@ -1023,8 +1023,8 @@ class PhotometryImportDialog(QDialog):
         self.lbl_source_file = QLabel("")
         self.lbl_source_file.setVisible(False)
 
-        # ΔF/F Method
-        method_group = QGroupBox("ΔF/F Calculation")
+        # dF/F Method
+        method_group = QGroupBox("dF/F Calculation")
         method_layout = QVBoxLayout(method_group)
 
         method_row = QHBoxLayout()
@@ -1393,7 +1393,7 @@ class PhotometryImportDialog(QDialog):
         self.spin_lowpass_tab2.blockSignals(True)
 
         try:
-            # ΔF/F method — check both 'dff_method' (Tab 2) and 'method' (NPZ/Tab 1)
+            # dF/F method — check both 'dff_method' (Tab 2) and 'method' (NPZ/Tab 1)
             dff_method = params.get('dff_method', params.get('method'))
             if dff_method is not None:
                 idx = self.combo_dff_method_tab2.findData(dff_method)
@@ -1995,9 +1995,9 @@ class PhotometryImportDialog(QDialog):
             - 't': np.ndarray - time vector in seconds
             - 'sr_hz': float - sample rate
             - 'photometry_raw': Dict - raw data for recalculation
-            - 'photometry_params': Dict - current ΔF/F parameters
+            - 'photometry_params': Dict - current dF/F parameters
             - 'photometry_npz_path': Path - source file
-            - 'dff_channel_name': str - name of the ΔF/F channel
+            - 'dff_channel_name': str - name of the dF/F channel
         """
         return getattr(self, '_result_data', None)
 
@@ -3282,14 +3282,14 @@ class PhotometryImportDialog(QDialog):
                       detrend_fit_start: float = 0.0, detrend_fit_end: float = 0.0,
                       return_intermediates: bool = False) -> tuple:
         """
-        Compute ΔF/F using specified method.
+        Compute dF/F using specified method.
 
         Processing pipeline:
         1. Interpolate both channels to common time base
         2. (Optional) Exclude initial transient period
         3. (Optional) Low-pass filter both signals
-        4. Compute ΔF/F using selected method
-        5. (Optional) Detrend ΔF/F to remove drift
+        4. Compute dF/F using selected method
+        5. (Optional) Detrend dF/F to remove drift
 
         Args:
             iso_time, iso_signal: Isosbestic channel data
@@ -3316,7 +3316,7 @@ class PhotometryImportDialog(QDialog):
             'iso_normalized': None,
             'gcamp_normalized': None,
             'fitted_iso': None,  # For fitted method
-            'dff_raw': None,     # ΔF/F before detrending
+            'dff_raw': None,     # dF/F before detrending
             'detrend_curve': None,  # The curve being subtracted
             'fit_params': {}     # Fit parameters for display
         }
@@ -3376,7 +3376,7 @@ class PhotometryImportDialog(QDialog):
             gcamp_aligned = signal.filtfilt(b, a, gcamp_aligned)
             print(f"[Photometry] Applied {lowpass_hz} Hz low-pass filter (fs={fs:.1f} Hz)")
 
-        # Compute ΔF/F based on method
+        # Compute dF/F based on method
         if method == 'fitted':
             # Linear regression: fit isosbestic to GCaMP
             # Use the same fit window as detrending (if specified) to avoid wake-up artifacts
@@ -3401,7 +3401,7 @@ class PhotometryImportDialog(QDialog):
             r_squared = r_value**2
 
             # Log fitting results with interpretation
-            print(f"[Photometry] ΔF/F fitting: slope={slope:.4f}, intercept={intercept:.4f}, R²={r_squared:.4f}")
+            print(f"[Photometry] dF/F fitting: slope={slope:.4f}, intercept={intercept:.4f}, R²={r_squared:.4f}")
             if r_squared < 0.1:
                 print(f"[Photometry] Low R² indicates minimal shared artifacts - good signal quality!")
             elif r_squared > 0.5:
@@ -3414,7 +3414,7 @@ class PhotometryImportDialog(QDialog):
             intermediates['fit_params']['intercept'] = intercept
             intermediates['fit_params']['r_squared'] = r_squared
 
-            # ΔF/F = (GCaMP - fitted_iso) / fitted_iso
+            # dF/F = (GCaMP - fitted_iso) / fitted_iso
             epsilon = np.abs(fitted_iso).mean() * 1e-6
             dff = (gcamp_aligned - fitted_iso) / (fitted_iso + epsilon) * 100
 
@@ -3433,12 +3433,12 @@ class PhotometryImportDialog(QDialog):
             intermediates['fit_params']['iso_mean'] = iso_mean
             intermediates['fit_params']['gcamp_mean'] = gcamp_mean
 
-            # ΔF/F = (GCaMP_norm - Iso_norm) / Iso_norm * 100
+            # dF/F = (GCaMP_norm - Iso_norm) / Iso_norm * 100
             epsilon = np.abs(iso_norm).mean() * 1e-6
             dff = (gcamp_norm - iso_norm) / (iso_norm + epsilon) * 100
             print(f"[Photometry] Simple subtraction: iso_mean={iso_mean:.2f}, gcamp_mean={gcamp_mean:.2f}")
 
-        # Store raw ΔF/F before detrending
+        # Store raw dF/F before detrending
         intermediates['dff_raw'] = dff.copy()
 
         # Apply detrending
@@ -3488,7 +3488,7 @@ class PhotometryImportDialog(QDialog):
                 b0 = late_mean
 
                 if abs(a0) < 0.1:
-                    print(f"[Photometry] No exponential decay detected (Δ={a0:.3f}%), skipping")
+                    print(f"[Photometry] No exponential decay detected (delta={a0:.3f}%), skipping")
                     intermediates['fit_params']['detrend_method'] = 'none (no decay)'
                 else:
                     popt, pcov = curve_fit(exp_decay, t_for_fit, dff_for_fit,
@@ -3537,7 +3537,7 @@ class PhotometryImportDialog(QDialog):
                 b0 = late_mean
 
                 if abs(total_decay) < 0.1:
-                    print(f"[Photometry] No decay detected (Δ={total_decay:.3f}%), skipping biexp")
+                    print(f"[Photometry] No decay detected (delta={total_decay:.3f}%), skipping biexp")
                     intermediates['fit_params']['detrend_method'] = 'none (no decay)'
                 else:
                     popt, pcov = curve_fit(biexp_decay, t_for_fit, dff_for_fit,
@@ -3824,11 +3824,11 @@ class PhotometryImportDialog(QDialog):
                 self._draw_raw_signals_preview(fiber_data)
                 return
 
-            # Tab 2 (Processing): Compute ΔF/F and show intermediate steps
+            # Tab 2 (Processing): Compute dF/F and show intermediate steps
             # Note: Tab 2 typically uses _update_tab2_preview() instead
             # This is fallback code using first fiber from fiber_data
             t0 = time.perf_counter()
-            self.loading_label.setText("Computing ΔF/F...")
+            self.loading_label.setText("Computing dF/F...")
             QApplication.processEvents()
 
             # Use first fiber for legacy Tab 2 code path
@@ -3869,10 +3869,10 @@ class PhotometryImportDialog(QDialog):
             )
 
             dff_time, dff_signal, intermediates = result
-            print(f"[Timing]   ΔF/F computation: {time.perf_counter() - t0:.3f}s")
+            print(f"[Timing]   dF/F computation: {time.perf_counter() - t0:.3f}s")
 
             # Count plots needed
-            # Order: Iso, GCaMP, [intermediates if enabled], final ΔF/F, AI channels
+            # Order: Iso, GCaMP, [intermediates if enabled], final dF/F, AI channels
             ai_plots = []
             if self._ai_data is not None:
                 for i, col_info in self.ai_columns.items():
@@ -3881,16 +3881,16 @@ class PhotometryImportDialog(QDialog):
                         ai_plots.append((col_info['column'], label))
 
             # Calculate number of panels
-            # Always show: Raw aligned signals (dual y-axis) + final ΔF/F + AI
-            # Optional intermediates: Fitted iso vs GCaMP, Raw ΔF/F with detrend curve
+            # Always show: Raw aligned signals (dual y-axis) + final dF/F + AI
+            # Optional intermediates: Fitted iso vs GCaMP, Raw dF/F with detrend curve
             n_intermediate_plots = 0
             if show_intermediates and intermediates is not None:
                 if dff_method == 'fitted':
                     n_intermediate_plots += 1  # Fitted iso vs GCaMP (same scale)
                 if detrend_method != 'none':
-                    n_intermediate_plots += 1  # Raw ΔF/F with detrend curve
+                    n_intermediate_plots += 1  # Raw dF/F with detrend curve
 
-            # Total: Raw aligned + intermediates + final ΔF/F + AI
+            # Total: Raw aligned + intermediates + final dF/F + AI
             n_plots = 1 + n_intermediate_plots + 1 + len(ai_plots)
 
             # Update time range spinboxes (only if Tab 2 widgets exist)
@@ -4003,7 +4003,7 @@ class PhotometryImportDialog(QDialog):
             ax_idx += 1
             print(f"[Timing]   Plot raw aligned signals: {time.perf_counter() - t0:.3f}s")
 
-            # Intermediate plots (before final ΔF/F)
+            # Intermediate plots (before final dF/F)
             if show_intermediates and intermediates is not None and len(dff_time) > 0:
                 t0_int = time.perf_counter()
 
@@ -4033,7 +4033,7 @@ class PhotometryImportDialog(QDialog):
                     photometry_axes.append(int_ax2)
                     ax_idx += 1
 
-                # Intermediate: Raw ΔF/F with detrend curve
+                # Intermediate: Raw dF/F with detrend curve
                 if detrend_method != 'none' and intermediates.get('dff_raw') is not None:
                     int_ax3 = axes[ax_idx]
                     dff_raw = intermediates.get('dff_raw')
@@ -4041,14 +4041,14 @@ class PhotometryImportDialog(QDialog):
 
                     if dff_raw is not None and len(dff_raw) == len(int_time):
                         t_plot, s_plot = self._subsample_for_preview(int_time[int_mask], dff_raw[int_mask])
-                        int_ax3.plot(t_plot, s_plot, color='#888888', linewidth=0.5, alpha=0.7, label='Raw ΔF/F')
+                        int_ax3.plot(t_plot, s_plot, color='#888888', linewidth=0.5, alpha=0.7, label='Raw dF/F')
 
                     if detrend_curve is not None and len(detrend_curve) == len(int_time):
                         t_plot, s_plot = self._subsample_for_preview(int_time[int_mask], detrend_curve[int_mask])
                         detrend_name = fit_params.get('detrend_method', 'trend')
                         int_ax3.plot(t_plot, s_plot, color='#ff5555', linewidth=1.5, alpha=0.9, label=f'{detrend_name}')
 
-                    int_ax3.set_ylabel('Raw ΔF/F (%)', fontsize=8)
+                    int_ax3.set_ylabel('Raw dF/F (%)', fontsize=8)
                     int_ax3.axhline(y=0, color='#666666', linewidth=0.5, linestyle='--')
                     int_ax3.legend(loc='upper right', fontsize=7, framealpha=0.7)
                     add_fit_range(int_ax3)
@@ -4057,14 +4057,14 @@ class PhotometryImportDialog(QDialog):
 
                 print(f"[Timing]   Plot intermediate panels: {time.perf_counter() - t0_int:.3f}s")
 
-            # Final ΔF/F plot (after intermediates)
+            # Final dF/F plot (after intermediates)
             t0 = time.perf_counter()
             dff_ax = axes[ax_idx]
             if len(dff_time) > 0:
                 mask = (dff_time >= t_start) & (dff_time <= t_end)
                 t_plot, s_plot = self._subsample_for_preview(dff_time[mask], dff_signal[mask])
                 dff_ax.plot(t_plot, s_plot, color='#ff9900', linewidth=0.5, alpha=0.8)
-                dff_ax.set_ylabel('ΔF/F (%)', fontsize=8)
+                dff_ax.set_ylabel('dF/F (%)', fontsize=8)
                 dff_ax.axhline(y=0, color='#666666', linewidth=0.5, linestyle='--')
                 add_fit_range(dff_ax)
                 photometry_axes.append(dff_ax)
@@ -4073,7 +4073,7 @@ class PhotometryImportDialog(QDialog):
                 dff_ax.relim()
                 dff_ax.autoscale_view(scaley=True)
             ax_idx += 1
-            print(f"[Timing]   Plot final ΔF/F: {time.perf_counter() - t0:.3f}s")
+            print(f"[Timing]   Plot final dF/F: {time.perf_counter() - t0:.3f}s")
 
             # Create span selectors on ALL photometry axes
             self._create_span_selectors(photometry_axes)
@@ -4326,7 +4326,7 @@ class PhotometryImportDialog(QDialog):
                 reply = QMessageBox.question(
                     self,
                     "Data Saved",
-                    msg + "\n\nSwitch to Processing tab to configure ΔF/F?",
+                    msg + "\n\nSwitch to Processing tab to configure dF/F?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.Yes
                 )
@@ -4664,7 +4664,7 @@ class PhotometryImportDialog(QDialog):
         """Save raw aligned photometry data to NPZ file.
 
         This saves the raw signals (iso, gcamp, AI channels) with aligned time vectors.
-        NO ΔF/F is computed - that will be done when loading into main app based on
+        NO dF/F is computed - that will be done when loading into main app based on
         session settings.
 
         Format v2: Multi-fiber support - saves 'fibers' dict with per-fiber data.
