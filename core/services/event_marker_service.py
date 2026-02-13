@@ -5,6 +5,7 @@ This module provides the service layer for event markers, orchestrating
 domain operations and providing higher-level methods for the UI.
 """
 
+from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 import uuid
@@ -54,9 +55,9 @@ class EventMarkerService:
         """
         self._store = store if store is not None else MarkerStore()
         self._registry = get_category_registry()
-        self._undo_stack: List[UndoableAction] = []
-        self._redo_stack: List[UndoableAction] = []
         self._max_undo = 50
+        self._undo_stack: deque[UndoableAction] = deque(maxlen=self._max_undo)
+        self._redo_stack: deque[UndoableAction] = deque()
         self._selected_type: Tuple[str, str] = ('stimulus', 'stim_on')  # (category, label)
 
     @property
@@ -270,7 +271,8 @@ class EventMarkerService:
         if color_override is not None:
             marker.color_override = color_override if color_override else None
         if line_width is not None:
-            marker.line_width = line_width if line_width > 0 else None
+            # 0 = cosmetic pen (thinnest), >0 = explicit width, -1 = reset to default (None)
+            marker.line_width = line_width if line_width >= 0 else None
         if notes is not None:
             marker.notes = notes if notes else None
 
@@ -659,9 +661,6 @@ class EventMarkerService:
         """Push action to undo stack, clearing redo stack."""
         self._undo_stack.append(action)
         self._redo_stack.clear()
-        # Limit stack size
-        while len(self._undo_stack) > self._max_undo:
-            self._undo_stack.pop(0)
 
     # -------------------------------------------------------------------------
     # Persistence

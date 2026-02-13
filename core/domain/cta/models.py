@@ -26,13 +26,13 @@ class CTAConfig:
         baseline_start: Start of baseline period relative to event (seconds, negative = before)
         baseline_end: End of baseline period relative to event (seconds, typically 0)
     """
-    window_before: float = 2.0
-    window_after: float = 5.0
-    n_points: int = 200
+    window_before: float = 30.0
+    window_after: float = 30.0
+    n_points: int = 1000
     include_withdrawal: bool = True
     zscore_baseline: bool = True  # Z-score to baseline by default for photometry
-    baseline_start: float = -2.0  # Baseline from -2s to 0s by default
-    baseline_end: float = 0.0
+    baseline_start: float = -5.0  # Baseline from -5s to -0.25s by default
+    baseline_end: float = -0.25
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
@@ -50,13 +50,13 @@ class CTAConfig:
     def from_dict(cls, d: Dict[str, Any]) -> 'CTAConfig':
         """Deserialize from dictionary."""
         return cls(
-            window_before=float(d.get('window_before', 2.0)),
-            window_after=float(d.get('window_after', 5.0)),
-            n_points=int(d.get('n_points', 200)),
+            window_before=float(d.get('window_before', 30.0)),
+            window_after=float(d.get('window_after', 30.0)),
+            n_points=int(d.get('n_points', 1000)),
             include_withdrawal=bool(d.get('include_withdrawal', True)),
             zscore_baseline=bool(d.get('zscore_baseline', True)),
-            baseline_start=float(d.get('baseline_start', -2.0)),
-            baseline_end=float(d.get('baseline_end', 0.0)),
+            baseline_start=float(d.get('baseline_start', -5.0)),
+            baseline_end=float(d.get('baseline_end', -0.25)),
         )
 
 

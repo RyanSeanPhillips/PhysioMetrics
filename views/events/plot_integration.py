@@ -89,6 +89,11 @@ class EventMarkerPlotIntegration(QObject):
         # Original context menu reference
         self._original_context_menu_fn = None
 
+        # Auto-detection preview items and threshold line
+        self._preview_items: List = []
+        self._threshold_line = None
+        self._threshold_plot = None
+
         # Connect viewmodel signals
         self._viewmodel.markers_changed.connect(self._on_markers_changed)
 
@@ -235,7 +240,7 @@ class EventMarkerPlotIntegration(QObject):
         # Remove event filters
         try:
             self._plot_host.graphics_layout.removeEventFilter(self)
-        except:
+        except Exception:
             pass
 
         try:
@@ -243,7 +248,7 @@ class EventMarkerPlotIntegration(QObject):
             app = QApplication.instance()
             if app:
                 app.removeEventFilter(self)
-        except:
+        except Exception:
             pass
 
         # Cleanup renderer
@@ -447,13 +452,13 @@ class EventMarkerPlotIntegration(QObject):
         for plot, line in self._preview_lines:
             try:
                 plot.removeItem(line)
-            except:
+            except Exception:
                 pass
 
         for plot, line in self._preview_end_lines:
             try:
                 plot.removeItem(line)
-            except:
+            except Exception:
                 pass
 
         self._preview_lines = []
@@ -623,6 +628,9 @@ class EventMarkerPlotIntegration(QObject):
         action_export.triggered.connect(lambda: self._show_export_dialog(plot))
         existing_actions.append(action_export)
 
+        # Determine which channel was clicked
+        clicked_channel = self._get_channel_for_plot(plot)
+
         # Create event marker context menu
         menu = EventMarkerContextMenu(
             viewmodel=self._viewmodel,
@@ -630,6 +638,7 @@ class EventMarkerPlotIntegration(QObject):
             existing_actions=existing_actions,
             channel_names=self._get_channel_names(),
             show_derivative_on_drag=self._renderer.get_show_derivative_on_drag() if self._renderer else False,
+            clicked_channel=clicked_channel,
         )
 
         # Connect signals
@@ -644,6 +653,31 @@ class EventMarkerPlotIntegration(QObject):
         menu.delete_category_all_requested.connect(self._on_delete_category_all_requested)
         menu.derivative_toggle_changed.connect(self._on_derivative_toggle_changed)
         menu.generate_cta_requested.connect(self._on_generate_cta_requested)
+
+        # Add Performance Mode submenu
+        mw = self._plot_host._find_main_window() if hasattr(self._plot_host, '_find_main_window') else None
+        pm = getattr(mw, 'plot_manager', None) if mw else None
+        if pm:
+            menu.addSeparator()
+            perf_menu = menu.addMenu("Performance Mode")
+            override = pm._downsample_override
+            action_auto = perf_menu.addAction("Auto (Recommended)")
+            action_auto.setCheckable(True)
+            action_auto.setChecked(override is None)
+            action_fast = perf_menu.addAction("Fast (Downsample On)")
+            action_fast.setCheckable(True)
+            action_fast.setChecked(override is True)
+            action_full = perf_menu.addAction("Full Resolution (Downsample Off)")
+            action_full.setCheckable(True)
+            action_full.setChecked(override is False)
+            last_ms = pm._last_redraw_ms
+            if last_ms > 0:
+                perf_menu.addSeparator()
+                info = perf_menu.addAction(f"Last redraw: {last_ms:.0f}ms")
+                info.setEnabled(False)
+            action_auto.triggered.connect(lambda: pm.toggle_auto_downsample(force=None))
+            action_fast.triggered.connect(lambda: pm.toggle_auto_downsample(force=True))
+            action_full.triggered.connect(lambda: pm.toggle_auto_downsample(force=False))
 
         # Show menu
         menu.exec(QCursor.pos())
@@ -670,6 +704,7 @@ class EventMarkerPlotIntegration(QObject):
         menu.delete_all_sweep_requested.connect(self._on_delete_all_sweep_requested)
         menu.delete_category_sweep_requested.connect(self._on_delete_category_sweep_requested)
         menu.delete_category_all_requested.connect(self._on_delete_category_all_requested)
+        menu.edit_in_detector_requested.connect(self._on_edit_in_detector)
 
         # Show menu
         menu.exec(QCursor.pos())
@@ -709,27 +744,24 @@ class EventMarkerPlotIntegration(QObject):
         if not channel_names:
             return
 
-        # Create a wrapper to get signal data directly from plot items
-        # This ensures we get the exact data that's displayed
+        # Get full-resolution signal data for detection (not downsampled plot data)
         def get_signal_from_plot(channel: str):
-            # First try to get data directly from plot items (matches display exactly)
+            # Use raw data callback — plot items may be downsampled for display
+            if self._get_signal_data:
+                t_data, y_data = self._get_signal_data(channel, self._get_sweep_idx())
+                if t_data is not None and y_data is not None and len(t_data) > 1:
+                    sample_rate = 1.0 / (t_data[1] - t_data[0])
+                    return t_data, y_data, sample_rate
+
+            # Fallback to plot items if raw callback not available
             plot = self._find_plot_for_channel(channel)
             if plot is not None:
                 for item in plot.listDataItems():
                     if hasattr(item, 'getData'):
                         x_data, y_data = item.getData()
                         if x_data is not None and y_data is not None and len(x_data) > 100:
-                            # This is the main trace
                             sample_rate = 1.0 / (x_data[1] - x_data[0]) if len(x_data) > 1 else 1000.0
-                            # Add time offset back since plot shows offset-adjusted time
                             return x_data + self._time_offset, y_data, sample_rate
-
-            # Fallback to callback if plot data not available
-            if self._get_signal_data:
-                t_data, y_data = self._get_signal_data(channel, self._get_sweep_idx())
-                if t_data is not None and y_data is not None and len(t_data) > 1:
-                    sample_rate = 1.0 / (t_data[1] - t_data[0])
-                    return t_data, y_data, sample_rate
             return None
 
         # Create and show detection dialog
@@ -755,6 +787,74 @@ class EventMarkerPlotIntegration(QObject):
         self._clear_preview_markers()
         self._clear_threshold_line()
 
+    def _on_edit_in_detector(self, marker_id: str) -> None:
+        """Handle 'Edit Category in Detector' request from marker context menu."""
+        marker = self._viewmodel.store.get(marker_id)
+        if marker is None:
+            return
+
+        category = marker.category
+        sweep_idx = self._get_sweep_idx()
+
+        # Gather all markers of the same category in the current sweep
+        all_markers = self._viewmodel.get_markers_for_sweep(sweep_idx)
+        initial_events = []
+        for m in all_markers:
+            if m.category == category:
+                if m.is_paired and m.end_time is not None:
+                    initial_events.append((m.start_time, m.end_time))
+                else:
+                    # Single marker — create a small region around it
+                    initial_events.append((m.start_time, m.start_time + 0.5))
+        initial_events.sort(key=lambda e: e[0])
+
+        # Determine channel — try to find from the marker's stored data or use first channel
+        channel_names = self._get_channel_names() if self._get_channel_names else []
+        initial_channel = channel_names[0] if channel_names else None
+
+        if not channel_names:
+            return
+
+        # Get full-resolution signal data (same as _on_auto_detect_requested)
+        def get_signal_from_plot(channel: str):
+            if self._get_signal_data:
+                t_data, y_data = self._get_signal_data(channel, self._get_sweep_idx())
+                if t_data is not None and y_data is not None and len(t_data) > 1:
+                    sample_rate = 1.0 / (t_data[1] - t_data[0])
+                    return t_data, y_data, sample_rate
+            plot = self._find_plot_for_channel(channel)
+            if plot is not None:
+                for item in plot.listDataItems():
+                    if hasattr(item, 'getData'):
+                        x_data, y_data = item.getData()
+                        if x_data is not None and y_data is not None and len(x_data) > 100:
+                            sample_rate = 1.0 / (x_data[1] - x_data[0]) if len(x_data) > 1 else 1000.0
+                            return x_data + self._time_offset, y_data, sample_rate
+            return None
+
+        from dialogs.marker_detection_dialog import MarkerDetectionDialog
+
+        dialog = MarkerDetectionDialog(
+            viewmodel=self._viewmodel,
+            channel_names=channel_names,
+            get_signal_data=get_signal_from_plot,
+            sweep_idx=sweep_idx,
+            parent=None,
+            initial_channel=initial_channel,
+            time_offset=self._time_offset,
+            initial_events=initial_events,
+        )
+
+        dialog.preview_requested.connect(self._on_preview_events)
+        dialog.detection_complete.connect(self._on_detection_complete)
+        dialog.threshold_changed.connect(self._on_threshold_changed)
+        dialog.threshold_cleared.connect(self._clear_threshold_line)
+
+        dialog.exec()
+
+        self._clear_preview_markers()
+        self._clear_threshold_line()
+
     def _on_preview_events(self, events: list) -> None:
         """Show preview of detected events (temporary markers)."""
         # Clear any existing preview markers
@@ -762,10 +862,6 @@ class EventMarkerPlotIntegration(QObject):
 
         if not events:
             return
-
-        # Store preview items for later cleanup
-        if not hasattr(self, '_preview_items'):
-            self._preview_items = []
 
         # Get all plots
         plots = []
@@ -779,7 +875,6 @@ class EventMarkerPlotIntegration(QObject):
                 plots = [main_plot]
 
         # Draw preview regions on all plots
-        import pyqtgraph as pg
         for start, end in events:
             # Convert to display time
             display_start = start - self._time_offset
@@ -798,13 +893,10 @@ class EventMarkerPlotIntegration(QObject):
 
     def _clear_preview_markers(self) -> None:
         """Clear any preview markers from the plot."""
-        if not hasattr(self, '_preview_items'):
-            return
-
         for plot, item in self._preview_items:
             try:
                 plot.removeItem(item)
-            except:
+            except Exception:
                 pass
 
         self._preview_items.clear()
@@ -816,8 +908,6 @@ class EventMarkerPlotIntegration(QObject):
 
     def _on_threshold_changed(self, threshold: float, channel_name: str) -> None:
         """Show threshold line on the specified channel's plot."""
-        import pyqtgraph as pg
-
         # Clear existing threshold line
         self._clear_threshold_line()
 
@@ -825,11 +915,6 @@ class EventMarkerPlotIntegration(QObject):
         plot = self._find_plot_for_channel(channel_name)
         if plot is None:
             return
-
-        # Store threshold line for later cleanup
-        if not hasattr(self, '_threshold_line'):
-            self._threshold_line = None
-            self._threshold_plot = None
 
         # Create horizontal threshold line (orange dashed)
         pen = pg.mkPen(color=(255, 165, 0), width=2, style=Qt.PenStyle.DashLine)
@@ -847,10 +932,35 @@ class EventMarkerPlotIntegration(QObject):
         self._threshold_line = line
         self._threshold_plot = plot
 
+    def _get_channel_for_plot(self, plot) -> Optional[str]:
+        """Get the channel name displayed on a given plot panel.
+
+        The Y-axis label is set to config.name (the channel name) by
+        plot_manager._draw_channels_pyqtgraph, so reading it back is the
+        most reliable approach — it works regardless of which channels
+        the channel manager has made visible.
+        """
+        if plot is None:
+            return None
+
+        # Read the Y-axis label — this IS the channel name set by plot_manager
+        try:
+            left_axis = plot.getAxis('left')
+            if left_axis and hasattr(left_axis, 'labelText'):
+                label = left_axis.labelText
+                if label:
+                    # Strip pyqtgraph auto-appended scale factor like " (X0.001)"
+                    if '(' in label:
+                        label = label.split('(')[0].strip()
+                    if label:
+                        return label
+        except Exception:
+            pass
+
+        return None
+
     def _find_plot_for_channel(self, channel_name: str):
         """Find the plot panel that displays a specific channel."""
-        import pyqtgraph as pg
-
         # Get all plots
         plots = []
         if hasattr(self._plot_host, 'get_subplots'):
@@ -868,9 +978,13 @@ class EventMarkerPlotIntegration(QObject):
                 left_axis = plot.getAxis('left')
                 if left_axis and hasattr(left_axis, 'labelText'):
                     label = left_axis.labelText
-                    if label and channel_name in label:
+                    if not label:
+                        continue
+                    # Strip pyqtgraph auto-appended scale factor like " (X0.001)"
+                    clean_label = label.split('(')[0].strip() if '(' in label else label
+                    if clean_label == channel_name or channel_name in label:
                         return plot
-            except:
+            except Exception:
                 pass
 
         # Fallback: return first plot if only one exists
@@ -881,19 +995,40 @@ class EventMarkerPlotIntegration(QObject):
 
     def _clear_threshold_line(self) -> None:
         """Clear the threshold line from the plot."""
-        if hasattr(self, '_threshold_line') and self._threshold_line is not None:
+        if self._threshold_line is not None:
             try:
                 if self._threshold_plot:
                     self._threshold_plot.removeItem(self._threshold_line)
-            except:
+            except Exception:
                 pass
             self._threshold_line = None
             self._threshold_plot = None
 
     def _on_settings_requested(self) -> None:
-        """Handle settings request."""
-        # TODO: Show settings dialog
-        pass
+        """Handle settings request - show marker display settings dialog."""
+        from dialogs.marker_settings_dialog import MarkerSettingsDialog
+
+        if not self._renderer:
+            return
+
+        dialog = MarkerSettingsDialog(
+            parent=None,
+            single_width=self._renderer._default_single_width,
+            paired_width=self._renderer._default_paired_width,
+            fill_alpha=self._renderer._default_fill_alpha,
+        )
+        if dialog.exec() == MarkerSettingsDialog.DialogCode.Accepted:
+            self._renderer.set_default_widths(
+                single_width=dialog.single_width,
+                paired_width=dialog.paired_width,
+                fill_alpha=dialog.fill_alpha,
+            )
+            # Reset per-marker line_width overrides if requested
+            if dialog.apply_to_all:
+                for marker in self._viewmodel.store.all():
+                    if marker.line_width is not None:
+                        self._viewmodel.update_marker(marker.id, line_width=-1)  # -1 = reset to None
+            self.refresh()
 
     def _on_derivative_toggle_changed(self, enabled: bool) -> None:
         """Handle derivative overlay toggle change from context menu."""
@@ -906,7 +1041,13 @@ class EventMarkerPlotIntegration(QObject):
         self.generate_cta_requested.emit()
 
     def _show_export_dialog(self, plot) -> None:
-        """Show export dialog for saving plot as image."""
+        """Show export dialog for saving plot as image.
+
+        NOTE: This export functionality doesn't really belong in EventMarkerPlotIntegration.
+        It's here because this class intercepts the context menu. Consider refactoring to
+        move export methods (_show_export_dialog, _export_to_pdf, _export_all_csv) to the
+        plot host or a dedicated PlotExporter class.
+        """
         from PyQt6.QtWidgets import QFileDialog, QMessageBox, QInputDialog
 
         try:
@@ -1034,7 +1175,11 @@ class EventMarkerPlotIntegration(QObject):
             painter.end()
 
     def _export_all_csv(self, file_path: str) -> None:
-        """Export all channels' data to a single CSV file."""
+        """Export all channels' main trace data to a single CSV file.
+
+        Only exports the primary signal trace per panel, skipping overlay items
+        like scatter plots (peaks), event marker lines, and threshold indicators.
+        """
         import csv
 
         with open(file_path, 'w', newline='') as f:
@@ -1044,20 +1189,27 @@ class EventMarkerPlotIntegration(QObject):
                 # Get plot label
                 try:
                     label = plot.getAxis('left').labelText or f"Channel {i+1}"
-                except:
+                except Exception:
                     label = f"Channel {i+1}"
 
                 # Write header for this channel
                 writer.writerow([f"# {label}"])
                 writer.writerow(["Time", "Value"])
 
-                # Get data from plot items
+                # Find the main trace only — skip scatter plots, markers, overlays.
+                # The main trace is the PlotDataItem with the most points (>100).
+                best_x, best_y = None, None
+                best_len = 0
                 for item in plot.listDataItems():
                     if hasattr(item, 'getData'):
                         x_data, y_data = item.getData()
-                        if x_data is not None and y_data is not None:
-                            for x, y in zip(x_data, y_data):
-                                writer.writerow([x, y])
+                        if x_data is not None and y_data is not None and len(x_data) > best_len:
+                            best_x, best_y = x_data, y_data
+                            best_len = len(x_data)
+
+                if best_x is not None and best_len > 100:
+                    for x, y in zip(best_x, best_y):
+                        writer.writerow([x, y])
 
                 writer.writerow([])  # Blank line between channels
 
@@ -1102,7 +1254,7 @@ class EventMarkerPlotIntegration(QObject):
         if marker_id in self._renderer._paired_regions:
             for region in self._renderer._paired_regions[marker_id]:
                 for edge_line in region.lines:
-                    edge_line._maxMarkerWidth = grab_width
+                    edge_line._maxMarkerSize = grab_width
 
     def _on_note_requested(self, marker_id: str) -> None:
         """Handle add note request."""

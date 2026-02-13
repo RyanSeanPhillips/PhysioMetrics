@@ -20,14 +20,12 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QLabel, QTableWidgetItem, QHeaderView, QPushButton,
     QMenu, QSplitter, QGroupBox, QDoubleSpinBox, QSpinBox, QFrame, QScrollArea
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 from PyQt6.QtGui import QAction
 from PyQt6.uic import loadUi
 
 import pyqtgraph as pg
 from pyqtgraph import GraphicsLayoutWidget
-
-from PyQt6.QtCore import QEvent
 
 from core import photometry
 from .experiment_plotter import ExperimentPlotter
@@ -135,6 +133,7 @@ class DataAssemblyWidget(QWidget):
 
         # Preprocessed data (computed once after loading, used for all plotting/analysis)
         self._preprocessed = None  # Will be dict with common_time, fibers, ai_channels, etc.
+        self._processed_results = {}  # dF/F results keyed by 'exp_{idx}'
 
         # Track the NPZ path we loaded from (for save without prompt)
         self._loaded_npz_path: Optional[Path] = None
@@ -430,62 +429,114 @@ class DataAssemblyWidget(QWidget):
             self.btn_notes_view.setEnabled(self.file_paths.get('notes') is not None)
 
     def _load_and_preview_data(self):
-        """Load data files and update preview."""
+        """Load data files in background thread and update preview when done."""
         if not self.file_paths.get('fp_data'):
             return
 
-        self._show_progress("Loading photometry data...")
+        from PyQt6.QtWidgets import QProgressDialog
+        from core.file_load_worker import FileLoadWorker
 
-        try:
-            # Load FP data
+        # Show a proper modal progress dialog
+        self._load_progress = QProgressDialog(
+            "Loading photometry data...\nThis may take a moment for large files.",
+            None, 0, 0, self
+        )
+        self._load_progress.setWindowTitle("Loading Photometry Files")
+        self._load_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._load_progress.setMinimumDuration(0)
+        self._load_progress.setCancelButton(None)
+        self._load_progress.show()
+
+        # Bundle all I/O into a single function for the worker
+        file_paths = dict(self.file_paths)  # snapshot
+
+        def _load_all_csv_files(progress_callback=None):
+            """Load all CSV files (runs in background thread)."""
+            results = {'fp_data': None, 'ai_data': None, 'timestamps': None, 'ts_path': None}
+
+            # 1. Load FP data (the big one)
+            if progress_callback:
+                progress_callback(0, 3, "Loading photometry CSV...")
             t0 = time.perf_counter()
-            self._fp_data = photometry.load_photometry_csv(self.file_paths['fp_data'])
-            print(f"[Timing] Load FP data ({len(self._fp_data)} rows): {time.perf_counter() - t0:.2f}s")
+            results['fp_data'] = photometry.load_photometry_csv(file_paths['fp_data'])
+            print(f"[Timing] Load FP data ({len(results['fp_data'])} rows): {time.perf_counter() - t0:.2f}s")
 
-            # Populate column dropdowns
-            self._populate_fp_column_combos()
+            # 2. Load AI data if available
+            if file_paths.get('ai_data'):
+                if progress_callback:
+                    progress_callback(1, 3, "Loading AI data CSV...")
+                try:
+                    t0 = time.perf_counter()
+                    results['ai_data'] = photometry.load_ai_data_csv(
+                        file_paths['ai_data'], subsample=AI_SUBSAMPLE
+                    )
+                    print(f"[Timing] Load AI data (1/{AI_SUBSAMPLE} subsampled): {time.perf_counter() - t0:.2f}s")
+                except Exception as e:
+                    print(f"[Photometry] Error loading AI data: {e}")
 
-            # Update preview table
-            self._update_fp_preview_table()
+            # 3. Load timestamps
+            if progress_callback:
+                progress_callback(2, 3, "Loading timestamps...")
+            ts_path = file_paths.get('timestamps')
+            if not ts_path:
+                ts_path = photometry.find_timestamps_file(file_paths['fp_data'])
 
-        except Exception as e:
-            print(f"[Photometry] Error loading FP data: {e}")
-            QMessageBox.warning(self, "Load Error", f"Failed to load FP data:\n{str(e)}")
+            if ts_path:
+                try:
+                    t0 = time.perf_counter()
+                    results['timestamps'] = photometry.load_timestamps_csv(ts_path, subsample=AI_SUBSAMPLE)
+                    results['ts_path'] = ts_path
+                    print(f"[Timing] Load timestamps (1/{AI_SUBSAMPLE} subsampled): {time.perf_counter() - t0:.2f}s")
+                except Exception as e:
+                    print(f"[Photometry] Error loading timestamps: {e}")
+
+            return results
+
+        # Create and start worker
+        self._csv_load_worker = FileLoadWorker(_load_all_csv_files)
+        self._csv_load_worker.progress.connect(lambda c, t, m: (
+            self._load_progress.setLabelText(f"{m}\n{Path(file_paths['fp_data']).name}")
+        ))
+        self._csv_load_worker.finished.connect(self._on_csv_data_loaded)
+        self._csv_load_worker.error.connect(self._on_csv_load_error)
+        self._csv_load_worker.start()
+
+    def _on_csv_load_error(self, msg):
+        """Handle CSV loading errors."""
+        self._load_progress.close()
+        error_msg = msg.split('\n\n')[0] if '\n\n' in msg else msg
+        print(f"[Photometry] Error loading FP data: {error_msg}")
+        QMessageBox.warning(self, "Load Error", f"Failed to load FP data:\n{error_msg}")
+
+    def _on_csv_data_loaded(self, results):
+        """Completion handler after CSV files loaded in background (runs on main thread)."""
+        self._load_progress.close()
+
+        # Store loaded data
+        self._fp_data = results['fp_data']
+        if self._fp_data is None:
+            QMessageBox.warning(self, "Load Error", "Failed to load FP data.")
             return
 
-        # Load AI data if available
-        if self.file_paths.get('ai_data'):
-            try:
-                t0 = time.perf_counter()
-                self._ai_data = photometry.load_ai_data_csv(
-                    self.file_paths['ai_data'], subsample=AI_SUBSAMPLE
-                )
-                print(f"[Timing] Load AI data (1/{AI_SUBSAMPLE} subsampled): {time.perf_counter() - t0:.2f}s")
+        # Populate column dropdowns
+        self._populate_fp_column_combos()
 
-                self._populate_ai_column_controls()
-                self._update_ai_preview_table()
+        # Update preview table
+        self._update_fp_preview_table()
 
-            except Exception as e:
-                print(f"[Photometry] Error loading AI data: {e}")
+        # Store AI data if loaded
+        if results['ai_data'] is not None:
+            self._ai_data = results['ai_data']
+            self._populate_ai_column_controls()
+            self._update_ai_preview_table()
 
-        # Load timestamps
-        ts_path = self.file_paths.get('timestamps')
-        if not ts_path:
-            ts_path = photometry.find_timestamps_file(self.file_paths['fp_data'])
-
-        if ts_path:
-            try:
-                t0 = time.perf_counter()
-                self._timestamps = photometry.load_timestamps_csv(ts_path, subsample=AI_SUBSAMPLE)
-                print(f"[Timing] Load timestamps (1/{AI_SUBSAMPLE} subsampled): {time.perf_counter() - t0:.2f}s")
-
-                self.file_paths['timestamps'] = ts_path
+        # Store timestamps if loaded
+        if results['timestamps'] is not None:
+            self._timestamps = results['timestamps']
+            if results['ts_path']:
+                self.file_paths['timestamps'] = results['ts_path']
                 self._update_file_edits()
                 self._update_timestamps_info()
-
-            except Exception as e:
-                print(f"[Photometry] Error loading timestamps: {e}")
-                self._timestamps = None
 
         # Update channel table
         self._update_channel_table()
@@ -1822,39 +1873,51 @@ class DataAssemblyWidget(QWidget):
         fiber_columns = [col for col in data.columns
                         if col.startswith('G') and col[1:].isdigit()]
 
-        # Interpolate all fiber signals to common time (upsampling if using AI timebase)
-        fibers = {}
-        for fiber_col in fiber_columns:
-            iso_signal = data.loc[iso_mask, fiber_col].values
-            gcamp_signal = data.loc[gcamp_mask, fiber_col].values
+        # Batch extract all fiber data (one .loc[] call per mask instead of per-fiber)
+        iso_matrix = data.loc[iso_mask, fiber_columns].values    # shape: (n_iso, n_fibers)
+        gcamp_matrix = data.loc[gcamp_mask, fiber_columns].values  # shape: (n_gcamp, n_fibers)
 
-            # Skip if all NaN
-            if np.all(np.isnan(iso_signal)) or np.all(np.isnan(gcamp_signal)):
-                continue
+        # Normalize photometry time for interpolation (computed once, shared by all fibers)
+        if use_ai_timebase and ai_time_sec is not None:
+            iso_time_norm = iso_time_sec - ai_time_sec[0]
+            gcamp_time_norm = gcamp_time_sec - ai_time_sec[0]
+        else:
+            iso_time_norm = iso_time_sec - fp_t_start
+            gcamp_time_norm = gcamp_time_sec - fp_t_start
 
-            # Normalize photometry time for interpolation
-            # When using AI timebase, convert FP times to AI reference frame
-            if use_ai_timebase and ai_time_sec is not None:
-                # Convert FP times to be relative to AI start (same reference as common_time)
-                iso_time_norm = iso_time_sec - ai_time_sec[0]
-                gcamp_time_norm = gcamp_time_sec - ai_time_sec[0]
-            else:
-                # Using FP timebase - normalize to FP start
-                iso_time_norm = iso_time_sec - fp_t_start
-                gcamp_time_norm = gcamp_time_sec - fp_t_start
+        # Identify valid fibers (not all NaN) before parallel interpolation
+        valid_indices = []
+        for idx, fiber_col in enumerate(fiber_columns):
+            if not (np.all(np.isnan(iso_matrix[:, idx])) or np.all(np.isnan(gcamp_matrix[:, idx]))):
+                valid_indices.append(idx)
 
-            # Interpolate (upsample) to common time
+        # Parallel interpolation across fibers
+        def interp_fiber(idx):
+            """Interpolate a single fiber's iso and gcamp signals to common time."""
             try:
-                iso_interp = np.interp(common_time, iso_time_norm, iso_signal)
-                gcamp_interp = np.interp(common_time, gcamp_time_norm, gcamp_signal)
-
-                fibers[fiber_col] = {
-                    'iso': iso_interp,
-                    'gcamp': gcamp_interp
-                }
+                iso_interp = np.interp(common_time, iso_time_norm, iso_matrix[:, idx])
+                gcamp_interp = np.interp(common_time, gcamp_time_norm, gcamp_matrix[:, idx])
+                return (fiber_columns[idx], iso_interp, gcamp_interp)
             except Exception as e:
-                print(f"[Photometry] Error interpolating {fiber_col}: {e}")
-                continue
+                print(f"[Photometry] Error interpolating {fiber_columns[idx]}: {e}")
+                return None
+
+        fibers = {}
+        if len(valid_indices) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(len(valid_indices), 4)) as exe:
+                results = list(exe.map(interp_fiber, valid_indices))
+            for result in results:
+                if result is not None:
+                    fiber_col, iso_interp, gcamp_interp = result
+                    fibers[fiber_col] = {'iso': iso_interp, 'gcamp': gcamp_interp}
+        else:
+            # Single fiber — no threading overhead
+            for idx in valid_indices:
+                result = interp_fiber(idx)
+                if result is not None:
+                    fiber_col, iso_interp, gcamp_interp = result
+                    fibers[fiber_col] = {'iso': iso_interp, 'gcamp': gcamp_interp}
 
         if use_ai_timebase:
             print(f"[Photometry] Upsampled {len(fibers)} fiber signals from ~{fp_sample_rate:.1f} Hz to {sample_rate:.1f} Hz")
@@ -2423,6 +2486,8 @@ class DataAssemblyWidget(QWidget):
             if exp_idx in self._experiment_layouts:
                 # Only compute if this experiment hasn't been computed yet
                 # or if it's marked as needing recompute
+                if not hasattr(self, '_processed_results'):
+                    self._processed_results = {}
                 controls_key = f'exp_{exp_idx}'
                 needs_compute = (
                     controls_key not in self._processed_results or
@@ -2654,20 +2719,15 @@ class DataAssemblyWidget(QWidget):
         Returns:
             Interpolated signal at target timestamps
         """
-        from scipy import interpolate
-
         if len(source_time) < 2 or len(source_signal) < 2:
             return np.full(len(target_time), np.nan)
 
-        # Create interpolation function (linear interpolation)
         try:
-            f = interpolate.interp1d(
-                source_time, source_signal,
-                kind='linear',
-                bounds_error=False,
-                fill_value=np.nan
-            )
-            return f(target_time)
+            # np.interp is much faster than scipy.interp1d for linear interpolation
+            # (no object creation overhead, C implementation)
+            result = np.interp(target_time, source_time, source_signal,
+                              left=np.nan, right=np.nan)
+            return result
         except Exception as e:
             print(f"[Photometry] Interpolation error: {e}")
             return np.full(len(target_time), np.nan)
@@ -3750,43 +3810,63 @@ class DataAssemblyWidget(QWidget):
         return state
 
     def load_from_npz(self, npz_path: Path) -> bool:
-        """Load dialog state from an NPZ file.
+        """Load dialog state from an NPZ file using a background thread.
 
         Args:
             npz_path: Path to the NPZ file
 
         Returns:
-            True if loaded successfully, False otherwise
+            True (loading starts asynchronously; UI updated on completion)
         """
-        try:
-            # Clear existing plots first to prevent duplication on reopen
-            self._clear_all_plots()
+        from PyQt6.QtWidgets import QProgressDialog
+        from core.file_load_worker import FileLoadWorker
+
+        # Clear existing plots first to prevent duplication on reopen
+        self._clear_all_plots()
+
+        # Show progress dialog
+        self._npz_load_progress = QProgressDialog(
+            f"Loading photometry session...\n{npz_path.name}",
+            None, 0, 0, self
+        )
+        self._npz_load_progress.setWindowTitle("Loading Photometry NPZ")
+        self._npz_load_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._npz_load_progress.setMinimumDuration(0)
+        self._npz_load_progress.setCancelButton(None)
+        self._npz_load_progress.show()
+
+        self._loading_npz_path = npz_path
+
+        # Background function: read NPZ and extract all data into plain dicts/arrays
+        def _read_npz_data(progress_callback=None):
+            """Read and parse NPZ file (runs in background thread)."""
+            parsed = {
+                'file_paths': {},
+                'preprocessed': None,
+                'n_experiments': 1,
+                'dff_params': None,
+                'animal_ids': None,
+                'selected_fibers': None,
+                'experiment_assignments': None,
+            }
 
             with np.load(npz_path, allow_pickle=True) as data:
-                # Load file paths
+                # File paths
                 if 'file_paths' in data:
                     try:
-                        file_paths_dict = eval(str(data['file_paths'][0]))
-                        for key, path_str in file_paths_dict.items():
-                            if path_str:
-                                self.file_paths[key] = Path(path_str)
+                        parsed['file_paths'] = eval(str(data['file_paths'][0]))
                     except Exception as e:
                         print(f"[Photometry] Error loading file paths: {e}")
 
-                # Update file path display fields
-                self._update_file_edits()
-
-                # Load preprocessed data
+                # Preprocessed data
                 if 'common_time' in data:
                     common_time = np.array(data['common_time'])
                     sample_rate = float(data['sample_rate'][0]) if 'sample_rate' in data else 100.0
                     duration = float(data['duration'][0]) if 'duration' in data else 0
                     time_offset = float(data['time_offset'][0]) if 'time_offset' in data else 0
 
-                    # Get fiber columns
                     fiber_columns = list(data['fiber_columns']) if 'fiber_columns' in data else []
 
-                    # Build fibers dict
                     fibers = {}
                     for fiber_col in fiber_columns:
                         iso_key = f'fiber_{fiber_col}_iso'
@@ -3797,15 +3877,13 @@ class DataAssemblyWidget(QWidget):
                                 'gcamp': np.array(data[gcamp_key])
                             }
 
-                    # Build AI channels dict
                     ai_channels = {}
                     for key in data.files:
                         if key.startswith('ai_channel_'):
                             col_idx = key.replace('ai_channel_', '')
                             ai_channels[col_idx] = np.array(data[key])
 
-                    # Store preprocessed data
-                    self._preprocessed = {
+                    parsed['preprocessed'] = {
                         'common_time': common_time,
                         'sample_rate': sample_rate,
                         'duration': duration,
@@ -3814,80 +3892,193 @@ class DataAssemblyWidget(QWidget):
                         'ai_channels': ai_channels,
                     }
 
-                    # Populate fiber columns UI
-                    self._populate_fiber_columns_from_data(fibers)
+                # Experiment count
+                parsed['n_experiments'] = int(data['n_experiments'][0]) if 'n_experiments' in data else 1
 
-                    # Populate AI columns UI
-                    self._populate_ai_columns_from_data(ai_channels)
-
-                # Load number of experiments
-                n_experiments = int(data['n_experiments'][0]) if 'n_experiments' in data else 1
-                if hasattr(self, 'spin_num_experiments'):
-                    self.spin_num_experiments.blockSignals(True)
-                    self.spin_num_experiments.setValue(n_experiments)
-                    self.spin_num_experiments.blockSignals(False)
-
-                # Create experiment tabs and load dF/F parameters
-                self._update_experiment_tabs(n_experiments)
-
-                # Load dF/F parameters for each experiment
+                # dF/F params
                 if 'dff_params' in data:
                     try:
-                        dff_params = eval(str(data['dff_params'][0]))
-                        self._apply_dff_params(dff_params)
-                    except Exception as e:
-                        print(f"[Photometry] Error loading dF/F params: {e}")
+                        parsed['dff_params'] = eval(str(data['dff_params'][0]))
+                    except Exception:
+                        pass
 
-                # Load animal IDs
+                # Animal IDs
                 if 'animal_ids' in data:
                     try:
-                        animal_ids = eval(str(data['animal_ids'][0]))
-                        self._apply_animal_ids(animal_ids)
-                    except Exception as e:
-                        print(f"[Photometry] Error loading animal IDs: {e}")
+                        parsed['animal_ids'] = eval(str(data['animal_ids'][0]))
+                    except Exception:
+                        pass
 
-                # Load selected fibers
+                # Selected fibers
                 if 'selected_fibers' in data:
-                    selected = list(data['selected_fibers'])
-                    for fiber_col, info in self.fiber_columns.items():
-                        info['checkbox'].setChecked(fiber_col in selected)
+                    parsed['selected_fibers'] = list(data['selected_fibers'])
 
-                # Populate the channel table with fiber and AI channels
-                self._populate_channel_table_from_preprocessed()
-
-                # Load experiment assignments (AFTER table is populated)
+                # Experiment assignments
                 if 'experiment_assignments' in data:
                     try:
-                        assignments = eval(str(data['experiment_assignments'][0]))
-                        self._apply_experiment_assignments(assignments)
-                    except Exception as e:
-                        print(f"[Photometry] Error loading assignments: {e}")
+                        parsed['experiment_assignments'] = eval(str(data['experiment_assignments'][0]))
+                    except Exception:
+                        pass
 
-                # Render All Channels preview from preprocessed data
-                self._update_preview_plot()
+            return parsed
 
-                # Compute and display dF/F for each experiment
-                for exp_idx in range(n_experiments):
-                    self._compute_dff(exp_idx)
+        self._npz_read_worker = FileLoadWorker(_read_npz_data)
+        self._npz_read_worker.finished.connect(self._on_npz_data_loaded)
+        self._npz_read_worker.error.connect(self._on_npz_read_error)
+        self._npz_read_worker.start()
+        return True
 
-                # Switch to first experiment tab
-                if hasattr(self, 'preview_tab_widget') and n_experiments > 0:
-                    self.preview_tab_widget.setCurrentIndex(1)  # First experiment tab
+    def _on_npz_read_error(self, msg):
+        """Handle NPZ read errors."""
+        self._npz_load_progress.close()
+        error_msg = msg.split('\n\n')[0] if '\n\n' in msg else msg
+        print(f"[Photometry] Error loading NPZ: {error_msg}")
+        QMessageBox.warning(self, "Load Error", f"Failed to load NPZ:\n{error_msg}")
 
-                # Track the loaded path for save without prompt
-                self._loaded_npz_path = npz_path
+    def _on_npz_data_loaded(self, parsed):
+        """Apply parsed NPZ data to the UI (runs on main thread)."""
+        self._npz_load_progress.close()
+        npz_path = self._loading_npz_path
 
-                # Store original state hash for change detection
-                self._original_state_hash = self._compute_state_hash()
+        try:
+            # Apply file paths
+            for key, path_str in parsed['file_paths'].items():
+                if path_str:
+                    self.file_paths[key] = Path(path_str)
 
-                print(f"[Photometry] Loaded state from: {npz_path}")
-                return True
+            self._update_file_edits()
+
+            # Apply preprocessed data
+            if parsed['preprocessed'] is not None:
+                self._preprocessed = parsed['preprocessed']
+                self._populate_fiber_columns_from_data(parsed['preprocessed']['fibers'])
+                self._populate_ai_columns_from_data(parsed['preprocessed']['ai_channels'])
+
+            # Experiment count
+            n_experiments = parsed['n_experiments']
+            if hasattr(self, 'spin_num_experiments'):
+                self.spin_num_experiments.blockSignals(True)
+                self.spin_num_experiments.setValue(n_experiments)
+                self.spin_num_experiments.blockSignals(False)
+
+            self._update_experiment_tabs(n_experiments)
+
+            # dF/F params
+            if parsed['dff_params'] is not None:
+                try:
+                    self._apply_dff_params(parsed['dff_params'])
+                except Exception as e:
+                    print(f"[Photometry] Error loading dF/F params: {e}")
+
+            # Animal IDs
+            if parsed['animal_ids'] is not None:
+                try:
+                    self._apply_animal_ids(parsed['animal_ids'])
+                except Exception as e:
+                    print(f"[Photometry] Error loading animal IDs: {e}")
+
+            # Selected fibers
+            if parsed['selected_fibers'] is not None:
+                for fiber_col, info in self.fiber_columns.items():
+                    info['checkbox'].setChecked(fiber_col in parsed['selected_fibers'])
+
+            # Populate channel table
+            self._populate_channel_table_from_preprocessed()
+
+            # Experiment assignments (AFTER table is populated)
+            if parsed['experiment_assignments'] is not None:
+                try:
+                    self._apply_experiment_assignments(parsed['experiment_assignments'])
+                except Exception as e:
+                    print(f"[Photometry] Error loading assignments: {e}")
+
+            # Render preview
+            self._update_preview_plot()
+
+            # Compute dF/F for each experiment
+            for exp_idx in range(n_experiments):
+                self._compute_dff(exp_idx)
+
+            # Switch to first experiment tab
+            if hasattr(self, 'preview_tab_widget') and n_experiments > 0:
+                self.preview_tab_widget.setCurrentIndex(1)
+
+            # Track the loaded path
+            self._loaded_npz_path = npz_path
+
+            # Store original state hash for change detection
+            self._original_state_hash = self._compute_state_hash()
+
+            print(f"[Photometry] Loaded state from: {npz_path}")
+
+            # Reload raw CSV data in background to populate preview tables
+            # (NPZ only stores preprocessed data, not raw CSV content)
+            if self.file_paths.get('fp_data') and Path(self.file_paths['fp_data']).exists():
+                self._reload_raw_csvs_for_preview()
 
         except Exception as e:
-            print(f"[Photometry] Error loading NPZ: {e}")
+            print(f"[Photometry] Error applying NPZ data: {e}")
             import traceback
             traceback.print_exc()
-            return False
+
+    def _reload_raw_csvs_for_preview(self):
+        """Reload raw CSV files in background to populate preview tables after NPZ load."""
+        from core.file_load_worker import FileLoadWorker
+        from core import photometry
+
+        file_paths = dict(self.file_paths)
+
+        def _load_raw_csvs(progress_callback=None):
+            """Load raw CSV files for preview (runs in background thread)."""
+            results = {'fp_data': None, 'ai_data': None, 'timestamps': None}
+
+            t0 = time.perf_counter()
+            results['fp_data'] = photometry.load_photometry_csv(file_paths['fp_data'])
+            print(f"[Timing] Reload FP data for preview ({len(results['fp_data'])} rows): {time.perf_counter() - t0:.2f}s")
+
+            if file_paths.get('ai_data') and Path(file_paths['ai_data']).exists():
+                try:
+                    t0 = time.perf_counter()
+                    results['ai_data'] = photometry.load_ai_data_csv(
+                        file_paths['ai_data'], subsample=AI_SUBSAMPLE
+                    )
+                    print(f"[Timing] Reload AI data for preview: {time.perf_counter() - t0:.2f}s")
+                except Exception as e:
+                    print(f"[Photometry] Error reloading AI data: {e}")
+
+            ts_path = file_paths.get('timestamps')
+            if ts_path and Path(ts_path).exists():
+                try:
+                    t0 = time.perf_counter()
+                    results['timestamps'] = photometry.load_timestamps_csv(ts_path, subsample=AI_SUBSAMPLE)
+                    print(f"[Timing] Reload timestamps for preview: {time.perf_counter() - t0:.2f}s")
+                except Exception as e:
+                    print(f"[Photometry] Error reloading timestamps: {e}")
+
+            return results
+
+        self._raw_csv_worker = FileLoadWorker(_load_raw_csvs)
+        self._raw_csv_worker.finished.connect(self._on_raw_csvs_reloaded)
+        self._raw_csv_worker.error.connect(lambda msg: print(f"[Photometry] Raw CSV reload failed: {msg.split(chr(10))[0]}"))
+        self._raw_csv_worker.start()
+
+    def _on_raw_csvs_reloaded(self, results):
+        """Apply reloaded raw CSV data to preview tables (runs on main thread)."""
+        if results['fp_data'] is not None:
+            self._fp_data = results['fp_data']
+            self._populate_fp_column_combos()
+            self._update_fp_preview_table()
+
+        if results['ai_data'] is not None:
+            self._ai_data = results['ai_data']
+            self._populate_ai_column_controls()
+            self._update_ai_preview_table()
+
+        if results['timestamps'] is not None:
+            self._timestamps = results['timestamps']
+            self._update_timestamps_info()
+
+        print("[Photometry] Raw CSV data reloaded for preview tables")
 
     def load_from_cached_data(self, cached_data: Dict, npz_path: Path = None,
                                initial_params: Optional[Dict] = None,

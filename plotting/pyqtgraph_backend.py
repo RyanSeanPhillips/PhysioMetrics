@@ -876,106 +876,52 @@ class PyQtGraphPlotHost(QWidget):
 
         # Draw histogram as horizontal bars (sideways histogram along Y-axis)
         # Each bar extends from x_min to x_min + count, at height bin_center
+        # Create ALL bars once; during threshold drag we just update pen/brush (no recreate)
         self._histogram_items = []
+        self._histogram_bar_centers = []  # bin center for each bar item
 
-        below_mask = bin_centers < current_threshold
-        above_mask = bin_centers >= current_threshold
+        gray_pen = pg.mkPen(128, 128, 128, 200, width=0.5)
+        gray_brush = pg.mkBrush(128, 128, 128, 180)
+        red_pen = pg.mkPen(220, 60, 60, 200, width=0.5)
+        red_brush = pg.mkBrush(220, 60, 60, 180)
 
-        def draw_horizontal_bars(bins_y, counts_x, color):
-            """Draw horizontal bar chart - bars extend rightward from x_min."""
-            items = []
-            for y_center, width in zip(bins_y, counts_x):
-                if width > 0:
-                    # Create a rectangle: x from x_min to x_min+width, y from y_center-h/2 to y_center+h/2
-                    y_bottom = y_center - bin_height / 2
-                    y_top = y_center + bin_height / 2
-                    # Draw as a closed polygon (rectangle)
-                    x_pts = [x_min, x_min + width, x_min + width, x_min, x_min]
-                    y_pts = [y_bottom, y_bottom, y_top, y_top, y_bottom]
-                    bar = pg.PlotCurveItem(x_pts, y_pts,
-                                          pen=pg.mkPen(color[0], color[1], color[2], 200, width=0.5),
-                                          brush=pg.mkBrush(*color),
-                                          fillLevel=None)
-                    bar.setZValue(99)
-                    main_plot.addItem(bar)
-                    items.append(bar)
-            return items
+        for y_center, width in zip(bin_centers, scaled_counts):
+            if width > 0:
+                y_bottom = y_center - bin_height / 2
+                y_top = y_center + bin_height / 2
+                x_pts = [x_min, x_min + width, x_min + width, x_min, x_min]
+                y_pts = [y_bottom, y_bottom, y_top, y_top, y_bottom]
+                is_above = y_center >= current_threshold
+                bar = pg.PlotCurveItem(x_pts, y_pts,
+                                      pen=red_pen if is_above else gray_pen,
+                                      brush=red_brush if is_above else gray_brush,
+                                      fillLevel=None)
+                bar.setZValue(99)
+                main_plot.addItem(bar)
+                self._histogram_items.append(bar)
+                self._histogram_bar_centers.append(y_center)
 
-        # Gray bars for below threshold
-        if np.any(below_mask):
-            below_bins = bin_centers[below_mask]
-            below_counts = scaled_counts[below_mask]
-            gray_items = draw_horizontal_bars(below_bins, below_counts, (128, 128, 128, 180))
-            self._histogram_items.extend(gray_items)
-
-        # Red bars for above threshold
-        if np.any(above_mask):
-            above_bins = bin_centers[above_mask]
-            above_counts = scaled_counts[above_mask]
-            red_items = draw_horizontal_bars(above_bins, above_counts, (220, 60, 60, 180))
-            self._histogram_items.extend(red_items)
-
-        print(f"[histogram] Created histogram with {len(self._histogram_items)} items, "
-              f"{np.sum(below_mask)} below threshold, {np.sum(above_mask)} above threshold")
+        print(f"[histogram] Created histogram with {len(self._histogram_items)} bars")
 
     def _update_threshold_histogram_colors(self, new_threshold):
-        """Update histogram colors based on new threshold (fast update during drag)."""
-        import numpy as np
-
-        main_plot = self._get_main_plot()
-        if main_plot is None:
+        """Update histogram bar colors in-place based on new threshold (no object recreation)."""
+        if not hasattr(self, '_histogram_items') or not self._histogram_items:
+            return
+        if not hasattr(self, '_histogram_bar_centers') or not self._histogram_bar_centers:
             return
 
-        # Check if we have cached histogram data
-        if (not hasattr(self, '_histogram_bin_centers') or
-            self._histogram_bin_centers is None):
-            return
+        gray_pen = pg.mkPen(128, 128, 128, 200, width=0.5)
+        gray_brush = pg.mkBrush(128, 128, 128, 180)
+        red_pen = pg.mkPen(220, 60, 60, 200, width=0.5)
+        red_brush = pg.mkBrush(220, 60, 60, 180)
 
-        bin_centers = self._histogram_bin_centers
-        scaled_counts = self._histogram_scaled_counts
-        x_min = self._histogram_x_min
-        bin_height = self._histogram_bin_height
-
-        # Clear existing histogram items
-        self._clear_threshold_histogram()
-
-        # Redraw with new colors using horizontal bars
-        self._histogram_items = []
-
-        below_mask = bin_centers < new_threshold
-        above_mask = bin_centers >= new_threshold
-
-        def draw_horizontal_bars(bins_y, counts_x, color):
-            """Draw horizontal bar chart - bars extend rightward from x_min."""
-            items = []
-            for y_center, width in zip(bins_y, counts_x):
-                if width > 0:
-                    y_bottom = y_center - bin_height / 2
-                    y_top = y_center + bin_height / 2
-                    x_pts = [x_min, x_min + width, x_min + width, x_min, x_min]
-                    y_pts = [y_bottom, y_bottom, y_top, y_top, y_bottom]
-                    bar = pg.PlotCurveItem(x_pts, y_pts,
-                                          pen=pg.mkPen(color[0], color[1], color[2], 200, width=0.5),
-                                          brush=pg.mkBrush(*color),
-                                          fillLevel=None)
-                    bar.setZValue(99)
-                    main_plot.addItem(bar)
-                    items.append(bar)
-            return items
-
-        # Gray bars for below threshold
-        if np.any(below_mask):
-            below_bins = bin_centers[below_mask]
-            below_counts = scaled_counts[below_mask]
-            gray_items = draw_horizontal_bars(below_bins, below_counts, (128, 128, 128, 180))
-            self._histogram_items.extend(gray_items)
-
-        # Red bars for above threshold
-        if np.any(above_mask):
-            above_bins = bin_centers[above_mask]
-            above_counts = scaled_counts[above_mask]
-            red_items = draw_horizontal_bars(above_bins, above_counts, (220, 60, 60, 180))
-            self._histogram_items.extend(red_items)
+        for bar, y_center in zip(self._histogram_items, self._histogram_bar_centers):
+            if y_center >= new_threshold:
+                bar.setPen(red_pen)
+                bar.setBrush(red_brush)
+            else:
+                bar.setPen(gray_pen)
+                bar.setBrush(gray_brush)
 
     def _clear_threshold_histogram(self):
         """Remove threshold histogram from plot."""
@@ -1624,6 +1570,34 @@ class PyQtGraphPlotHost(QWidget):
 
         menu.addSeparator()
 
+        # Performance mode submenu
+        perf_menu = menu.addMenu("Performance Mode")
+        _mw = self._find_main_window()
+        pm = _mw.plot_manager if _mw and hasattr(_mw, 'plot_manager') else None
+        if pm:
+            override = pm._downsample_override
+            action_perf_auto = perf_menu.addAction("Auto (Recommended)")
+            action_perf_auto.setCheckable(True)
+            action_perf_auto.setChecked(override is None)
+
+            action_perf_on = perf_menu.addAction("Fast (Downsample On)")
+            action_perf_on.setCheckable(True)
+            action_perf_on.setChecked(override is True)
+
+            action_perf_off = perf_menu.addAction("Full Resolution (Downsample Off)")
+            action_perf_off.setCheckable(True)
+            action_perf_off.setChecked(override is False)
+
+            last_ms = pm._last_redraw_ms
+            if last_ms > 0:
+                perf_menu.addSeparator()
+                info_action = perf_menu.addAction(f"Last redraw: {last_ms:.0f}ms")
+                info_action.setEnabled(False)
+        else:
+            action_perf_auto = action_perf_on = action_perf_off = None
+
+        menu.addSeparator()
+
         # Export Plot
         action_export = menu.addAction("Export Plot...")
         action_export.setToolTip("Export plot to PDF, SVG, or PNG (vector graphics)")
@@ -1639,6 +1613,24 @@ class PyQtGraphPlotHost(QWidget):
             plot.autoRange()
         elif action == action_export:
             self.show_export_dialog()
+        elif pm and action == action_perf_auto:
+            pm._downsample_override = None
+            msg = "Performance mode: auto"
+            if hasattr(_mw, '_log_status_message'):
+                _mw._log_status_message(msg, 4000)
+            pm.redraw_main_plot()
+        elif pm and action == action_perf_on:
+            pm._downsample_override = True
+            msg = "Performance mode: fast (peak-preserving downsampling)"
+            if hasattr(_mw, '_log_status_message'):
+                _mw._log_status_message(msg, 4000)
+            pm.redraw_main_plot()
+        elif pm and action == action_perf_off:
+            pm._downsample_override = False
+            msg = "Performance mode: full resolution"
+            if hasattr(_mw, '_log_status_message'):
+                _mw._log_status_message(msg, 4000)
+            pm.redraw_main_plot()
 
     def _auto_scale_y_for_plot(self, plot):
         """Auto-scale Y-axis for a specific plot to fit visible X range data."""
@@ -1704,12 +1696,55 @@ class PyQtGraphPlotHost(QWidget):
 
     # ------- Helper Methods -------
     def _downsample(self, t, y, max_points):
-        """Downsample data for performance."""
-        if max_points is None or max_points <= 0 or len(t) <= max_points:
-            return np.asarray(t), np.asarray(y)
+        """Downsample data using min-max envelope to preserve visual peaks/valleys.
 
-        step = max(1, len(t) // max_points)
-        return np.asarray(t)[::step], np.asarray(y)[::step]
+        For each bucket, keeps both the min and max points, ensuring that peaks and
+        valleys are never missed (unlike naive stride which can skip extrema).
+        Falls back to no downsampling if data fits within max_points.
+        """
+        t = np.asarray(t)
+        y = np.asarray(y)
+        n = len(t)
+        if max_points is None or max_points <= 0 or n <= max_points:
+            return t, y
+
+        # Min-max envelope: split into buckets, keep min and max from each
+        # This gives 2 points per bucket, so use half as many buckets
+        n_buckets = max(1, max_points // 2)
+        # Compute bucket boundaries as integer indices
+        boundaries = np.linspace(0, n, n_buckets + 1, dtype=np.intp)
+
+        # Pre-allocate output (2 points per bucket + first and last)
+        out_idx = np.empty(n_buckets * 2 + 2, dtype=np.intp)
+        out_idx[0] = 0  # Always keep first point
+        pos = 1
+
+        for b in range(n_buckets):
+            start = boundaries[b]
+            end = boundaries[b + 1]
+            if start >= end:
+                continue
+
+            seg = y[start:end]
+            i_min = start + np.argmin(seg)
+            i_max = start + np.argmax(seg)
+
+            # Add in time order to preserve correct line drawing
+            if i_min <= i_max:
+                out_idx[pos] = i_min
+                out_idx[pos + 1] = i_max
+            else:
+                out_idx[pos] = i_max
+                out_idx[pos + 1] = i_min
+            pos += 2
+
+        out_idx[pos] = n - 1  # Always keep last point
+        pos += 1
+
+        # np.unique sorts and deduplicates — correct since indices are in ascending order
+        indices = np.unique(out_idx[:pos])
+
+        return t[indices], y[indices]
 
     def _clear_all_items(self):
         """Clear all plot items."""

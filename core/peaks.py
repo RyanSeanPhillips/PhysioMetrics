@@ -78,30 +78,6 @@ def _zero_crossings_left_indices(x: np.ndarray, eps: float = 0.0) -> np.ndarray:
     return np.where(s[:-1] != s[1:])[0]
 
 
-def _first_zc_before(x: np.ndarray, idx: int, left_bound: int, eps: float = 0.0) -> int | None:
-    """
-    Nearest zero crossing before 'idx' (>= left_bound). Returns the sample
-    on the right side of the crossing (i+1), or None if none found.
-    """
-    zc = _zero_crossings_left_indices(x, eps=eps)
-    zc = zc[(zc >= left_bound) & (zc < idx)]
-    if zc.size:
-        return int(zc[-1] + 1)
-    return None
-
-
-def _first_zc_after(x: np.ndarray, idx: int, right_bound: int, eps: float = 0.0) -> int | None:
-    """
-    Nearest zero crossing after 'idx' (<= right_bound). Returns the sample
-    on the right side of the crossing (i+1), or None if none found.
-    """
-    zc = _zero_crossings_left_indices(x, eps=eps)
-    zc = zc[(zc > idx) & (zc <= right_bound)]
-    if zc.size:
-        return int(zc[0] + 1)
-    return None
-
-
 #                           peaks_idx: np.ndarray,
 #     """
 #     Given a processed 1D signal y and inspiratory peaks (indices),
@@ -945,82 +921,6 @@ def label_peaks_by_threshold(
     }
 
 
-def _first_zc_before(x: np.ndarray, idx: int, left_bound: int,
-                     exclude_lo: int | None = None, exclude_hi: int | None = None) -> int | None:
-    """
-    Nearest zero crossing before 'idx' (>= left_bound). Returns the sample index
-    on the right side of the crossing (i+1). If exclude_* are given, crossings
-    whose right index (i+1) falls inside [exclude_lo, exclude_hi] are ignored.
-    """
-    zc = _zero_crossings_left_indices(x)  # left indices of crossings
-    mask = (zc >= left_bound) & (zc < idx)
-    if exclude_lo is not None and exclude_hi is not None:
-        right_idx = zc + 1
-        mask &= ~((right_idx >= exclude_lo) & (right_idx <= exclude_hi))
-    zc = zc[mask]
-    if zc.size:
-        return int(zc[-1] + 1)
-    return None
-
-
-def _first_zc_after(x: np.ndarray, idx: int, right_bound: int,
-                    exclude_lo: int | None = None, exclude_hi: int | None = None) -> int | None:
-    """
-    Nearest zero crossing after 'idx' (<= right_bound). Returns the sample index
-    on the right side of the crossing (i+1). If exclude_* are given, crossings
-    whose right index (i+1) falls inside [exclude_lo, exclude_hi] are ignored.
-    """
-    zc = _zero_crossings_left_indices(x)
-    mask = (zc > idx) & (zc <= right_bound)
-    if exclude_lo is not None and exclude_hi is not None:
-        right_idx = zc + 1
-        mask &= ~((right_idx >= exclude_lo) & (right_idx <= exclude_hi))
-    zc = zc[mask]
-    if zc.size:
-        return int(zc[0] + 1)
-    return None
-
-# --- zero-crossing helpers ---
-def _first_zero_cross(y: np.ndarray, i_start: int, i_end: int) -> int | None:
-    """
-    Return the **sample index** of the first zero crossing in y between
-    [i_start+1, i_end) (inclusive start+1, exclusive end). If y equals 0 at any
-    sample first, that index is returned. None if no crossing.
-    """
-    i_start = int(max(0, i_start))
-    i_end   = int(min(len(y), i_end))
-    if i_end - i_start < 2:
-        return None
-
-    seg  = y[i_start:i_end]
-    # exact zero first?
-    z = np.where(seg == 0.0)[0]
-    if z.size:
-        return i_start + int(z[0])
-
-    sgn = np.sign(seg)
-    prod = sgn[:-1] * sgn[1:]
-    # sign change across adjacent samples -> crossing between k and k+1; return k+1
-    k = np.where(prod < 0)[0]
-    if k.size:
-        return i_start + int(k[0] + 1)
-    return None
-
-
-def _first_zero_cross_either(y: np.ndarray, i_start: int, i_end: int, sr_hz: float) -> int | None:
-    """
-    Earliest of: zero-cross in y OR zero-cross in dy/dt, in (i_start, i_end).
-    """
-    iz_y  = _first_zero_cross(y, i_start, i_end)
-    # dy/dt using uniform dt=1/sr (good enough here)
-    # d1 = np.gradient(y, 1.0 / float(sr_hz)) if sr_hz else np.gradient(y)
-    d1 = _d1_lowpass20(y, sr_hz)
-    iz_d = _first_zero_cross(d1, i_start, i_end)
-    cands = [i for i in (iz_y, iz_d) if i is not None]
-    return min(cands) if cands else None
-
-
-
 def _first_zc_before_from_zc(zc_left: np.ndarray, idx: int, left_bound: int,
                              exclude_lo: int | None = None, exclude_hi: int | None = None) -> int | None:
     """
@@ -1163,6 +1063,13 @@ def compute_peak_candidate_metrics(y: np.ndarray,
     peak_amplitudes = y[all_peak_indices]
     median_amplitude = np.median(peak_amplitudes) if len(peak_amplitudes) > 0 else 1.0
 
+    # Pre-compute inter-peak valley values once (avoids redundant argmin/min per pair)
+    # valley_vals[i] = min value of y between peak i and peak i+1
+    n_peaks = len(all_peak_indices)
+    valley_vals = np.full(n_peaks - 1, np.nan) if n_peaks > 1 else np.array([])
+    for j in range(n_peaks - 1):
+        valley_vals[j] = np.min(y[all_peak_indices[j]:all_peak_indices[j + 1]])
+
     metrics = []
 
     for i, pk_idx in enumerate(all_peak_indices):
@@ -1171,7 +1078,7 @@ def compute_peak_candidate_metrics(y: np.ndarray,
 
         # Left/right neighbors
         prev_pk = all_peak_indices[i-1] if i > 0 else None
-        next_pk = all_peak_indices[i+1] if i < len(all_peak_indices)-1 else None
+        next_pk = all_peak_indices[i+1] if i < n_peaks-1 else None
 
         # === TIMING METRICS ===
 
@@ -1186,16 +1093,16 @@ def compute_peak_candidate_metrics(y: np.ndarray,
         gap_to_next_normalized = gap_to_next / median_gap if gap_to_next is not None else None
 
         # === TROUGH METRICS (for merge detection) ===
+        # Uses pre-computed valley values (one min per peak pair, not four)
 
         # Trough depth to PREVIOUS peak
         trough_depth_prev = None
         trough_ratio_prev = None
         trough_value_prev = None
         if prev_pk is not None:
-            trough_idx_prev = prev_pk + np.argmin(y[prev_pk:pk_idx])
-            trough_value_prev = y[trough_idx_prev]
-            trough_depth_prev = min(y[prev_pk], y[pk_idx]) - trough_value_prev
-            combined_amplitude = (y[prev_pk] + y[pk_idx]) / 2
+            trough_value_prev = valley_vals[i - 1]
+            trough_depth_prev = min(y[prev_pk], peak_amplitude) - trough_value_prev
+            combined_amplitude = (y[prev_pk] + peak_amplitude) / 2
             trough_ratio_prev = trough_depth_prev / combined_amplitude if combined_amplitude > 0 else 0
 
         # Trough depth to NEXT peak
@@ -1203,10 +1110,9 @@ def compute_peak_candidate_metrics(y: np.ndarray,
         trough_ratio_next = None
         trough_value_next = None
         if next_pk is not None:
-            trough_idx_next = pk_idx + np.argmin(y[pk_idx:next_pk])
-            trough_value_next = y[trough_idx_next]
-            trough_depth_next = min(y[pk_idx], y[next_pk]) - trough_value_next
-            combined_amplitude = (y[pk_idx] + y[next_pk]) / 2
+            trough_value_next = valley_vals[i]
+            trough_depth_next = min(peak_amplitude, y[next_pk]) - trough_value_next
+            combined_amplitude = (peak_amplitude + y[next_pk]) / 2
             trough_ratio_next = trough_depth_next / combined_amplitude if combined_amplitude > 0 else 0
 
         # === PROMINENCE ASYMMETRY ===
@@ -1214,14 +1120,12 @@ def compute_peak_candidate_metrics(y: np.ndarray,
         # Left prominence (relative to previous trough)
         left_prominence = None
         if prev_pk is not None:
-            left_trough = np.min(y[prev_pk:pk_idx])
-            left_prominence = y[pk_idx] - left_trough
+            left_prominence = peak_amplitude - trough_value_prev
 
         # Right prominence (relative to next trough)
         right_prominence = None
         if next_pk is not None:
-            right_trough = np.min(y[pk_idx:next_pk])
-            right_prominence = y[pk_idx] - right_trough
+            right_prominence = peak_amplitude - trough_value_next
 
         # Asymmetry ratio (0 = highly asymmetric, 1 = symmetric)
         prom_asymmetry = None

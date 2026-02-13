@@ -1333,8 +1333,6 @@ def interpolate_to_common_time(
     Returns:
         Tuple of (common_time, iso_aligned, gcamp_aligned, sample_rate_hz)
     """
-    from scipy import interpolate as scipy_interp
-
     if len(iso_time) == 0 or len(gcamp_time) == 0:
         return np.array([]), np.array([]), np.array([]), 0.0
 
@@ -1362,13 +1360,9 @@ def interpolate_to_common_time(
         fs = 20.0  # Default assumption
 
     # Interpolate both signals to common time base
-    iso_interp = scipy_interp.interp1d(iso_time, iso_signal, kind='linear',
-                                        bounds_error=False, fill_value='extrapolate')
-    gcamp_interp = scipy_interp.interp1d(gcamp_time, gcamp_signal, kind='linear',
-                                          bounds_error=False, fill_value='extrapolate')
-
-    iso_aligned = iso_interp(common_time)
-    gcamp_aligned = gcamp_interp(common_time)
+    # np.interp is faster than scipy.interp1d for linear interpolation (no object overhead)
+    iso_aligned = np.interp(common_time, iso_time, iso_signal)
+    gcamp_aligned = np.interp(common_time, gcamp_time, gcamp_signal)
 
     return common_time, iso_aligned, gcamp_aligned, fs
 
@@ -1395,8 +1389,8 @@ def lowpass_filter(signal: np.ndarray, cutoff_hz: float, sample_rate_hz: float,
         return signal
 
     normalized_cutoff = cutoff_hz / nyq
-    b, a = scipy_signal.butter(order, normalized_cutoff, btype='low')
-    filtered = scipy_signal.filtfilt(b, a, signal)
+    sos = scipy_signal.butter(order, normalized_cutoff, btype='low', output='sos')
+    filtered = scipy_signal.sosfiltfilt(sos, signal)
     print(f"[Photometry] Applied {cutoff_hz} Hz low-pass filter (fs={sample_rate_hz:.1f} Hz)")
     return filtered
 

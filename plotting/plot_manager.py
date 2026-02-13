@@ -91,6 +91,10 @@ class ChannelPanelConfig:
 class PlotManager:
     """Manages all plotting operations for the main application window."""
 
+    # Adaptive performance thresholds
+    _SLOW_REDRAW_MS = 100   # If redraw takes longer, consider enabling auto-downsample
+    _SLOW_COUNT_TRIGGER = 3  # Number of consecutive slow redraws before auto-enabling
+
     def __init__(self, main_window):
         """
         Initialize the PlotManager.
@@ -104,6 +108,75 @@ class PlotManager:
 
         # Threshold line artists (for manual removal)
         self._thresh_line_artists = []
+
+        # Adaptive performance: auto-downsample when rendering is slow
+        # None = auto (system decides), True = forced on, False = forced off
+        self._downsample_override = None
+        self._auto_downsample_active = True  # On by default — visually identical, much faster
+        self._consecutive_slow_redraws = 0
+        self._last_redraw_ms = 0
+
+    @property
+    def use_auto_downsample(self) -> bool:
+        """Whether autoDownsample should be enabled on trace curves."""
+        if self._downsample_override is not None:
+            return self._downsample_override
+        return self._auto_downsample_active
+
+    _SENTINEL = object()  # Used to distinguish "no argument" from explicit None
+
+    def toggle_auto_downsample(self, force=_SENTINEL):
+        """Toggle or set auto-downsample mode.
+
+        Args:
+            force: True = force on, False = force off, None = auto mode,
+                   omitted = cycle through modes.
+        """
+        if force is not self._SENTINEL:
+            # Explicit value: None=auto, True=on, False=off
+            self._downsample_override = force
+        elif self._downsample_override is None:
+            # Currently in auto mode → force off
+            self._downsample_override = False
+        elif self._downsample_override:
+            # Currently forced on → switch to auto
+            self._downsample_override = None
+        else:
+            # Currently forced off → force on
+            self._downsample_override = True
+
+        mode = "auto" if self._downsample_override is None else ("on" if self._downsample_override else "off")
+        active = self.use_auto_downsample
+        msg = f"Performance mode: {mode} (downsampling {'active' if active else 'inactive'})"
+        if hasattr(self.window, '_log_status_message'):
+            self.window._log_status_message(msg, 4000)
+        print(f"[perf] {msg}")
+
+        # Redraw with new setting
+        self.redraw_main_plot()
+
+    def _adapt_performance(self, elapsed_ms: float):
+        """Auto-detect slow rendering and enable downsampling if needed."""
+        # Only adapt in auto mode
+        if self._downsample_override is not None:
+            return
+
+        if elapsed_ms > self._SLOW_REDRAW_MS:
+            self._consecutive_slow_redraws += 1
+            if not self._auto_downsample_active and self._consecutive_slow_redraws >= self._SLOW_COUNT_TRIGGER:
+                self._auto_downsample_active = True
+                n_pts = 0
+                try:
+                    any_ch = next(iter(self.state.sweeps.values()))
+                    n_pts = any_ch.shape[0]
+                except (StopIteration, AttributeError):
+                    pass
+                msg = f"Performance mode auto-enabled ({elapsed_ms:.0f}ms redraw, {n_pts:,} pts/ch) — right-click plot to adjust"
+                if hasattr(self.window, '_log_status_message'):
+                    self.window._log_status_message(msg, 6000)
+                print(f"[perf] {msg}")
+        else:
+            self._consecutive_slow_redraws = 0
 
     def redraw_main_plot(self, use_unified: bool = True):
         """
@@ -189,7 +262,12 @@ class PlotManager:
 
         # Check backend and route to appropriate implementation
         if st.plotting_backend == 'pyqtgraph':
+            import time as _time
+            t0 = _time.perf_counter()
             self._draw_channels_pyqtgraph(channel_configs, grid_mode)
+            elapsed_ms = (_time.perf_counter() - t0) * 1000
+            self._last_redraw_ms = elapsed_ms
+            self._adapt_performance(elapsed_ms)
             return
 
         # Matplotlib implementation
@@ -505,11 +583,7 @@ class PlotManager:
         # Because Y2 viewbox is added to the scene separately and won't be cleared by layout.clear()
         self._cleanup_y2_elements_pyqtgraph()
 
-        # Reset ALL stale references BEFORE clearing layout to avoid GraphicsLayoutWidget AttributeError
-        # (items try to access their old parent during clear() and callbacks fire with stale refs)
-        self.plot_host.ax_main = None
-        self.plot_host.ax_event = None
-        self.plot_host.plot_widget = None
+        # Reset overlay references (these are always rebuilt per-sweep)
         self.plot_host._main_trace = None
         self.plot_host._peak_scatter = None
         self.plot_host._onset_scatter = None
@@ -525,63 +599,84 @@ class PlotManager:
         self.plot_host._y2_update_connection = None
         self.plot_host._span_items = []
         self.plot_host._region_overlays = []
-        self.plot_host._subplots = []
 
-        # Clear and rebuild layout
-        # Suppress PyQtGraph's internal 'autoRangeEnabled' AttributeError during clear()
-        # This happens when PlotDataItems try to access their view during reparenting
-        # It's a known PyQtGraph issue that doesn't affect functionality
-        import sys
-        import io
-        old_stderr = sys.stderr
-        sys.stderr = io.StringIO()  # Temporarily suppress stderr
-        try:
-            self.plot_host.graphics_layout.clear()
-        finally:
-            sys.stderr = old_stderr  # Restore stderr
-        self.plot_host.graphics_layout.setBackground(bg_color)
+        # --- Layout reuse: skip expensive PlotItem create/destroy if panel config unchanged ---
+        # Build a fingerprint from channel configs to detect layout changes
+        layout_key = (is_dark, tuple((c.name, c.channel_type, c.is_primary_pleth, c.is_event_channel,
+                                      c.show_stim_spans, c.show_overlays, c.apply_filtering)
+                                     for c in channel_configs))
+        can_reuse = (
+            hasattr(self, '_layout_key') and self._layout_key == layout_key
+            and hasattr(self.plot_host, '_subplots') and len(self.plot_host._subplots) == n_panels
+        )
 
-        # Create subplots
-        plots = []
+        if can_reuse:
+            # Fast path: reuse existing PlotItem objects, just clear their data items
+            plots = list(self.plot_host._subplots)
+            for plot in plots:
+                plot.clear()  # Removes curves/scatter/regions but keeps axes, labels, x-link
+        else:
+            # Full rebuild: panel config changed (different channels, added/removed panels)
+            self.plot_host.ax_main = None
+            self.plot_host.ax_event = None
+            self.plot_host.plot_widget = None
+            self.plot_host._subplots = []
+
+            # Suppress PyQtGraph's internal 'autoRangeEnabled' AttributeError during clear()
+            import sys
+            import io
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
+            try:
+                self.plot_host.graphics_layout.clear()
+            finally:
+                sys.stderr = old_stderr
+            self.plot_host.graphics_layout.setBackground(bg_color)
+
+            plots = []
+            for i, config in enumerate(channel_configs):
+                plot = self.plot_host.graphics_layout.addPlot(row=i, col=0)
+                plot.showGrid(x=False, y=False)
+                plot.setMenuEnabled(False)
+                plot.vb.setMenuEnabled(False)
+
+                plot.getAxis('left').setTextPen(text_color)
+                plot.getAxis('left').setPen(text_color)
+                if i == n_panels - 1:
+                    plot.getAxis('bottom').setTextPen(text_color)
+                    plot.getAxis('bottom').setPen(text_color)
+
+                plot.getAxis('left').setWidth(70)
+
+                if i < n_panels - 1:
+                    plot.hideAxis('bottom')
+
+                if hasattr(self.plot_host, '_configure_plot_mouse'):
+                    self.plot_host._configure_plot_mouse(plot)
+
+                plots.append(plot)
+                self.plot_host._subplots.append(plot)
+
+                plot.setLabel('left', config.name)
+
+            # Batch x-link: block signals to avoid O(N) cascade during setup
+            if len(plots) > 1:
+                for plot in plots[1:]:
+                    plot.vb.blockSignals(True)
+                for plot in plots[1:]:
+                    plot.setXLink(plots[0])
+                for plot in plots[1:]:
+                    plot.vb.blockSignals(False)
+
+            self._layout_key = layout_key
+
+        # --- Populate data into plots (runs on both fast and full path) ---
         ax_main = None
         ax_event = None
         primary_y_data = None
 
         for i, config in enumerate(channel_configs):
-            # Create plot widget
-            plot = self.plot_host.graphics_layout.addPlot(row=i, col=0)
-            plot.showGrid(x=False, y=False)
-
-            # Disable context menu for right-click editing support
-            plot.setMenuEnabled(False)
-            plot.vb.setMenuEnabled(False)  # Also disable on ViewBox
-
-            # Style axes (only style bottom axis on last panel since others are hidden)
-            plot.getAxis('left').setTextPen(text_color)
-            plot.getAxis('left').setPen(text_color)
-            if i == n_panels - 1:
-                plot.getAxis('bottom').setTextPen(text_color)
-                plot.getAxis('bottom').setPen(text_color)
-
-            # Set fixed Y-axis width to ensure all panels align visually
-            # This is critical for x-axis synchronization - setXLink() only syncs data range,
-            # not visual positioning. Different label widths would cause misalignment.
-            plot.getAxis('left').setWidth(70)
-
-            # Link x-axis to first plot
-            if i > 0 and plots:
-                plot.setXLink(plots[0])
-
-            # Hide x-axis entirely except on bottom panel (they share x-axis via setXLink)
-            if i < n_panels - 1:
-                plot.hideAxis('bottom')
-
-            # Configure mouse behavior: X-axis only zoom, shift required for pan
-            if hasattr(self.plot_host, '_configure_plot_mouse'):
-                self.plot_host._configure_plot_mouse(plot)
-
-            plots.append(plot)
-            self.plot_host._subplots.append(plot)
+            plot = plots[i]
 
             # Track primary Pleth axis
             if config.is_primary_pleth:
@@ -611,7 +706,6 @@ class PlotManager:
                 primary_y_data = y_data
 
             # Choose trace color based on channel type and name
-            # Check for photometry channels first (by name)
             ch_lower = config.name.lower()
             if 'iso' in ch_lower or '415' in ch_lower:
                 channel_trace_color = photometry_colors['iso']
@@ -626,12 +720,13 @@ class PlotManager:
             else:
                 channel_trace_color = trace_color
 
-            # Plot trace with optimal settings for signal fidelity
-            # clipToView=True only sends visible data to GPU (main performance optimization)
-            # autoDownsample=False gives full resolution for visible data
-            # Use width=1.2 for slightly thicker lines that render better
-            plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
-                      clipToView=True, autoDownsample=False)
+            # Plot trace: clipToView sends only visible data to GPU
+            curve = plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
+                              clipToView=True)
+            # Peak-preserving downsampling: reduces points during zoom/pan while
+            # keeping min/max per bucket so peaks/valleys are never lost
+            if self.use_auto_downsample:
+                curve.setDownsampling(auto=True, method='peak')
 
             # Add zero line
             zero_line = pg.InfiniteLine(pos=0, angle=0,
@@ -642,21 +737,17 @@ class PlotManager:
             # Add stim spans (blue background) if configured
             if config.show_stim_spans:
                 all_spans = opto_spans_plot if opto_spans_plot else list(spans_plot)
-                # Use subtle border pen to ensure thin pulses remain visible at all zoom levels
                 stim_pen = pg.mkPen(70, 130, 220, 150, width=1)
                 for (t0_span, t1_span) in all_spans:
                     if t1_span > t0_span:
                         region = pg.LinearRegionItem(
                             values=[t0_span, t1_span],
-                            brush=pg.mkBrush(70, 130, 220, 100),  # Brighter blue with alpha
-                            pen=stim_pen,  # Border helps with aliasing on thin regions
+                            brush=pg.mkBrush(70, 130, 220, 100),
+                            pen=stim_pen,
                             movable=False
                         )
                         region.setZValue(-10)
                         plot.addItem(region)
-
-            # Set labels
-            plot.setLabel('left', config.name)
 
         # Set title on first plot
         if plots:

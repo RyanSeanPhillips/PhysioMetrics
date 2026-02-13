@@ -5,7 +5,7 @@ This module contains the core data structures for event markers,
 designed to be independent of any UI framework (Qt-free).
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from enum import Enum
 import uuid
@@ -70,19 +70,23 @@ class EventMarker:
     @property
     def duration(self) -> float:
         """Duration of marker (0 for single markers)."""
-        if self.marker_type == MarkerType.PAIRED and self.end_time is not None:
+        if self.is_paired and self.end_time is not None:
             return self.end_time - self.start_time
         return 0.0
 
     @property
     def is_paired(self) -> bool:
-        """Check if this is a paired (region) marker."""
-        return self.marker_type == MarkerType.PAIRED
+        """Check if this is a paired (region) marker.
+        Uses value comparison for hot-reload safety (enum identity can change).
+        """
+        return getattr(self.marker_type, 'value', None) == "paired"
 
     @property
     def is_single(self) -> bool:
-        """Check if this is a single (point) marker."""
-        return self.marker_type == MarkerType.SINGLE
+        """Check if this is a single (point) marker.
+        Uses value comparison for hot-reload safety.
+        """
+        return getattr(self.marker_type, 'value', None) == "single"
 
     @property
     def center_time(self) -> float:
@@ -185,6 +189,6 @@ class EventMarker:
 
     def __repr__(self) -> str:
         cond_str = f"[{self.condition}]" if self.condition else ""
-        if self.is_paired:
+        if self.is_paired and self.end_time is not None:
             return f"EventMarker({self.id}, {self.category}/{self.label}{cond_str}, {self.start_time:.3f}-{self.end_time:.3f}s)"
         return f"EventMarker({self.id}, {self.category}/{self.label}{cond_str}, {self.start_time:.3f}s)"

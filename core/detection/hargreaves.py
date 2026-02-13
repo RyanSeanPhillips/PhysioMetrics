@@ -149,7 +149,7 @@ class HargreavesDetector(EventDetector):
             ),
             ParamSpec(
                 name='min_duration',
-                label='Min Duration',
+                label='Min Event Length',
                 param_type=ParamType.FLOAT,
                 default=0.2,
                 min_value=0.0,
@@ -157,9 +157,9 @@ class HargreavesDetector(EventDetector):
                 step=0.05,
                 unit='s',
                 tooltip=(
-                    "Minimum event duration - shorter events are discarded.\n\n"
-                    "Use this to filter out brief noise spikes that cross the\n"
-                    "threshold but don't represent real responses.\n\n"
+                    "Events shorter than this are discarded.\n\n"
+                    "For paired markers, this is the time between the start\n"
+                    "edge and end edge of each pair.\n\n"
                     "• 0.0s = Keep all events regardless of duration\n"
                     "• 0.2s = Ignore events shorter than 200ms\n"
                     "• 1.0s = Only keep events lasting at least 1 second\n\n"
@@ -168,7 +168,7 @@ class HargreavesDetector(EventDetector):
             ),
             ParamSpec(
                 name='min_gap',
-                label='Min Gap',
+                label='Min Time Between Events',
                 param_type=ParamType.FLOAT,
                 default=1.0,
                 min_value=0.0,
@@ -176,9 +176,9 @@ class HargreavesDetector(EventDetector):
                 step=0.1,
                 unit='s',
                 tooltip=(
-                    "Minimum time between events - closer events are merged.\n\n"
-                    "If two events occur within this time window, they are\n"
-                    "combined into a single event spanning both.\n\n"
+                    "Events closer together than this are merged into one.\n\n"
+                    "For paired markers, this is the gap between the end of\n"
+                    "one pair and the start of the next.\n\n"
                     "• 0.0s = Never merge events\n"
                     "• 1.0s = Merge events less than 1 second apart\n"
                     "• 5.0s = Only separate events if >5 seconds apart\n\n"

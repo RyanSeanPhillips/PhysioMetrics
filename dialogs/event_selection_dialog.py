@@ -6,13 +6,16 @@ Particularly useful for Hargreaves experiments where detection finds 30 events
 but only 10 (one animal's stims) are needed.
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QLabel, QSpinBox, QCheckBox,
+    QLabel, QSpinBox, QCheckBox, QComboBox,
 )
 from PyQt6.QtCore import Qt
+
+# Condition presets shared with detection dialog
+CONDITION_PRESETS = ["", "baseline", "treatment", "iso", "awake", "pre", "post"]
 
 
 class EventSelectionDialog(QDialog):
@@ -22,15 +25,26 @@ class EventSelectionDialog(QDialog):
         self,
         events: List[Tuple[float, float]],
         parent=None,
+        default_condition: Optional[str] = None,
     ):
+        """
+        Initialize the event selection dialog.
+
+        Args:
+            events: List of (start_time, end_time) tuples
+            parent: Parent widget
+            default_condition: Default condition to pre-select in condition combos
+        """
         super().__init__(parent)
         self._events = events
+        self._default_condition = default_condition or ""
+        self._condition_combos: List[QComboBox] = []
         self._setup_ui()
         self._populate_table()
 
     def _setup_ui(self) -> None:
         self.setWindowTitle(f"Select Events ({len(self._events)} detected)")
-        self.setMinimumSize(500, 400)
+        self.setMinimumSize(600, 400)
         layout = QVBoxLayout(self)
 
         # Info label
@@ -43,9 +57,14 @@ class EventSelectionDialog(QDialog):
 
         # Table
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["#", "Start (s)", "End (s)", "Duration (s)"])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(["#", "Start (s)", "End (s)", "Duration (s)", "Condition"])
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         layout.addWidget(self._table)
 
@@ -91,6 +110,7 @@ class EventSelectionDialog(QDialog):
     def _populate_table(self) -> None:
         self._table.setRowCount(len(self._events))
         self._checkboxes: List[QCheckBox] = []
+        self._condition_combos = []
 
         for i, (start, end) in enumerate(self._events):
             # Checkbox in first column
@@ -115,6 +135,21 @@ class EventSelectionDialog(QDialog):
             item_dur.setFlags(item_dur.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._table.setItem(i, 3, item_dur)
 
+            # Condition combo
+            cond_combo = QComboBox()
+            cond_combo.setEditable(True)
+            for preset in CONDITION_PRESETS:
+                cond_combo.addItem(preset if preset else "(none)")
+            # Set default condition
+            if self._default_condition:
+                idx = cond_combo.findText(self._default_condition)
+                if idx >= 0:
+                    cond_combo.setCurrentIndex(idx)
+                else:
+                    cond_combo.setCurrentText(self._default_condition)
+            self._condition_combos.append(cond_combo)
+            self._table.setCellWidget(i, 4, cond_combo)
+
     def _select_all(self) -> None:
         for cb in self._checkboxes:
             cb.setChecked(True)
@@ -128,10 +163,17 @@ class EventSelectionDialog(QDialog):
         for i, cb in enumerate(self._checkboxes):
             cb.setChecked(i < n)
 
-    def get_selected_events(self) -> List[Tuple[float, float]]:
-        """Return only the events whose checkboxes are checked."""
-        return [
-            self._events[i]
-            for i, cb in enumerate(self._checkboxes)
-            if cb.isChecked()
-        ]
+    def get_selected_events(self) -> List[Tuple[float, float, Optional[str]]]:
+        """Return selected events with their per-event condition.
+
+        Returns:
+            List of (start_time, end_time, condition_or_None) tuples.
+        """
+        result = []
+        for i, cb in enumerate(self._checkboxes):
+            if cb.isChecked():
+                condition = self._condition_combos[i].currentText().strip()
+                if condition == "(none)":
+                    condition = ""
+                result.append((*self._events[i], condition or None))
+        return result

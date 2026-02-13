@@ -130,6 +130,7 @@ class EventMarkerContextMenu(QMenu):
         existing_actions: Optional[List[QAction]] = None,
         channel_names: Optional[List[str]] = None,
         show_derivative_on_drag: bool = False,
+        clicked_channel: Optional[str] = None,
     ):
         """
         Initialize the context menu.
@@ -141,6 +142,7 @@ class EventMarkerContextMenu(QMenu):
             existing_actions: Existing actions to preserve (Auto Scale Y, etc.)
             channel_names: Available channel names for auto-detection
             show_derivative_on_drag: Current state of derivative overlay toggle
+            clicked_channel: Channel name of the subplot that was right-clicked
         """
         super().__init__(parent)
         self._viewmodel = viewmodel
@@ -148,6 +150,7 @@ class EventMarkerContextMenu(QMenu):
         self._existing_actions = existing_actions or []
         self._channel_names = channel_names or []
         self._show_derivative_on_drag = show_derivative_on_drag
+        self._clicked_channel = clicked_channel
 
         self._build_menu()
 
@@ -171,22 +174,16 @@ class EventMarkerContextMenu(QMenu):
 
         self.addSeparator()
 
-        # Auto-Detect submenu
+        # Auto-Detect Events (uses the clicked channel directly)
         if self._channel_names:
-            auto_menu = self.addMenu("Auto-Detect on Channel...")
-            for channel in self._channel_names:
-                action = auto_menu.addAction(channel)
-                action.triggered.connect(lambda checked, ch=channel: self.auto_detect_requested.emit(ch))
-            auto_menu.addSeparator()
-            auto_menu.addAction("Configure Defaults...")
+            target_channel = self._clicked_channel or self._channel_names[0]
+            auto_detect = self.addAction(f"Auto-Detect on {target_channel}")
+            auto_detect.setToolTip(f"Open detection dialog for channel: {target_channel}")
+            auto_detect.triggered.connect(lambda: self.auto_detect_requested.emit(target_channel))
 
         # Separator before existing actions
         if self._existing_actions:
             self.addSeparator()
-            # Add a visual divider
-            separator_label = QAction(self)
-            separator_label.setSeparator(True)
-            self.addAction(separator_label)
 
             # Add existing actions (Auto Scale Y, Reset View, etc.)
             for action in self._existing_actions:
@@ -312,6 +309,7 @@ class MarkerContextMenu(QMenu):
     delete_all_sweep_requested = pyqtSignal()  # delete all in current sweep
     delete_category_sweep_requested = pyqtSignal(str)  # category - delete category in current sweep
     delete_category_all_requested = pyqtSignal(str)    # category - delete category in all sweeps
+    edit_in_detector_requested = pyqtSignal(str)  # marker_id — open detection dialog with this marker's category
 
     def __init__(
         self,
@@ -369,13 +367,14 @@ class MarkerContextMenu(QMenu):
 
         # Line Thickness submenu
         thickness_menu = self.addMenu("Line Thickness")
-        current_width = marker.line_width  # None means default
-        for label_text, width in [("Thin (1px)", 1), ("Medium (2px)", 2), ("Thick (3px)", 3), ("Extra Thick (4px)", 4)]:
+        current_width = marker.line_width  # None means use default (0 = cosmetic/thinnest)
+        for label_text, width in [("Thinnest (cosmetic)", 0), ("Thin (1px)", 1), ("Medium (2px)", 2), ("Thick (3px)", 3)]:
             action = thickness_menu.addAction(label_text)
             action.setCheckable(True)
+            # Width 0 is the default when marker.line_width is None
             action.setChecked(
-                (current_width == width) or
-                (current_width is None and width == (1 if marker.is_single else 2))
+                (current_width is not None and current_width == width) or
+                (current_width is None and width == 0)
             )
             action.triggered.connect(
                 lambda checked, w=width: self.line_width_changed.emit(self._marker_id, w)
@@ -393,6 +392,13 @@ class MarkerContextMenu(QMenu):
         # Add Note
         note = self.addAction("Add Note...")
         note.triggered.connect(lambda: self.note_requested.emit(self._marker_id))
+
+        self.addSeparator()
+
+        # Edit Category in Detector
+        edit_detector = self.addAction("Edit Category in Detector...")
+        edit_detector.setToolTip("Open detection dialog with all markers of this category loaded for editing")
+        edit_detector.triggered.connect(lambda: self.edit_in_detector_requested.emit(self._marker_id))
 
         self.addSeparator()
 

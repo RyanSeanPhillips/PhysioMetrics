@@ -6,6 +6,7 @@ This module renders event markers on PyQtGraph plots as vertical lines
 """
 
 from typing import Optional, List, Dict, Tuple, Callable
+import re
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtGui import QColor, QPen, QBrush
@@ -176,6 +177,11 @@ class MarkerRenderer:
         self._marker_numbers: Dict[str, int] = {}  # Marker ID -> sequential number
         self._next_marker_number = 1
 
+        # Default line widths (can be changed via settings dialog)
+        self._default_single_width: int = 0  # 0 = cosmetic pen (always 1px regardless of zoom)
+        self._default_paired_width: int = 0  # 0 = cosmetic pen (thin edges)
+        self._default_fill_alpha: int = 30
+
         # Time offset for display (when stimulus channel normalizes time to stim onset)
         # Markers are stored in absolute time, display time = absolute - offset
         self._time_offset: float = 0.0
@@ -193,6 +199,12 @@ class MarkerRenderer:
         # Connect to viewmodel signals
         self._viewmodel.markers_changed.connect(self._on_markers_changed)
         self._viewmodel.selection_changed.connect(self._on_selection_changed)
+
+    def set_default_widths(self, single_width: int = 1, paired_width: int = 2, fill_alpha: int = 30):
+        """Update default line widths. Call refresh() on plot_integration after."""
+        self._default_single_width = single_width
+        self._default_paired_width = paired_width
+        self._default_fill_alpha = fill_alpha
 
     def _get_plots(self) -> List[pg.PlotItem]:
         """Get all plots to render on."""
@@ -227,7 +239,6 @@ class MarkerRenderer:
             Tuple of (channel_name, scale_factor). Scale factor defaults to 1.0.
             Example: "AI-0 (X0.001)" returns ("AI-0", 0.001)
         """
-        import re
         try:
             left_axis = plot.getAxis('left')
             if left_axis and hasattr(left_axis, 'labelText'):
@@ -373,7 +384,11 @@ class MarkerRenderer:
             if marker_id in self._intersection_items:
                 stored = self._intersection_items[marker_id]
                 plot = stored[0]
-                items = stored[1] if isinstance(stored[1], list) else [stored[1], stored[2] if len(stored) > 2 else None]
+                # stored[1] is either a list of items or a single item (with optional stored[2])
+                if isinstance(stored[1], list):
+                    items = stored[1]
+                else:
+                    items = list(stored[1:])
                 for item in items:
                     safe_remove_item(plot, item)
                 del self._intersection_items[marker_id]
@@ -381,7 +396,10 @@ class MarkerRenderer:
             # Clear all
             for mid, stored in list(self._intersection_items.items()):
                 plot = stored[0]
-                items = stored[1] if isinstance(stored[1], list) else [stored[1], stored[2] if len(stored) > 2 else None]
+                if isinstance(stored[1], list):
+                    items = stored[1]
+                else:
+                    items = list(stored[1:])
                 for item in items:
                     safe_remove_item(plot, item)
             self._intersection_items.clear()
@@ -768,18 +786,18 @@ class MarkerRenderer:
         # Calculate display time (subtract offset from absolute time)
         display_time = marker.start_time - self._time_offset
 
-        # Determine line width: custom > default (1)
-        base_width = marker.line_width if marker.line_width is not None else 1
+        # Determine line width: custom > default
+        base_width = marker.line_width if marker.line_width is not None else self._default_single_width
 
         for plot in plots:
             pen = QPen(color)
             pen.setWidth(base_width)
             pen.setStyle(Qt.PenStyle.SolidLine)
 
-            # Create hover pen - brighter color, noticeably thicker
+            # Create hover pen - brighter color, same width (grab area is _maxMarkerSize)
             hover_color = color.lighter(150)
             hover_pen = QPen(hover_color)
-            hover_pen.setWidth(max(base_width + 2, 3))  # At least 3px on hover
+            hover_pen.setWidth(base_width)  # Same width, color change only
 
             line = SyncedInfiniteLine(
                 pos=display_time,
@@ -791,6 +809,8 @@ class MarkerRenderer:
             )
             line.setZValue(1000)  # High z-value to ensure visibility
             line.marker_id = marker.id
+            # Widen hover/grab area without affecting visual line width
+            line._maxMarkerSize = 20
 
             # Connect signals for interaction on all lines
             # sigPositionChanged fires during drag for real-time sync
@@ -915,13 +935,13 @@ class MarkerRenderer:
         display_start = marker.start_time - self._time_offset
         display_end = end_time - self._time_offset
 
-        # Determine edge line width: custom > default (2)
-        edge_width = marker.line_width if marker.line_width is not None else 2
+        # Determine edge line width: custom > default
+        edge_width = marker.line_width if marker.line_width is not None else self._default_paired_width
 
         for plot in plots:
             # Create brush with alpha for fill
             fill_color = QColor(color)
-            fill_color.setAlpha(30)  # Light fill so edges are visible
+            fill_color.setAlpha(self._default_fill_alpha)  # Light fill so edges are visible
             brush = QBrush(fill_color)
 
             # Edge pen with configurable width
@@ -948,10 +968,10 @@ class MarkerRenderer:
             # Customize the internal edge lines' hover pen to match single markers
             # and increase the grab tolerance (hoverable width around the line)
             for edge_line in region.lines:
-                # Wider + brighter hover pen for clear visual feedback
+                # Brighter hover pen - same width, color change only (grab area is _maxMarkerSize)
                 hover_color = color.lighter(150)
                 wide_hover_pen = QPen(hover_color)
-                wide_hover_pen.setWidth(max(edge_width + 2, 4))  # Noticeably wider on hover
+                wide_hover_pen.setWidth(edge_width)  # Same width, color change only
                 edge_line.setHoverPen(wide_hover_pen)
                 # Edge pen with configurable width
                 edge_pen = QPen(color)
@@ -963,8 +983,8 @@ class MarkerRenderer:
                     edge_line.span = (0, 1)  # Full span
                 # Set a wider hover bounds - this is the key to easier grabbing
                 edge_line.setBounds([None, None])
-                # PyQtGraph InfiniteLine uses _maxMarkerWidth for hover detection
-                edge_line._maxMarkerWidth = 20  # Increase from default ~5
+                # PyQtGraph InfiniteLine uses _maxMarkerSize for bounding rect / hover area
+                edge_line._maxMarkerSize = 20  # Increase from default 0
                 # Set hover cursor to indicate draggable
                 edge_line.setCursor(Qt.CursorShape.SizeHorCursor)
 
@@ -1153,7 +1173,7 @@ class MarkerRenderer:
                 for plot in plots:
                     try:
                         plot.removeItem(highlight)
-                    except:
+                    except Exception:
                         pass
         self._selection_highlights.clear()
 

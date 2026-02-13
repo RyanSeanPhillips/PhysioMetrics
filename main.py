@@ -246,6 +246,11 @@ class MainWindow(QMainWindow):
         ctrl_r_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         ctrl_r_shortcut.activated.connect(self._on_hot_reload)
 
+        # Add Ctrl+D shortcut to toggle adaptive downsampling (performance mode)
+        ctrl_d_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
+        ctrl_d_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        ctrl_d_shortcut.activated.connect(lambda: self.plot_manager.toggle_auto_downsample())
+
         # --- Wire channel selection (immediate application) ---
         self.AnalyzeChanSelect.currentIndexChanged.connect(self.on_analyze_channel_changed)
         self.StimChanSelect.currentIndexChanged.connect(self.on_stim_channel_changed)
@@ -296,6 +301,7 @@ class MainWindow(QMainWindow):
         self._redraw_timer.timeout.connect(self.redraw_main_plot)
 
         # filters: commit-on-finish, not per key
+        # (update_and_redraw also calls _on_filter_changed for telemetry/Apply button)
         self.LowPassVal.editingFinished.connect(self.update_and_redraw)
         self.HighPassVal.editingFinished.connect(self.update_and_redraw)
         self.FilterOrderSpin.valueChanged.connect(self.update_and_redraw)
@@ -304,14 +310,6 @@ class MainWindow(QMainWindow):
         self.LowPass_checkBox.toggled.connect(self.update_and_redraw)
         self.HighPass_checkBox.toggled.connect(self.update_and_redraw)
         self.InvertSignal_checkBox.toggled.connect(self.update_and_redraw)
-
-        # Re-enable Apply button when filters change (peaks need to be recalculated)
-        self.LowPassVal.editingFinished.connect(self._on_filter_changed)
-        self.HighPassVal.editingFinished.connect(self._on_filter_changed)
-        self.FilterOrderSpin.valueChanged.connect(self._on_filter_changed)
-        self.LowPass_checkBox.toggled.connect(self._on_filter_changed)
-        self.HighPass_checkBox.toggled.connect(self._on_filter_changed)
-        self.InvertSignal_checkBox.toggled.connect(self._on_filter_changed)
 
         # Spectral Analysis button
         self.SpectralAnalysisButton.clicked.connect(self.on_spectral_analysis_clicked)
@@ -425,14 +423,21 @@ class MainWindow(QMainWindow):
             self.yautoscale_checkBox.setChecked(self.state.use_percentile_autoscale)
             self.yautoscale_checkBox.toggled.connect(self.on_yautoscale_toggled)
 
-        # Y-axis padding spinbox (for percentile mode)
+        # Y-axis padding spinbox (for percentile mode) — debounced to avoid
+        # redundant redraws when holding arrow keys or scrolling quickly
         if hasattr(self, 'ypadding_SpinBox'):
             self.ypadding_SpinBox.setMinimum(0.0)
             self.ypadding_SpinBox.setMaximum(1.0)
             self.ypadding_SpinBox.setSingleStep(0.05)
             self.ypadding_SpinBox.setDecimals(2)
             self.ypadding_SpinBox.setValue(self.state.autoscale_padding)
-            self.ypadding_SpinBox.valueChanged.connect(self.on_ypadding_changed)
+            self._ypadding_debounce = QTimer()
+            self._ypadding_debounce.setSingleShot(True)
+            self._ypadding_debounce.setInterval(150)
+            self._ypadding_debounce.timeout.connect(
+                lambda: self.on_ypadding_changed(self.ypadding_SpinBox.value()))
+            self.ypadding_SpinBox.valueChanged.connect(
+                lambda _: self._ypadding_debounce.start())
 
         # Region display toggle checkboxes (line vs shade)
         if hasattr(self, 'eupnea_checkBox'):
@@ -661,6 +666,12 @@ class MainWindow(QMainWindow):
 
     def _show_export_context_menu(self, pos):
         """Show context menu with export options."""
+        # Don't show this menu if right-click was on the plot area
+        # (the plot has its own richer context menu via EventMarkerContextMenu)
+        widget_at = self.childAt(pos)
+        if widget_at and hasattr(self, 'plot_host'):
+            if widget_at is self.plot_host or self.plot_host.isAncestorOf(widget_at):
+                return
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -701,6 +712,37 @@ class MainWindow(QMainWindow):
         clipboard_action = QAction("Copy to Clipboard", self)
         clipboard_action.triggered.connect(self._copy_window_to_clipboard)
         export_menu.addAction(clipboard_action)
+
+        # Performance Mode submenu
+        if hasattr(self, 'plot_manager'):
+            pm = self.plot_manager
+            menu.addSeparator()
+            perf_menu = menu.addMenu("Performance Mode")
+            perf_menu.setStyleSheet(menu.styleSheet())
+
+            override = pm._downsample_override
+
+            action_auto = perf_menu.addAction("Auto (Recommended)")
+            action_auto.setCheckable(True)
+            action_auto.setChecked(override is None)
+
+            action_fast = perf_menu.addAction("Fast (Downsample On)")
+            action_fast.setCheckable(True)
+            action_fast.setChecked(override is True)
+
+            action_full = perf_menu.addAction("Full Resolution (Downsample Off)")
+            action_full.setCheckable(True)
+            action_full.setChecked(override is False)
+
+            last_ms = pm._last_redraw_ms
+            if last_ms > 0:
+                perf_menu.addSeparator()
+                info = perf_menu.addAction(f"Last redraw: {last_ms:.0f}ms")
+                info.setEnabled(False)
+
+            action_auto.triggered.connect(lambda: pm.toggle_auto_downsample(force=None))
+            action_fast.triggered.connect(lambda: pm.toggle_auto_downsample(force=True))
+            action_full.triggered.connect(lambda: pm.toggle_auto_downsample(force=False))
 
         menu.exec(self.mapToGlobal(pos))
 
@@ -982,68 +1024,65 @@ class MainWindow(QMainWindow):
         pinned_paths = self._get_pinned_paths()
 
         # Pinned locations
+        # Note: skip p.exists() checks here — they block on network paths (lab server).
+        # Stale entries are handled gracefully when clicked (_load_recent_file / _browse_from_folder).
         if pinned_paths:
             self._browse_menu.addSection("📌 Pinned Locations")
             for path in pinned_paths:
                 p = Path(path)
-                if p.exists():
-                    # Show path context for pinned items too
-                    parts = p.parts
-                    if len(parts) >= 3:
-                        display_name = f"{parts[-3]}/{parts[-2]}/{p.name}"
-                    elif len(parts) >= 2:
-                        display_name = f"{parts[-2]}/{p.name}"
-                    else:
-                        display_name = p.name
-                    if len(display_name) > 45:
-                        display_name = "..." + display_name[-42:]
+                # Show path context for pinned items too
+                parts = p.parts
+                if len(parts) >= 3:
+                    display_name = f"{parts[-3]}/{parts[-2]}/{p.name}"
+                elif len(parts) >= 2:
+                    display_name = f"{parts[-2]}/{p.name}"
+                else:
+                    display_name = p.name
+                if len(display_name) > 45:
+                    display_name = "..." + display_name[-42:]
 
-                    if p.is_file():
-                        action = self._browse_menu.addAction(f"📄 {display_name}")
-                        action.setToolTip(str(p))
-                        action.triggered.connect(lambda checked, fp=str(p): self._load_recent_file(fp))
-                    else:
-                        action = self._browse_menu.addAction(f"📁 {display_name}")
-                        action.setToolTip(str(p))
-                        action.triggered.connect(lambda checked, fp=str(p): self._browse_from_folder(fp))
+                if p.suffix:  # Has extension — likely a file
+                    action = self._browse_menu.addAction(f"📄 {display_name}")
+                    action.setToolTip(str(p))
+                    action.triggered.connect(lambda checked, fp=str(p): self._load_recent_file(fp))
+                else:
+                    action = self._browse_menu.addAction(f"📁 {display_name}")
+                    action.setToolTip(str(p))
+                    action.triggered.connect(lambda checked, fp=str(p): self._browse_from_folder(fp))
 
         # Recent files
         if recent_files:
             self._browse_menu.addSection("Recent Files")
             for file_path in recent_files[:8]:
                 p = Path(file_path)
-                if p.exists():
-                    # Show 3 levels of path context for clarity (especially for FP_data files)
-                    # e.g., "Project/Experiment/FP_data_0/FP_data_0.csv" -> "Project/.../FP_data_0.csv"
-                    parts = p.parts
-                    if len(parts) >= 4:
-                        # Show: grandparent/.../filename
-                        display_name = f"{parts[-4]}/.../{p.name}"
-                    elif len(parts) >= 3:
-                        display_name = f"{parts[-3]}/{parts[-2]}/{p.name}"
-                    elif len(parts) >= 2:
-                        display_name = f"{parts[-2]}/{p.name}"
-                    else:
-                        display_name = p.name
-                    # Truncate if still too long
-                    if len(display_name) > 50:
-                        display_name = "..." + display_name[-47:]
-                    action = self._browse_menu.addAction(f"📄 {display_name}")
-                    action.setToolTip(str(p))
-                    action.triggered.connect(lambda checked, fp=file_path: self._load_recent_file(fp))
+                # Show 3 levels of path context for clarity (especially for FP_data files)
+                parts = p.parts
+                if len(parts) >= 4:
+                    display_name = f"{parts[-4]}/.../{p.name}"
+                elif len(parts) >= 3:
+                    display_name = f"{parts[-3]}/{parts[-2]}/{p.name}"
+                elif len(parts) >= 2:
+                    display_name = f"{parts[-2]}/{p.name}"
+                else:
+                    display_name = p.name
+                # Truncate if still too long
+                if len(display_name) > 50:
+                    display_name = "..." + display_name[-47:]
+                action = self._browse_menu.addAction(f"📄 {display_name}")
+                action.setToolTip(str(p))
+                action.triggered.connect(lambda checked, fp=file_path: self._load_recent_file(fp))
 
         # Recent folders
         if recent_folders:
             self._browse_menu.addSection("Browse Recent Folders")
             for folder_path in recent_folders[:5]:
                 p = Path(folder_path)
-                if p.exists():
-                    display_name = p.name or str(p)
-                    if len(display_name) > 40:
-                        display_name = "..." + display_name[-37:]
-                    action = self._browse_menu.addAction(f"📁 {display_name}")
-                    action.setToolTip(str(p))
-                    action.triggered.connect(lambda checked, fp=folder_path: self._browse_from_folder(fp))
+                display_name = p.name or str(p)
+                if len(display_name) > 40:
+                    display_name = "..." + display_name[-37:]
+                action = self._browse_menu.addAction(f"📁 {display_name}")
+                action.setToolTip(str(p))
+                action.triggered.connect(lambda checked, fp=folder_path: self._browse_from_folder(fp))
 
         # Pin/unpin current folder
         if self.state.in_path:
@@ -1210,11 +1249,7 @@ class MainWindow(QMainWindow):
                 # User selected a specific experiment to load directly
                 npz_path = data['npz_path']
                 exp_idx = data['experiment_index']
-                result_data = photometry.load_experiment_from_npz(npz_path, exp_idx)
-                if result_data:
-                    self._load_photometry_data(result_data)
-                else:
-                    self._show_error("Load Error", "Failed to load experiment from NPZ file.")
+                self._load_photometry_npz_async(npz_path, exp_idx)
 
         else:
             # Load data files (ABF, SMRX, EDF)
@@ -1649,6 +1684,27 @@ class MainWindow(QMainWindow):
             label = metric_labels.get(key, key)
             print(f"[CTA Debug]   {key}: {label}")
 
+        # Extract channel line colors from the actual plot
+        channel_colors = {}
+        if hasattr(self, 'plot_host') and hasattr(self.plot_host, '_subplots'):
+            for plot in self.plot_host._subplots:
+                if plot is None:
+                    continue
+                try:
+                    label = plot.getAxis('left').labelText or ''
+                    # Strip scale factor suffix
+                    base_label = label.split('(')[0].strip() if '(' in label else label
+                    for item in plot.listDataItems():
+                        if hasattr(item, 'getData') and hasattr(item, 'opts'):
+                            x, y = item.getData()
+                            if x is not None and len(x) > 100:
+                                pen = item.opts.get('pen')
+                                if pen and hasattr(pen, 'color'):
+                                    channel_colors[base_label] = pen.color().name()
+                                break
+                except Exception:
+                    pass
+
         # Create and show the CTA dialog
         cta_viewmodel = CTAViewModel(self)
         dialog = PhotometryCTADialog(
@@ -1658,6 +1714,7 @@ class MainWindow(QMainWindow):
             signals=signals,
             time_array=time_array,
             metric_labels=metric_labels,
+            channel_colors=channel_colors,
         )
         dialog.exec()
 
@@ -1726,8 +1783,12 @@ class MainWindow(QMainWindow):
 
         return result
 
-    def _refresh_event_markers(self):
-        """Refresh event marker display for the current sweep."""
+    def _refresh_event_markers(self, force: bool = False):
+        """Refresh event marker display for the current sweep.
+
+        Args:
+            force: If True, refresh even if sweep hasn't changed (e.g. after adding markers).
+        """
         # Skip if matplotlib backend (event markers only work with pyqtgraph)
         if self._current_backend == 'matplotlib':
             return
@@ -1743,6 +1804,12 @@ class MainWindow(QMainWindow):
                     spans = st.stim_spans_by_sweep.get(s, [])
                     if spans:
                         t0 = spans[0][0]
+
+                # Skip if sweep + time offset haven't changed (avoids redundant refresh on zoom/pan)
+                refresh_key = (s, t0)
+                if not force and getattr(self, '_last_marker_refresh_key', None) == refresh_key:
+                    return
+                self._last_marker_refresh_key = refresh_key
 
                 # Set the time offset on the integration before refreshing
                 self._event_marker_integration.set_time_offset(t0)
@@ -2632,6 +2699,13 @@ class MainWindow(QMainWindow):
             'core.domain.events.registry',
             'core.services.event_marker_service',
 
+            # CTA system
+            'core.domain.cta.models',
+            'core.services.cta_service',
+            'viewmodels.cta_viewmodel',
+            'dialogs.photometry_cta_dialog',
+            'dialogs.export_mixin',
+
             # Detection framework
             'core.detection.base',
             'core.detection.threshold',
@@ -2729,6 +2803,41 @@ class MainWindow(QMainWindow):
 
             # Load photometry data into the app
             self._load_photometry_data(result_data)
+
+    def _load_photometry_npz_async(self, npz_path: Path, exp_idx: int):
+        """Load a photometry experiment from NPZ in a background thread."""
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
+        from core.file_load_worker import FileLoadWorker
+
+        progress = QProgressDialog(f"Loading photometry experiment...\n{npz_path.name}", None, 0, 0, self)
+        progress.setWindowTitle("Loading Photometry Data")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+
+        self._loading_progress = progress
+
+        self._load_worker = FileLoadWorker(
+            photometry.load_experiment_from_npz, npz_path, exp_idx
+        )
+        self._load_worker.finished.connect(self._on_photometry_npz_loaded)
+        self._load_worker.error.connect(lambda msg: (
+            progress.close(),
+            self._show_error("Load Error", f"Failed to load photometry experiment:\n\n{msg.split(chr(10))[0]}")
+        ))
+        self._load_worker.start()
+
+    def _on_photometry_npz_loaded(self, result_data):
+        """Completion handler for photometry NPZ loading."""
+        progress = self._loading_progress
+        progress.close()
+
+        if result_data:
+            self._load_photometry_data(result_data)
+        else:
+            self._show_error("Load Error", "Failed to load experiment from NPZ file.")
 
     def _load_photometry_data(self, data: dict):
         """
@@ -3039,10 +3148,9 @@ class MainWindow(QMainWindow):
 
     def load_file(self, path: Path):
         import time
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        from PyQt6.QtWidgets import QProgressDialog
         from PyQt6.QtCore import Qt
-
-        t_start = time.time()
+        from core.file_load_worker import FileLoadWorker
 
         # Determine file type for progress dialog title
         file_type = path.suffix.upper()[1:]  # .abf -> ABF, .smrx -> SMRX
@@ -3055,24 +3163,35 @@ class MainWindow(QMainWindow):
         progress.setCancelButton(None)  # No cancel button
         progress.setValue(0)
         progress.show()
-        QApplication.processEvents()
 
-        def update_progress(current, total, message):
-            """Callback to update progress dialog."""
-            progress.setValue(current)
-            progress.setLabelText(f"{message}\n{path.name}")
-            QApplication.processEvents()
+        # Store context for completion handler
+        self._loading_path = path
+        self._loading_t_start = time.time()
+        self._loading_progress = progress
 
-        try:
-            # Load data file (supports .abf, .smrx, .edf)
-            sr, sweeps_by_ch, ch_names, t, file_metadata = abf_io.load_data_file(path, progress_callback=update_progress)
-        except Exception as e:
-            progress.close()
-            self._show_error("Load error", str(e))
-            return
-        finally:
-            progress.close()
+        # Create worker with existing loader function
+        self._load_worker = FileLoadWorker(abf_io.load_data_file, path)
+        self._load_worker.progress.connect(lambda c, t, m: (
+            progress.setValue(c),
+            progress.setLabelText(f"{m}\n{path.name}")
+        ))
+        self._load_worker.finished.connect(self._on_single_file_loaded)
+        self._load_worker.error.connect(lambda msg: (
+            progress.close(),
+            self._show_error("Load error", msg.split('\n\n')[0])
+        ))
+        self._load_worker.start()
 
+    def _on_single_file_loaded(self, result):
+        """Completion handler for single file loading (runs on main thread)."""
+        import time
+
+        path = self._loading_path
+        t_start = self._loading_t_start
+        progress = self._loading_progress
+        progress.close()
+
+        sr, sweeps_by_ch, ch_names, t, file_metadata = result
 
         st = self.state
         st.in_path = path
@@ -3133,26 +3252,22 @@ class MainWindow(QMainWindow):
         self.global_outlier_stats = None
 
         # Clear export metric cache when loading new file
-        # This cache stores computed metric traces during export for reuse in PDF generation
         self._export_metric_cache = {}
 
         # Clear z-score global statistics cache
         self.zscore_global_mean = None
         self.zscore_global_std = None
 
+        # Reset adaptive downsampling for fresh file (let system re-evaluate)
+        self.plot_manager._auto_downsample_active = False
+        self.plot_manager._consecutive_slow_redraws = 0
+
         # Clear event markers (bout annotations)
         if hasattr(st, 'bout_annotations'):
             st.bout_annotations.clear()
 
-
-
-
         # Reset Apply button
         self.ApplyPeakFindPushButton.setEnabled(False)
-
-
-        
-
 
         # Fill combos safely (no signal during population)
         self.AnalyzeChanSelect.blockSignals(True)
@@ -3327,8 +3442,9 @@ class MainWindow(QMainWindow):
 
     def load_multiple_files(self, file_paths: List[Path]):
         """Load and concatenate multiple ABF files."""
-        from PyQt6.QtWidgets import QProgressDialog, QApplication, QMessageBox
+        from PyQt6.QtWidgets import QProgressDialog, QMessageBox
         from PyQt6.QtCore import Qt
+        from core.file_load_worker import FileLoadWorker
 
         # Validate files first
         valid, messages = abf_io.validate_files_for_concatenation(file_paths)
@@ -3357,25 +3473,31 @@ class MainWindow(QMainWindow):
         progress.setCancelButton(None)  # No cancel button
         progress.setValue(0)
         progress.show()
-        QApplication.processEvents()
 
-        def update_progress(current, total, message):
-            """Callback to update progress dialog."""
-            progress.setValue(current)
-            progress.setLabelText(message)
-            QApplication.processEvents()
+        # Store context for completion handler
+        self._loading_multi_paths = file_paths
+        self._loading_progress = progress
 
-        try:
-            # Load and concatenate files
-            sr, sweeps_by_ch, ch_names, t, file_info = abf_io.load_and_concatenate_abf_files(
-                file_paths, progress_callback=update_progress
-            )
-        except Exception as e:
-            progress.close()
-            self._show_error("Load error", str(e))
-            return
-        finally:
-            progress.close()
+        # Create worker with existing loader function
+        self._load_worker = FileLoadWorker(abf_io.load_and_concatenate_abf_files, file_paths)
+        self._load_worker.progress.connect(lambda c, t, m: (
+            progress.setValue(c),
+            progress.setLabelText(m)
+        ))
+        self._load_worker.finished.connect(self._on_multi_file_loaded)
+        self._load_worker.error.connect(lambda msg: (
+            progress.close(),
+            self._show_error("Load error", msg.split('\n\n')[0])
+        ))
+        self._load_worker.start()
+
+    def _on_multi_file_loaded(self, result):
+        """Completion handler for multi-file loading (runs on main thread)."""
+        file_paths = self._loading_multi_paths
+        progress = self._loading_progress
+        progress.close()
+
+        sr, sweeps_by_ch, ch_names, t, file_info = result
 
         # Update state (similar to load_file, but with file_info)
         st = self.state
@@ -3406,7 +3528,6 @@ class MainWindow(QMainWindow):
         self.global_outlier_stats = None
 
         # Clear export metric cache when loading new file
-        # This cache stores computed metric traces during export for reuse in PDF generation
         self._export_metric_cache = {}
 
         # Reset Apply button
@@ -3709,12 +3830,15 @@ class MainWindow(QMainWindow):
 
     def load_npz_state(self, npz_path: Path, alternative_data_path: Path = None):
         """Load complete analysis state from .pleth.npz file."""
-        from core.npz_io import load_state_from_npz, get_npz_metadata, OriginalFileNotFoundError
+        from core.npz_io import load_state_from_npz, get_npz_metadata
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
+        from core.file_load_worker import FileLoadWorker
         import time
 
         t_start = time.time()
 
-        # Get metadata for display
+        # Get metadata for display (fast - reads only header)
         metadata = get_npz_metadata(npz_path)
 
         if 'error' in metadata:
@@ -3763,9 +3887,6 @@ class MainWindow(QMainWindow):
                         print(f"  Not found in project file list")
 
         # Show loading dialog
-        from PyQt6.QtWidgets import QProgressDialog, QApplication, QFileDialog, QMessageBox
-        from PyQt6.QtCore import Qt
-
         progress = QProgressDialog(f"Loading session...\n{npz_path.name}", None, 0, 100, self)
         progress.setWindowTitle("Loading PhysioMetrics Session")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -3773,26 +3894,41 @@ class MainWindow(QMainWindow):
         progress.setCancelButton(None)
         progress.setValue(10)
         progress.show()
-        QApplication.processEvents()
 
-        try:
-            # Load state from NPZ
-            progress.setLabelText(f"Reading session file...\n{npz_path.name}")
-            progress.setValue(30)
-            QApplication.processEvents()
+        progress.setLabelText(f"Reading session file...\n{npz_path.name}")
+        progress.setValue(30)
 
-            new_state, raw_data_loaded, gmm_cache, app_settings, event_markers = load_state_from_npz(
-                npz_path, reload_raw_data=True, alternative_data_path=alternative_data_path
-            )
-        except OriginalFileNotFoundError as e:
-            progress.close()
+        # Store context for completion handler
+        self._loading_npz_path = npz_path
+        self._loading_npz_metadata = metadata
+        self._loading_npz_t_start = t_start
+        self._loading_progress = progress
 
+        # Create worker — load_state_from_npz doesn't accept progress_callback
+        self._load_worker = FileLoadWorker(
+            load_state_from_npz, npz_path,
+            reload_raw_data=True, alternative_data_path=alternative_data_path
+        )
+        self._load_worker.finished.connect(self._on_npz_loaded)
+        self._load_worker.error_exc.connect(self._on_npz_load_error)
+        self._load_worker.start()
+
+    def _on_npz_load_error(self, exc):
+        """Handle errors from NPZ loading worker."""
+        from core.npz_io import OriginalFileNotFoundError
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
+        progress = self._loading_progress
+        npz_path = self._loading_npz_path
+        progress.close()
+
+        if isinstance(exc, OriginalFileNotFoundError):
             # Prompt user to locate the file
             reply = QMessageBox.question(
                 self,
                 "Original File Not Found",
                 f"The original data file could not be found:\n\n"
-                f"{e.original_path}\n\n"
+                f"{exc.original_path}\n\n"
                 f"Would you like to locate the file manually?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes
@@ -3800,7 +3936,7 @@ class MainWindow(QMainWindow):
 
             if reply == QMessageBox.StandardButton.Yes:
                 # Get file extension from original path
-                orig_ext = e.original_path.suffix.lower()
+                orig_ext = exc.original_path.suffix.lower()
                 filter_map = {
                     '.abf': "ABF Files (*.abf)",
                     '.smrx': "Spike2 Files (*.smrx)",
@@ -3810,7 +3946,7 @@ class MainWindow(QMainWindow):
 
                 new_path, _ = QFileDialog.getOpenFileName(
                     self,
-                    f"Locate {e.original_path.name}",
+                    f"Locate {exc.original_path.name}",
                     str(Path.home()),
                     file_filter
                 )
@@ -3819,18 +3955,23 @@ class MainWindow(QMainWindow):
                     # Retry with the new path
                     self.load_npz_state(npz_path, alternative_data_path=Path(new_path))
                     return
-
-            return  # User cancelled or said No
-
-        except Exception as e:
-            progress.close()
+        else:
             import traceback
             self._show_error("Load Error",
-                f"Failed to load session state:\n\n{str(e)}\n\n{traceback.format_exc()}"
+                f"Failed to load session state:\n\n{str(exc)}\n\n{traceback.format_exc()}"
             )
-            return
 
-        # Continue with successful load
+    def _on_npz_loaded(self, result):
+        """Completion handler for NPZ session loading (runs on main thread)."""
+        import time
+
+        npz_path = self._loading_npz_path
+        metadata = self._loading_npz_metadata
+        t_start = self._loading_npz_t_start
+        progress = self._loading_progress
+
+        new_state, raw_data_loaded, gmm_cache, app_settings, event_markers = result
+
         try:
             if not raw_data_loaded:
                 progress.close()
@@ -3843,7 +3984,6 @@ class MainWindow(QMainWindow):
 
             progress.setLabelText("Restoring analysis state...")
             progress.setValue(50)
-            QApplication.processEvents()
 
             # Replace current state
             self.state = new_state
@@ -3861,7 +4001,6 @@ class MainWindow(QMainWindow):
             self._update_filename_display()
 
             progress.setValue(60)
-            QApplication.processEvents()
 
             # Restore channel combos
             self.AnalyzeChanSelect.blockSignals(True)
@@ -3909,7 +4048,6 @@ class MainWindow(QMainWindow):
             self._update_event_source_channel_combo()
 
             progress.setValue(70)
-            QApplication.processEvents()
 
             # Restore filter settings
             self.LowPass_checkBox.setChecked(st.use_low)
@@ -3959,7 +4097,6 @@ class MainWindow(QMainWindow):
                       f"apnea_thresh={apnea_thresh}, eupnea_sniff_classifier={saved_classifier}")
 
             progress.setValue(80)
-            QApplication.processEvents()
 
             # Clear caches (same as new file load)
             self.metrics_by_sweep.clear()
@@ -3978,7 +4115,6 @@ class MainWindow(QMainWindow):
             self.ApplyPeakFindPushButton.setToolTip("Peak detection already complete (loaded from session). Modify parameters and click to re-detect.")
 
             progress.setValue(90)
-            QApplication.processEvents()
 
             # Restore navigation and plot
             self.navigation_manager.reset_window_state()
@@ -4048,6 +4184,7 @@ class MainWindow(QMainWindow):
         """
         Compute global mean and std across all sweeps for z-score normalization.
         This ensures all sweeps are normalized relative to the same baseline.
+        Uses a progress dialog with processEvents to keep UI responsive.
         """
         import numpy as np
 
@@ -4056,10 +4193,22 @@ class MainWindow(QMainWindow):
             return None, None
 
         Y = st.sweeps[st.analyze_chan]  # (n_samples, n_sweeps)
+        n_sweeps = Y.shape[1]
+        n_samples = Y.shape[0]
+        use_notch = (self.notch_filter_lower is not None and self.notch_filter_upper is not None)
 
-        # Collect all processed data across sweeps (apply filters but not z-score)
-        all_data = []
-        for sweep_idx in range(Y.shape[1]):
+        # For large files, show progress and keep UI responsive
+        show_progress = n_sweeps >= 20
+        progress = None
+        if show_progress:
+            progress = QProgressDialog("Computing z-score statistics...", None, 0, n_sweeps, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(300)
+
+        # Pre-allocate array instead of list + concatenate
+        all_data = np.empty(n_samples * n_sweeps, dtype=np.float64)
+
+        for sweep_idx in range(n_sweeps):
             y_raw = Y[:, sweep_idx]
 
             # Apply all filters EXCEPT z-score
@@ -4073,21 +4222,26 @@ class MainWindow(QMainWindow):
             )
 
             # Apply notch filter if configured
-            if self.notch_filter_lower is not None and self.notch_filter_upper is not None:
+            if use_notch:
                 y = self._apply_notch_filter(y, st.sr_hz, self.notch_filter_lower, self.notch_filter_upper)
 
-            all_data.append(y)
+            all_data[sweep_idx * n_samples:(sweep_idx + 1) * n_samples] = y
 
-        # Concatenate all sweeps
-        concatenated = np.concatenate(all_data)
+            if show_progress:
+                progress.setValue(sweep_idx)
+                if sweep_idx % 10 == 0:
+                    QApplication.processEvents()
+
+        if progress:
+            progress.close()
 
         # Compute global statistics (excluding NaN values)
-        valid_mask = ~np.isnan(concatenated)
+        valid_mask = ~np.isnan(all_data)
         if not np.any(valid_mask):
             return None, None
 
-        global_mean = np.mean(concatenated[valid_mask])
-        global_std = np.std(concatenated[valid_mask], ddof=1)
+        global_mean = np.mean(all_data[valid_mask])
+        global_std = np.std(all_data[valid_mask], ddof=1)
 
         print(f"[zscore] Computed global stats: mean={global_mean:.4f}, std={global_std:.4f}")
         return global_mean, global_std
@@ -4573,6 +4727,9 @@ class MainWindow(QMainWindow):
         # Invalidate processed cache
         st.proc_cache.clear()
 
+        # Log telemetry and re-enable Apply button
+        self._on_filter_changed()
+
         # Debounce redraw
         self._redraw_timer.start()
 
@@ -4667,10 +4824,20 @@ class MainWindow(QMainWindow):
             return None
 
     def _get_processed_for(self, chan: str, sweep_idx: int):
-        """Return processed y for (channel, sweep_idx) using the same cache key logic."""
+        """Return processed y for (channel, sweep_idx) using the same cache key logic.
+
+        Filters are only applied to the primary Pleth channel (st.analyze_chan).
+        All other channels return raw data — the current filter settings (HP/LP/notch)
+        are designed for plethysmography signals and would distort other signal types.
+        """
         st = self.state
         Y = st.sweeps[chan]
         s = max(0, min(sweep_idx, Y.shape[1]-1))
+
+        # Only apply filters to the primary pleth channel
+        if chan != st.analyze_chan:
+            return Y[:, s].copy()
+
         key = (chan, s, st.use_low, st.low_hz, st.use_high, st.high_hz, st.use_mean_sub, st.mean_val, st.use_invert,
                self.notch_filter_lower, self.notch_filter_upper, self.use_zscore_normalization)
         if key in st.proc_cache:
@@ -5968,31 +6135,33 @@ class MainWindow(QMainWindow):
         n_sweeps = any_ch.shape[1]
         st.y2_values_by_sweep = {}
 
+        # Resolve dicts once before loop (avoids repeated getattr/hasattr per sweep)
+        peaks_dict = getattr(st, "peaks_by_sweep", {})
+        breath_dict = getattr(st, "breath_by_sweep", {})
+        gmm_probs_dict = getattr(st, 'gmm_sniff_probabilities', {})
+        cur_peak_metrics_dict = getattr(st, 'current_peak_metrics_by_sweep', {})
+        orig_peak_metrics_dict = getattr(st, 'peak_metrics_by_sweep', {})
+
         for s in range(n_sweeps):
             y_proc = self._get_processed_for(st.analyze_chan, s)
             # pull peaks/breaths if available
-            pks = getattr(st, "peaks_by_sweep", {}).get(s, None)
-            # breaths = getattr(st, "breath_by_sweep", {}).get(s, {}) if hasattr(st, "breath_by_sweep") else {}
-            breaths = getattr(st, "breath_by_sweep", {}).get(s, {})
+            pks = peaks_dict.get(s, None)
+            breaths = breath_dict.get(s, {})
             on = breaths.get("onsets", None)
             off = breaths.get("offsets", None)
             exm = breaths.get("expmins", None)
             exo = breaths.get("expoffs", None)
 
             # Set GMM probabilities for this sweep (if available)
-            gmm_probs = None
-            if hasattr(st, 'gmm_sniff_probabilities') and s in st.gmm_sniff_probabilities:
-                gmm_probs = st.gmm_sniff_probabilities[s]
+            gmm_probs = gmm_probs_dict.get(s, None)
             metrics.set_gmm_probabilities(gmm_probs)
 
             # Set peak candidate metrics for this sweep (if available)
             # Prefer current_peak_metrics_by_sweep (updated after edits) for Y2 plotting,
             # fallback to peak_metrics_by_sweep (original auto-detected) for ML training
-            peak_metrics = None
-            if hasattr(st, 'current_peak_metrics_by_sweep') and s in st.current_peak_metrics_by_sweep:
-                peak_metrics = st.current_peak_metrics_by_sweep[s]
-            elif hasattr(st, 'peak_metrics_by_sweep') and s in st.peak_metrics_by_sweep:
-                peak_metrics = st.peak_metrics_by_sweep[s]
+            peak_metrics = cur_peak_metrics_dict.get(s, None)
+            if peak_metrics is None:
+                peak_metrics = orig_peak_metrics_dict.get(s, None)
             metrics.set_peak_metrics(peak_metrics)
 
             y2 = fn(st.t, y_proc, st.sr_hz, pks, on, off, exm, exo)
