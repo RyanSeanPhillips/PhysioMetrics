@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QAction, QPainter
 from PyQt6.QtPrintSupport import QPrinter
 
+import ast
 import csv, json
 
 
@@ -59,20 +60,14 @@ from core import metrics  # calculation of breath metrics
 from core.navigation_manager import NavigationManager
 from core import telemetry  # Anonymous usage tracking
 from plotting import PlotManager
-from export import ExportManager
+# ExportManager lazy-imported in _get_export_manager() to speed up startup
 
 
 # Import editing modes
 from editing import EditingModes
-# Import dialogs
-from dialogs import SpectralAnalysisDialog, SaveMetaDialog, PeakNavigatorDialog
-from dialogs.advanced_peak_editor_dialog import AdvancedPeakEditorDialog
-from dialogs.photometry_import_dialog_v2 import PhotometryImportDialog
-from dialogs.photometry.chooser_dialog import show_photometry_chooser
+# Import dialogs — heavy dialogs are lazy-imported where used to speed up startup
 from core import photometry
 from core.channel_manager import ChannelManagerWidget
-from core.ai_notebook_manager import AINotebookManager
-from core.code_notebook_manager import CodeNotebookManager
 from core.project_builder_manager import ProjectBuilderManager
 from core.scan_manager import ScanManager
 from core.recovery_manager import RecoveryManager
@@ -276,23 +271,23 @@ class MainWindow(QMainWindow):
         # === Initialize Notes Preview Manager ===
         self._notes_preview_manager = NotesPreviewManager(self)
 
-        # Auto-load ML models from last used directory (if available)
-        # This must happen BEFORE setting defaults and connecting signals
-        self._classifier_manager.auto_load_ml_models_on_startup()
-
-        # Update dropdown states based on loaded models (will disable ML options if models not loaded)
-        self._classifier_manager.update_classifier_dropdowns()
-
-        # NOW connect signals AFTER models are loaded and dropdowns are configured
+        # Connect classifier signals and set safe defaults (no ML models needed)
         self.peak_detec_combo.currentTextChanged.connect(self._classifier_manager.on_classifier_changed)
         self.eup_sniff_combo.currentTextChanged.connect(self._classifier_manager.on_eupnea_sniff_classifier_changed)
         self.digh_combo.currentTextChanged.connect(self._classifier_manager.on_sigh_classifier_changed)
+        self.peak_detec_combo.setCurrentText("Threshold")
+        self.eup_sniff_combo.setCurrentText("GMM")
+        self.digh_combo.setCurrentText("Manual")
 
-        # Set defaults - XGBoost for peak detection and sigh, GMM for eupnea/sniff
-        # If models not loaded, _update_classifier_dropdowns() already fell back to Threshold/GMM/Manual
-        self.peak_detec_combo.setCurrentText("XGBoost")
-        self.eup_sniff_combo.setCurrentText("GMM")  # GMM is the default for eupnea/sniff classification
-        self.digh_combo.setCurrentText("XGBoost")
+        # Defer ML model loading — runs after window is visible, then updates dropdowns
+        def _deferred_ml_load():
+            self._classifier_manager.auto_load_ml_models_on_startup()
+            self._classifier_manager.update_classifier_dropdowns()
+            # Switch to ML defaults if models were loaded successfully
+            if getattr(self.state, 'loaded_ml_models', None):
+                self.peak_detec_combo.setCurrentText("XGBoost")
+                self.digh_combo.setCurrentText("XGBoost")
+        QTimer.singleShot(200, _deferred_ml_load)
 
         # --- Wire filter controls ---
         self._redraw_timer = QTimer(self)
@@ -337,8 +332,8 @@ class MainWindow(QMainWindow):
         # --- Initialize Plot Manager (BEFORE signal connections that may trigger plotting) ---
         self.plot_manager = PlotManager(self)
 
-        # --- Initialize Export Manager ---
-        self.export_manager = ExportManager(self)
+        # Export manager created lazily on first use (speeds up startup)
+        self._export_manager = None
 
         # --- Initialize Telemetry Heartbeat Timer ---
         # Send periodic user_engagement events to help GA4 recognize active users
@@ -659,6 +654,20 @@ class MainWindow(QMainWindow):
 
         # Set up right-click export context menu for main window
         self._setup_export_context_menu()
+
+    # --- Lazy-loaded properties for startup performance ---
+
+    @property
+    def export_manager(self):
+        """Lazy-create ExportManager on first access (saves ~300ms at startup)."""
+        if self._export_manager is None:
+            from export import ExportManager
+            self._export_manager = ExportManager(self)
+        return self._export_manager
+
+    @export_manager.setter
+    def export_manager(self, value):
+        self._export_manager = value
 
     def _setup_export_context_menu(self):
         """Set up right-click context menu for screenshot/PDF export."""
@@ -1235,6 +1244,7 @@ class MainWindow(QMainWindow):
         # Check if this is a photometry file (CSV with FP_data pattern)
         elif len(file_paths) == 1 and photometry.detect_photometry_file(file_paths[0]):
             # Use the chooser dialog to check for existing NPZ and show options
+            from dialogs.photometry.chooser_dialog import show_photometry_chooser
             action, data = show_photometry_chooser(self, file_paths[0])
 
             if action == 'cancel':
@@ -2789,6 +2799,7 @@ class MainWindow(QMainWindow):
             initial_path: Path to the detected photometry file (FP_data*.csv)
             npz_path: If provided, open directly to Tab 2 with this NPZ file
         """
+        from dialogs.photometry_import_dialog_v3 import PhotometryImportDialogV3 as PhotometryImportDialog
         dialog = PhotometryImportDialog(self, initial_path, photometry_npz_path=npz_path)
         result = dialog.exec()
 
@@ -2931,6 +2942,10 @@ class MainWindow(QMainWindow):
 
         # Set up channel manager with photometry channels
         self._setup_photometry_channel_manager(data)
+
+        # Clear saved view to force fresh autoscale for new photometry data
+        self.plot_host.clear_saved_view("single")
+        self.plot_host.clear_saved_view("grid")
 
         # Redraw
         self.plot_manager.redraw_main_plot()
@@ -3075,6 +3090,7 @@ class MainWindow(QMainWindow):
 
         # Open dialog with cached data for instant opening
         # Pass current params to restore settings and current experiment info
+        from dialogs.photometry_import_dialog_v3 import PhotometryImportDialogV3 as PhotometryImportDialog
         dialog = PhotometryImportDialog(
             self,
             initial_path=None,  # Don't need to reload files
@@ -3099,11 +3115,13 @@ class MainWindow(QMainWindow):
             print("[Photometry] Dialog cancelled")
 
     def _update_npz_dff_params(self):
-        """Write updated dF/F parameters back to the NPZ file.
+        """Write updated dF/F parameters back to the NPZ file in a background thread.
 
         Called after the user adjusts processing settings via the gear icon.
         Updates the 'dff_params' field in the NPZ so changes persist on restart.
         """
+        from core.file_load_worker import FileLoadWorker
+
         st = self.state
         npz_path = st.photometry_npz_path
         if npz_path is None or not Path(npz_path).exists():
@@ -3113,37 +3131,45 @@ class MainWindow(QMainWindow):
         if not params:
             return
 
-        try:
-            # Build dff_params dict in NPZ format (uses NPZ key names)
-            npz_params = {
-                'method': params.get('method', params.get('dff_method', 'fitted')),
-                'detrend_method': params.get('detrend_method', 'none'),
-                'lowpass_hz': params.get('lowpass_hz'),
-                'fit_start': params.get('fit_start', params.get('fit_range_start', 0)),
-                'fit_end': params.get('fit_end', params.get('fit_range_end', 0)),
-            }
+        # Build dff_params dict in NPZ format (uses NPZ key names)
+        npz_params = {
+            'method': params.get('method', params.get('dff_method', 'fitted')),
+            'detrend_method': params.get('detrend_method', 'none'),
+            'lowpass_hz': params.get('lowpass_hz'),
+            'fit_start': params.get('fit_start', params.get('fit_range_start', 0)),
+            'fit_end': params.get('fit_end', params.get('fit_range_end', 0)),
+        }
 
-            exp_idx = getattr(st, 'photometry_experiment_index', 0)
+        exp_idx = getattr(st, 'photometry_experiment_index', 0)
 
-            # Load existing NPZ, update dff_params, re-save
-            data = dict(np.load(npz_path, allow_pickle=True))
+        # Snapshot values for the background closure
+        npz_path_str = str(npz_path)
 
-            # Parse existing dff_params or create new
+        def _save_npz_params():
+            """Load existing NPZ, update dff_params, re-save (runs in background thread)."""
+            data = dict(np.load(npz_path_str, allow_pickle=True))
+
             dff_params_all = {}
             if 'dff_params' in data:
                 try:
-                    dff_params_all = eval(str(data['dff_params'][0]))
+                    dff_params_all = ast.literal_eval(str(data['dff_params'][0]))
                 except Exception:
                     pass
 
             dff_params_all[exp_idx] = npz_params
             data['dff_params'] = np.array([str(dff_params_all)], dtype=object)
 
-            np.savez(npz_path, **data)
-            print(f"[Photometry] Updated dff_params in NPZ for experiment {exp_idx}")
+            np.savez(npz_path_str, **data)
+            return exp_idx
 
-        except Exception as e:
-            print(f"[Photometry] Warning: Could not update NPZ dff_params: {e}")
+        self._npz_save_worker = FileLoadWorker(_save_npz_params, inject_progress=False)
+        self._npz_save_worker.finished.connect(
+            lambda idx: print(f"[Photometry] Updated dff_params in NPZ for experiment {idx}")
+        )
+        self._npz_save_worker.error.connect(
+            lambda msg: print(f"[Photometry] Warning: Could not update NPZ dff_params: {msg.split(chr(10))[0]}")
+        )
+        self._npz_save_worker.start()
 
     def load_file(self, path: Path):
         import time
@@ -3334,8 +3360,10 @@ class MainWindow(QMainWindow):
                 # Only one analysis channel available - auto-select it
                 analysis_idx = ch_names.index(auto_analysis) + 1  # +1 because "All Channels" is at index 0
                 self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
-                st.analyze_chan = auto_analysis
-                self.single_panel_mode = True
+                # Reset analyze_chan so on_analyze_channel_changed recognizes this as a change
+                # (otherwise the new_chan != st.analyze_chan guard skips the entire redraw)
+                st.analyze_chan = None
+                self.single_panel_mode = False
 
                 # Trigger analysis channel change
                 self.on_analyze_channel_changed(analysis_idx)
@@ -3351,6 +3379,7 @@ class MainWindow(QMainWindow):
                 st.analyze_chan = None
                 self.single_panel_mode = False
                 self.plot_host.clear_saved_view("grid")
+                self.plot_host.clear_saved_view("single")
                 self.plot_all_channels()
 
                 t_elapsed = time.time() - t_start
@@ -3370,6 +3399,7 @@ class MainWindow(QMainWindow):
             st.stim_metrics_by_sweep.clear()
 
             self.plot_host.clear_saved_view("grid")
+            self.plot_host.clear_saved_view("single")
             self.plot_all_channels()
 
             # Show completion message
@@ -3602,8 +3632,9 @@ class MainWindow(QMainWindow):
                 # Only one analysis channel available - auto-select it
                 analysis_idx = ch_names.index(auto_analysis) + 1  # +1 because "All Channels" is at index 0
                 self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
-                st.analyze_chan = auto_analysis
-                self.single_panel_mode = True
+                # Reset analyze_chan so on_analyze_channel_changed recognizes this as a change
+                st.analyze_chan = None
+                self.single_panel_mode = False
 
                 # Trigger analysis channel change
                 self.on_analyze_channel_changed(analysis_idx)
@@ -3612,6 +3643,7 @@ class MainWindow(QMainWindow):
                 st.analyze_chan = None
                 self.single_panel_mode = False
                 self.plot_host.clear_saved_view("grid")
+                self.plot_host.clear_saved_view("single")
                 self.plot_all_channels()
         else:
             # No stimulus channel detected - start in grid mode
@@ -3625,6 +3657,7 @@ class MainWindow(QMainWindow):
             st.stim_metrics_by_sweep.clear()
 
             self.plot_host.clear_saved_view("grid")
+            self.plot_host.clear_saved_view("single")
             self.plot_all_channels()
 
         # Show success message with file info
@@ -5097,22 +5130,30 @@ class MainWindow(QMainWindow):
 
     def _auto_detect_prominence_silent(self):
         """
-        Auto-detect optimal prominence using Otsu's method in background (no dialog).
-        Populates prominence field and enables Apply button.
+        Auto-detect optimal prominence using Otsu's method in a background thread.
+        Populates prominence field and enables Apply button when complete.
         """
-        import time
-        from scipy.signal import find_peaks
         import numpy as np
 
         st = self.state
         if not st.analyze_chan or st.analyze_chan not in st.sweeps:
             return
 
-        try:
-            # Concatenate ALL sweeps for representative auto-threshold calculation
-            print("[Auto-Detect] Calculating optimal prominence...")
-            t_start = time.time()
+        # Only auto-detect for Pleth channels — prominence thresholds are meaningless for other types
+        chan_type = self.channel_manager.get_channel_type(st.analyze_chan)
+        if chan_type and chan_type != 'Pleth':
+            print(f"[Auto-Detect] Skipping for {chan_type} channel '{st.analyze_chan}'")
+            return
 
+        # Cancel any previous threshold worker
+        if hasattr(self, '_threshold_worker') and self._threshold_worker is not None:
+            self._threshold_worker.quit()
+            self._threshold_worker.wait(500)
+            self._threshold_worker = None
+
+        try:
+            # Concatenate sweeps on main thread (fast — just array slicing + concat)
+            # This avoids thread-safety issues with proc_cache writes in _get_processed_for
             all_sweeps_data = []
             n_sweeps = st.sweeps[st.analyze_chan].shape[1]
 
@@ -5126,101 +5167,141 @@ class MainWindow(QMainWindow):
                 return
 
             y_data = np.concatenate(all_sweeps_data)
+            min_dist_samples = max(1, int(self.peak_min_dist * st.sr_hz))
 
-            # Detect all peaks with minimal prominence AND above baseline (height > 0)
-            # height=0 filters out rebound peaks below baseline, giving cleaner 2-population model
-            min_dist_samples = max(1, int(self.peak_min_dist * st.sr_hz))  # Ensure at least 1 for low sample rates
-            peaks, props = find_peaks(y_data, height=0, prominence=0.001, distance=min_dist_samples)
-            peak_heights = y_data[peaks]
+            print("[Auto-Detect] Launching background threshold computation...")
+            self._log_status_message("Auto-detecting threshold...", 0)
 
-            if len(peak_heights) < 10:
-                print("[Auto-Detect] Not enough peaks found")
-                return
-
-            # Store peak heights for histogram reuse (so we don't recalculate during dragging)
-            self.all_peak_heights = peak_heights
-
-            # Otsu's method: auto-calculate optimal HEIGHT threshold
-            heights_norm = ((peak_heights - peak_heights.min()) /
-                        (peak_heights.max() - peak_heights.min()) * 255).astype(np.uint8)
-
-            hist, bin_edges = np.histogram(heights_norm, bins=256, range=(0, 256))
-            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-            weight1 = np.cumsum(hist)
-            weight2 = np.cumsum(hist[::-1])[::-1]
-            mean1 = np.cumsum(hist * bin_centers) / (weight1 + 1e-10)
-            mean2 = (np.cumsum((hist * bin_centers)[::-1]) / (weight2 + 1e-10))[::-1]
-
-            variance = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
-            optimal_bin = np.argmax(variance)
-            optimal_thresh_norm = bin_centers[optimal_bin]
-
-            # Convert back to original scale
-            optimal_height = float((optimal_thresh_norm / 255.0 *
-                            (peak_heights.max() - peak_heights.min()) +
-                            peak_heights.min()))
-
-            # Calculate local minimum threshold (valley between noise and signal)
-            # This is more robust than Otsu for breath signals
-            local_min_threshold, model_params = self._calculate_local_minimum_threshold_silent(peak_heights)
-
-            # Choose threshold: prefer local minimum if available, fallback to Otsu
-            if local_min_threshold is not None:
-                chosen_threshold = local_min_threshold
-                print(f"[Auto-Detect] Using valley threshold: {chosen_threshold:.4f} (Otsu: {optimal_height:.4f})")
-
-                # Store model parameters for probability metrics
-                import core.metrics as metrics
-                metrics.set_threshold_model_params(model_params)
-                print(f"[Auto-Detect] Stored model parameters for P(noise)/P(breath) calculation")
-            else:
-                chosen_threshold = optimal_height
-                print(f"[Auto-Detect] Using Otsu threshold: {chosen_threshold:.4f} (no valley found)")
-                # Clear model parameters if valley fit failed
-                import core.metrics as metrics
-                metrics.set_threshold_model_params(None)
-
-            # Store and populate spinbox with auto-detected value
-            # Use same value for both height and prominence thresholds
-            self.peak_prominence = chosen_threshold
-            # PeakPromValueSpinBox removed - threshold now shown in Analysis Options dialog
-            # self.PeakPromValueSpinBox.setValue(chosen_threshold)
-
-            # Store the height threshold value (will be used in peak detection)
-            self.peak_height_threshold = chosen_threshold
-
-            # Draw threshold line on plot
-            self.plot_host.update_threshold_line(chosen_threshold)
-
-            # Enable Apply button
-            self.ApplyPeakFindPushButton.setEnabled(True)
-
-            t_elapsed = time.time() - t_start
-            # Status message already printed above with valley/Otsu choice
-            self._log_status_message(f"Auto-detected threshold: {chosen_threshold:.4f}", 3000)
-
-            # Pre-build the Analysis Options dialog in background (deferred)
-            # This makes opening the dialog instant since it's already created
-            QTimer.singleShot(500, self._prebuild_analysis_options_dialog)
-
-            # Refresh Peak Detection tab if it's the one that needs updating after channel change
-            if (hasattr(self, '_channel_change_needs_dialog_refresh') and
-                self._channel_change_needs_dialog_refresh and
-                getattr(self, '_dialog_tab_to_refresh', -1) == 0):  # Tab 0 = Peak Detection
-                if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog is not None:
-                    try:
-                        if self._analysis_options_dialog.isVisible():
-                            print("[Auto-Detect] Refreshing Peak Detection tab after auto-detect complete")
-                            self._analysis_options_dialog._refresh_peak_detection_tab()
-                            self._channel_change_needs_dialog_refresh = False  # Mark as done
-                    except RuntimeError:
-                        self._analysis_options_dialog = None
+            # Launch expensive computation (peak detection + curve fitting) on background thread
+            from core.file_load_worker import FileLoadWorker
+            self._threshold_worker = FileLoadWorker(
+                self._compute_auto_threshold, y_data, min_dist_samples,
+                inject_progress=False
+            )
+            self._threshold_worker.finished.connect(self._on_auto_detect_complete)
+            self._threshold_worker.error.connect(self._on_auto_detect_error)
+            self._threshold_worker.start()
 
         except Exception as e:
-            print(f"[Auto-Detect] Error: {e}")
+            print(f"[Auto-Detect] Error preparing data: {e}")
             import traceback
             traceback.print_exc()
+
+    def _compute_auto_threshold(self, y_data, min_dist_samples):
+        """
+        Pure computation — safe to run on background thread.
+        Returns dict with threshold info, or None on failure.
+        """
+        import time
+        import numpy as np
+        from scipy.signal import find_peaks
+
+        t_start = time.time()
+
+        # Detect all peaks with minimal prominence AND above baseline (height > 0)
+        peaks, props = find_peaks(y_data, height=0, prominence=0.001, distance=min_dist_samples)
+        peak_heights = y_data[peaks]
+
+        if len(peak_heights) < 10:
+            print("[Auto-Detect] Not enough peaks found")
+            return None
+
+        # Otsu's method: auto-calculate optimal HEIGHT threshold
+        heights_norm = ((peak_heights - peak_heights.min()) /
+                    (peak_heights.max() - peak_heights.min()) * 255).astype(np.uint8)
+
+        hist, bin_edges = np.histogram(heights_norm, bins=256, range=(0, 256))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        weight1 = np.cumsum(hist)
+        weight2 = np.cumsum(hist[::-1])[::-1]
+        mean1 = np.cumsum(hist * bin_centers) / (weight1 + 1e-10)
+        mean2 = (np.cumsum((hist * bin_centers)[::-1]) / (weight2 + 1e-10))[::-1]
+
+        variance = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+        optimal_bin = np.argmax(variance)
+        optimal_thresh_norm = bin_centers[optimal_bin]
+
+        # Convert back to original scale
+        optimal_height = float((optimal_thresh_norm / 255.0 *
+                        (peak_heights.max() - peak_heights.min()) +
+                        peak_heights.min()))
+
+        # Calculate local minimum threshold (valley between noise and signal)
+        local_min_threshold, model_params = self._calculate_local_minimum_threshold_silent(peak_heights)
+
+        # Choose threshold: prefer local minimum if available, fallback to Otsu
+        if local_min_threshold is not None:
+            chosen_threshold = local_min_threshold
+            print(f"[Auto-Detect] Using valley threshold: {chosen_threshold:.4f} (Otsu: {optimal_height:.4f})")
+        else:
+            chosen_threshold = optimal_height
+            model_params = None
+            print(f"[Auto-Detect] Using Otsu threshold: {chosen_threshold:.4f} (no valley found)")
+
+        t_elapsed = time.time() - t_start
+        print(f"[Auto-Detect] Computation took {t_elapsed:.2f}s")
+
+        return {
+            'threshold': chosen_threshold,
+            'model_params': model_params,
+            'peak_heights': peak_heights,
+        }
+
+    def _on_auto_detect_complete(self, result):
+        """Apply auto-detect results to UI (main thread)."""
+        self._threshold_worker = None
+
+        if result is None:
+            self._log_status_message("Auto-detect: not enough peaks", 3000)
+            return
+
+        chosen_threshold = result['threshold']
+        model_params = result['model_params']
+        peak_heights = result['peak_heights']
+
+        # Store peak heights for histogram reuse (so we don't recalculate during dragging)
+        self.all_peak_heights = peak_heights
+
+        # Store model parameters for probability metrics
+        import core.metrics as metrics
+        metrics.set_threshold_model_params(model_params)
+        if model_params is not None:
+            print(f"[Auto-Detect] Stored model parameters for P(noise)/P(breath) calculation")
+
+        # Store and populate threshold values
+        self.peak_prominence = chosen_threshold
+        self.peak_height_threshold = chosen_threshold
+
+        # Draw threshold line on plot
+        self.plot_host.update_threshold_line(chosen_threshold)
+
+        # Enable Apply button
+        self.ApplyPeakFindPushButton.setEnabled(True)
+
+        self._log_status_message(f"Auto-detected threshold: {chosen_threshold:.4f}", 3000)
+
+        # Pre-build the Analysis Options dialog in background (deferred)
+        QTimer.singleShot(500, self._prebuild_analysis_options_dialog)
+
+        # Refresh Peak Detection tab if it's the one that needs updating after channel change
+        if (hasattr(self, '_channel_change_needs_dialog_refresh') and
+            self._channel_change_needs_dialog_refresh and
+            getattr(self, '_dialog_tab_to_refresh', -1) == 0):  # Tab 0 = Peak Detection
+            if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog is not None:
+                try:
+                    if self._analysis_options_dialog.isVisible():
+                        print("[Auto-Detect] Refreshing Peak Detection tab after auto-detect complete")
+                        self._analysis_options_dialog._refresh_peak_detection_tab()
+                        self._channel_change_needs_dialog_refresh = False  # Mark as done
+                except RuntimeError:
+                    self._analysis_options_dialog = None
+
+    def _on_auto_detect_error(self, error_msg):
+        """Handle auto-detect background thread errors."""
+        self._threshold_worker = None
+        print(f"[Auto-Detect] Error: {error_msg}")
+        self._log_status_message("Auto-detect threshold failed", 3000)
 
     # PeakPromValueSpinBox removed - prominence/threshold now set in Analysis Options dialog
     # def _on_prominence_spinbox_changed(self):
@@ -6717,6 +6798,7 @@ class MainWindow(QMainWindow):
         stim_spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
 
         # Open dialog
+        from dialogs.spectral_analysis_dialog import SpectralAnalysisDialog
         dlg = SpectralAnalysisDialog(
             parent=self, t=t, y=y, sr_hz=st.sr_hz, stim_spans=stim_spans,
             parent_window=self, use_zscore=self.use_zscore_normalization
@@ -6772,6 +6854,7 @@ class MainWindow(QMainWindow):
             return
 
         # Create and show non-blocking dialog
+        from dialogs.advanced_peak_editor_dialog import AdvancedPeakEditorDialog
         dlg = AdvancedPeakEditorDialog(main_window=self, parent=self)
         self._advanced_peak_editor_dlg = dlg  # Store reference to prevent garbage collection
 
@@ -8427,6 +8510,7 @@ Sweeps: {sweeps}"""
             self.tableFullContentCheckbox.stateChanged.connect(self._on_table_column_mode_changed)
 
         # Initialize AI Notebook Manager and connect chatbot panel widgets
+        from core.ai_notebook_manager import AINotebookManager
         self._ai_notebook = AINotebookManager(self)
         if hasattr(self, 'chatSendButton'):
             self.chatSendButton.clicked.connect(self._ai_notebook.on_chat_send)
@@ -8444,6 +8528,7 @@ Sweeps: {sweeps}"""
             self._ai_notebook.init_model_selector()
 
         # Initialize Code Notebook Manager and connect widgets
+        from core.code_notebook_manager import CodeNotebookManager
         self._code_notebook = CodeNotebookManager(self)
         if hasattr(self, 'runCodeButton'):
             self.runCodeButton.clicked.connect(self._code_notebook.on_run_code)

@@ -10,6 +10,7 @@ Handles:
 - Save to NPZ file
 """
 
+import ast
 import time
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -101,8 +102,10 @@ class DataAssemblyWidget(QWidget):
     load_into_app_requested = pyqtSignal(Path)  # Emitted when user clicks "Save & Load"
     load_different_requested = pyqtSignal()  # Emitted when user clicks "Load Different Experiment"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, layout_version=1):
         super().__init__(parent)
+
+        self._layout_version = layout_version
 
         # Load UI from .ui file
         ui_path = Path(__file__).parent.parent.parent / "ui" / "photometry_data_assembly.ui"
@@ -118,6 +121,10 @@ class DataAssemblyWidget(QWidget):
             # Fallback: create minimal layout if .ui file not found
             self._create_fallback_ui()
 
+        # Restructure layout for V3 two-tab design
+        if self._layout_version >= 2:
+            self._restructure_layout()
+
         # Initialize state
         self.file_paths: Dict[str, Optional[Path]] = {
             'fp_data': None,
@@ -128,6 +135,7 @@ class DataAssemblyWidget(QWidget):
 
         # Data storage (raw - preserved for reference)
         self._fp_data = None  # DataFrame from FP CSV
+        self._fp_data_source: Optional[str] = None  # Path that produced _fp_data (for staleness check)
         self._ai_data = None  # DataFrame from AI CSV
         self._timestamps = None  # numpy array (raw timestamps in ms)
 
@@ -148,6 +156,14 @@ class DataAssemblyWidget(QWidget):
         # Experiment plotter for dF/F visualization
         self._plotter = ExperimentPlotter()
 
+        # Debounce timer for preview plot updates — prevents cascading redraws
+        # when multiple UI controls change in rapid succession
+        from PyQt6.QtCore import QTimer
+        self._preview_plot_debounce = QTimer()
+        self._preview_plot_debounce.setSingleShot(True)
+        self._preview_plot_debounce.setInterval(150)
+        self._preview_plot_debounce.timeout.connect(self._do_update_preview_plot)
+
         # Setup PyQtGraph for preview plots
         self._setup_pyqtgraph()
 
@@ -158,6 +174,310 @@ class DataAssemblyWidget(QWidget):
         """Create minimal UI if .ui file not found."""
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Error: photometry_data_assembly.ui not found"))
+
+    def _restructure_layout(self):
+        """Restructure into two-tab layout for V3.
+
+        Tab 1 (Data Files): source file section + per-file preview sub-tabs
+        Tab 2 (Visualization): experiment tabs with plots + dF/F controls
+
+        Bottom bar: output label + save buttons (always visible)
+
+        Reparents existing .ui widgets into new structure; no widgets are deleted.
+        """
+        from PyQt6.QtWidgets import QTabWidget, QSizePolicy
+
+        # --- 1. Hide the old scroll area (we'll reparent its children) ---
+        self.scroll_area.hide()
+
+        # --- 2. Build outer structure ---
+        # Replace the main_layout contents with: tab widget + bottom bar
+        outer_layout = self.layout()  # main_layout from .ui
+
+        # Create main two-tab widget
+        self.main_tab_widget = QTabWidget()
+        self.main_tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3e3e42;
+                background-color: #1e1e1e;
+            }
+            QTabBar::tab {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                padding: 8px 20px;
+                border: 1px solid #3e3e42;
+                border-bottom: none;
+                margin-right: 2px;
+                font-size: 12px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                border-bottom: 2px solid #007acc;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3e3e42;
+            }
+        """)
+
+        # --- 3. Tab 1: Data Files ---
+        tab1_widget = QWidget()
+        tab1_layout = QVBoxLayout(tab1_widget)
+        tab1_layout.setContentsMargins(4, 4, 4, 4)
+        tab1_layout.setSpacing(8)
+
+        # Reparent source_section into Tab 1
+        if hasattr(self, 'source_section'):
+            # Remove preview tables from source_files_group (they'll go into sub-tabs)
+            # Hide the inline preview tables - they'll be in sub-tabs below
+            if hasattr(self, 'fp_preview_table'):
+                self.fp_preview_table.hide()
+            if hasattr(self, 'ai_preview_table'):
+                self.ai_preview_table.hide()
+
+            self.source_section.setParent(None)
+            tab1_layout.addWidget(self.source_section)
+
+        # File preview sub-tabs
+        self._file_preview_tabs = QTabWidget()
+        self._file_preview_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3e3e42;
+                background-color: #1e1e1e;
+            }
+            QTabBar::tab {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                padding: 5px 14px;
+                border: 1px solid #3e3e42;
+                border-bottom: none;
+                margin-right: 2px;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                border-bottom: 1px solid #1e1e1e;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3e3e42;
+            }
+        """)
+        self._file_preview_tabs.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+
+        # FP Data sub-tab — create a new table widget for the sub-tab
+        self._fp_preview_table_v3 = self._create_preview_table_clone("fp")
+        self._file_preview_tabs.addTab(self._fp_preview_table_v3, "FP Data")
+
+        # AI Data sub-tab
+        self._ai_preview_table_v3 = self._create_preview_table_clone("ai")
+        self._file_preview_tabs.addTab(self._ai_preview_table_v3, "AI Data")
+
+        # Timestamps sub-tab
+        ts_container = QWidget()
+        ts_layout_v = QVBoxLayout(ts_container)
+        ts_layout_v.setContentsMargins(8, 8, 8, 8)
+        ts_layout_v.setSpacing(4)
+        self._ts_info_label_v3 = QLabel("No timestamps loaded")
+        self._ts_info_label_v3.setStyleSheet("color: #888888; font-size: 11px;")
+        self._ts_info_label_v3.setWordWrap(True)
+        ts_layout_v.addWidget(self._ts_info_label_v3)
+        # Also add a table for timestamp data preview
+        self._ts_preview_table_v3 = self._create_preview_table_clone("ts")
+        ts_layout_v.addWidget(self._ts_preview_table_v3, 1)
+        self._file_preview_tabs.addTab(ts_container, "Timestamps")
+
+        # Notes sub-tab — full text view
+        notes_container = QWidget()
+        notes_layout_v = QVBoxLayout(notes_container)
+        notes_layout_v.setContentsMargins(8, 8, 8, 8)
+        notes_layout_v.setSpacing(4)
+        self._notes_preview_label_v3 = QLabel("No notes file selected")
+        self._notes_preview_label_v3.setStyleSheet(
+            "color: #888888; font-size: 11px;"
+        )
+        notes_layout_v.addWidget(self._notes_preview_label_v3)
+        from PyQt6.QtWidgets import QTextEdit
+        self._notes_text_v3 = QTextEdit()
+        self._notes_text_v3.setReadOnly(True)
+        self._notes_text_v3.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        self._notes_text_v3.setPlaceholderText("Select a notes file to preview its contents here.")
+        notes_layout_v.addWidget(self._notes_text_v3, 1)
+        self._file_preview_tabs.addTab(notes_container, "Notes")
+
+        tab1_layout.addWidget(self._file_preview_tabs, 1)  # stretch=1 so tables expand
+
+        self.main_tab_widget.addTab(tab1_widget, "Data Files")
+
+        # --- 4. Tab 2: Visualization ---
+        tab2_widget = QWidget()
+        tab2_layout = QVBoxLayout(tab2_widget)
+        tab2_layout.setContentsMargins(4, 4, 4, 4)
+        tab2_layout.setSpacing(4)
+
+        # Top row: Experiments spinner
+        exp_row = QHBoxLayout()
+        exp_row.setSpacing(8)
+        exp_label = QLabel("Experiments:")
+        exp_label.setStyleSheet("font-weight: bold; font-size: 12px; color: #d4d4d4;")
+        exp_row.addWidget(exp_label)
+
+        if hasattr(self, 'spin_num_experiments'):
+            self.spin_num_experiments.setParent(None)
+            exp_row.addWidget(self.spin_num_experiments)
+
+        exp_row.addStretch()
+        tab2_layout.addLayout(exp_row)
+
+        # Hide channel table — replaced by inline per-channel controls in V3
+        if hasattr(self, 'channel_section'):
+            self.channel_section.hide()
+
+        # Create experiment tab widget (replaces preview_tab_widget for v3)
+        self.experiment_tab_widget = QTabWidget()
+        self.experiment_tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3e3e42;
+                background-color: #1e1e1e;
+            }
+            QTabBar::tab {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                padding: 6px 16px;
+                border: 1px solid #3e3e42;
+                border-bottom: none;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                border-bottom: 1px solid #1e1e1e;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3e3e42;
+            }
+        """)
+
+        # "All Channels" as first sub-tab (tab index 0)
+        all_channels_widget = QWidget()
+        all_channels_layout_v = QVBoxLayout(all_channels_widget)
+        all_channels_layout_v.setContentsMargins(0, 0, 0, 0)
+        all_channels_layout_v.setSpacing(4)
+
+        # V3: Scroll area with individual plot rows + inline controls
+        # (replaces single GraphicsLayoutWidget in canvas_container)
+        self._v3_channel_controls = {}  # channel_name -> {assign_combo, type_combo, plot_widget}
+        self._v3_channel_rows = []  # row QWidgets for cleanup
+
+        self._v3_channels_scroll = QScrollArea()
+        self._v3_channels_scroll.setWidgetResizable(True)
+        self._v3_channels_scroll.setStyleSheet(
+            "QScrollArea { border: none; background-color: #1e1e1e; }"
+        )
+        self._v3_channels_container = QWidget()
+        self._v3_channels_layout = QVBoxLayout(self._v3_channels_container)
+        self._v3_channels_layout.setContentsMargins(0, 0, 0, 0)
+        self._v3_channels_layout.setSpacing(2)
+        self._v3_channels_layout.addStretch()
+        self._v3_channels_scroll.setWidget(self._v3_channels_container)
+        all_channels_layout_v.addWidget(self._v3_channels_scroll, 1)
+
+        # Keep canvas_container hidden (still needed by _setup_pyqtgraph)
+        if hasattr(self, 'canvas_container'):
+            self.canvas_container.hide()
+
+        # Controls row (Reset View, Normalize, Update) below plots
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(12)
+        controls_row.addStretch()
+
+        if hasattr(self, 'chk_normalize_time'):
+            self.chk_normalize_time.setParent(None)
+            controls_row.addWidget(self.chk_normalize_time)
+        if hasattr(self, 'btn_update_preview'):
+            self.btn_update_preview.setParent(None)
+            controls_row.addWidget(self.btn_update_preview)
+
+        all_channels_layout_v.addLayout(controls_row)
+
+        self.experiment_tab_widget.addTab(all_channels_widget, "All Channels")
+
+        tab2_layout.addWidget(self.experiment_tab_widget, 1)
+
+        self.main_tab_widget.addTab(tab2_widget, "Visualization")
+
+        # --- 5. Bottom bar (always visible) ---
+        self._bottom_bar = QWidget()
+        self._bottom_bar.setFixedHeight(50)
+        self._bottom_bar.setStyleSheet("background-color: #252526; border-top: 1px solid #3e3e42;")
+        bottom_layout = QHBoxLayout(self._bottom_bar)
+        bottom_layout.setContentsMargins(12, 4, 12, 4)
+        bottom_layout.setSpacing(12)
+
+        # Output file label (compact)
+        if hasattr(self, 'output_files_label'):
+            self.output_files_label.setParent(None)
+            self.output_files_label.setStyleSheet(
+                "color: #888888; font-size: 10px; background-color: transparent;"
+            )
+            self.output_files_label.setMinimumSize(0, 0)
+            self.output_files_label.setMaximumHeight(40)
+            bottom_layout.addWidget(self.output_files_label, 1)
+
+        bottom_layout.addStretch()
+
+        # Save buttons
+        if hasattr(self, 'btn_save_data'):
+            self.btn_save_data.setParent(None)
+            bottom_layout.addWidget(self.btn_save_data)
+        if hasattr(self, 'btn_save_and_load'):
+            self.btn_save_and_load.setParent(None)
+            bottom_layout.addWidget(self.btn_save_and_load)
+
+        # --- 6. Add to outer layout ---
+        outer_layout.addWidget(self.main_tab_widget, 1)
+        outer_layout.addWidget(self._bottom_bar, 0)
+
+        # --- 7. Hide old containers that are now empty ---
+        if hasattr(self, 'preview_section'):
+            self.preview_section.hide()
+        # channel_section is reparented into Tab 2 (starts collapsed, not hidden)
+        if hasattr(self, 'output_section'):
+            self.output_section.hide()
+        if hasattr(self, 'button_section'):
+            self.button_section.hide()
+
+    def _create_preview_table_clone(self, prefix: str):
+        """Create a QTableWidget for file preview sub-tabs in V3 layout."""
+        from PyQt6.QtWidgets import QTableWidget, QSizePolicy
+        table = QTableWidget()
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                border: 1px solid #3e3e42;
+                gridline-color: #3e3e42;
+                color: #d4d4d4;
+            }
+            QTableWidget::item { padding: 4px; }
+            QTableWidget::item:selected { background-color: #094771; }
+            QHeaderView::section {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                padding: 4px;
+            }
+        """)
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        return table
 
     def _setup_pyqtgraph(self):
         """Setup PyQtGraph graphics layout for high-performance plotting."""
@@ -188,14 +508,33 @@ class DataAssemblyWidget(QWidget):
             layout.addWidget(self.graphics_layout)
 
         # Install event filter to forward wheel events to parent scroll area
-        if hasattr(self, 'scroll_area'):
+        # In V3 layout, plots are in tabs (not scroll area) so skip this
+        if self._layout_version < 2 and hasattr(self, 'scroll_area'):
             self._wheel_filter = WheelEventFilter(self.scroll_area, self)
             self.graphics_layout.installEventFilter(self._wheel_filter)
+            # Force repaint on scroll to fix OpenGL compositing glitch
+            # (plots go blank when scrolled out of view and back)
+            self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_repaint)
 
         # Add Reset View button on the left side of the controls row
-        # We need to find the QHBoxLayout that contains chk_normalize_time and btn_update_preview
         if hasattr(self, 'btn_update_preview') and hasattr(self, 'chk_normalize_time'):
             from PyQt6.QtWidgets import QHBoxLayout
+
+            self.btn_reset_view = QPushButton("Reset View")
+            self.btn_reset_view.setToolTip("Reset all plots to show full data range")
+            self.btn_reset_view.clicked.connect(self._reset_all_plots)
+            self.btn_reset_view.setStyleSheet("""
+                QPushButton {
+                    background-color: #2ea043;
+                    border: none;
+                    border-radius: 3px;
+                    padding: 8px 16px;
+                    color: white;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #3fb950; }
+                QPushButton:pressed { background-color: #238636; }
+            """)
 
             # Search recursively for the layout containing the checkbox
             def find_layout_containing_widget(layout, widget):
@@ -211,30 +550,21 @@ class DataAssemblyWidget(QWidget):
                             return result
                 return None
 
-            # Start from preview_section's layout
-            if hasattr(self, 'preview_section'):
-                controls_layout = find_layout_containing_widget(
-                    self.preview_section.layout(),
-                    self.chk_normalize_time
-                )
+            # In V3, chk_normalize_time is in the All Channels tab controls row
+            # In V2, it's in preview_section
+            search_root = None
+            if self._layout_version >= 2 and hasattr(self, 'experiment_tab_widget'):
+                all_channels_tab = self.experiment_tab_widget.widget(0)
+                if all_channels_tab:
+                    search_root = all_channels_tab.layout()
+            elif hasattr(self, 'preview_section'):
+                search_root = self.preview_section.layout()
 
+            if search_root:
+                controls_layout = find_layout_containing_widget(
+                    search_root, self.chk_normalize_time
+                )
                 if controls_layout and isinstance(controls_layout, QHBoxLayout):
-                    self.btn_reset_view = QPushButton("Reset View")
-                    self.btn_reset_view.setToolTip("Reset all plots to show full data range")
-                    self.btn_reset_view.clicked.connect(self._reset_all_plots)
-                    self.btn_reset_view.setStyleSheet("""
-                        QPushButton {
-                            background-color: #2ea043;
-                            border: none;
-                            border-radius: 3px;
-                            padding: 8px 16px;
-                            color: white;
-                            font-weight: bold;
-                        }
-                        QPushButton:hover { background-color: #3fb950; }
-                        QPushButton:pressed { background-color: #238636; }
-                    """)
-                    # Insert at position 0 (left side, before the spacer)
                     controls_layout.insertWidget(0, self.btn_reset_view)
 
     def _setup_connections(self):
@@ -267,9 +597,17 @@ class DataAssemblyWidget(QWidget):
         if hasattr(self, 'spin_num_experiments'):
             self.spin_num_experiments.valueChanged.connect(self._on_num_experiments_changed)
 
-        # Preview tab changes - update toolbar to work with active canvas
-        if hasattr(self, 'preview_tab_widget'):
-            self.preview_tab_widget.currentChanged.connect(self._on_preview_tab_changed)
+        # Tab change handlers
+        if self._layout_version >= 2:
+            # V3: main_tab_widget + experiment_tab_widget
+            if hasattr(self, 'main_tab_widget'):
+                self.main_tab_widget.currentChanged.connect(self._on_main_tab_changed)
+            if hasattr(self, 'experiment_tab_widget'):
+                self.experiment_tab_widget.currentChanged.connect(self._on_experiment_tab_changed)
+        else:
+            # V2: preview_tab_widget
+            if hasattr(self, 'preview_tab_widget'):
+                self.preview_tab_widget.currentChanged.connect(self._on_preview_tab_changed)
 
         # Track edit mode state
         self._edit_mode = False
@@ -514,6 +852,7 @@ class DataAssemblyWidget(QWidget):
 
         # Store loaded data
         self._fp_data = results['fp_data']
+        self._fp_data_source = str(self.file_paths.get('fp_data', ''))
         if self._fp_data is None:
             QMessageBox.warning(self, "Load Error", "Failed to load FP data.")
             return
@@ -662,71 +1001,167 @@ class DataAssemblyWidget(QWidget):
 
     def _update_fp_preview_table(self):
         """Update FP data preview table."""
-        if self._fp_data is None or not hasattr(self, 'fp_preview_table'):
+        if self._fp_data is None:
             return
 
         col_names, rows = photometry.get_file_preview(self.file_paths['fp_data'], n_rows=5)
 
-        table = self.fp_preview_table
+        # Populate V2 inline table (compact, 5 rows)
+        if hasattr(self, 'fp_preview_table'):
+            self._fill_table(self.fp_preview_table, col_names, rows)
+
+        # Populate V3 sub-tab table (full preview from DataFrame)
+        if hasattr(self, '_fp_preview_table_v3'):
+            self._fill_table_from_dataframe(self._fp_preview_table_v3, self._fp_data, max_rows=100)
+
+    def _fill_table(self, table, col_names, rows):
+        """Fill a QTableWidget with column names and row data."""
         table.setColumnCount(len(col_names))
         table.setRowCount(len(rows))
         table.setHorizontalHeaderLabels(col_names)
-
         for r, row in enumerate(rows):
             for c, val in enumerate(row):
                 table.setItem(r, c, QTableWidgetItem(str(val)))
 
+    def _fill_table_from_dataframe(self, table, df, max_rows=100):
+        """Fill a QTableWidget from a pandas DataFrame with spreadsheet-like formatting.
+
+        Shows row numbers, all columns, alternating row colors, and auto-sized columns.
+        """
+        if df is None or len(df) == 0:
+            table.setRowCount(0)
+            table.setColumnCount(0)
+            return
+
+        n_rows = min(len(df), max_rows)
+        n_cols = len(df.columns)
+
+        table.setRowCount(n_rows)
+        table.setColumnCount(n_cols)
+        table.setHorizontalHeaderLabels([str(c) for c in df.columns])
+
+        # Show row indices as vertical headers
+        table.setVerticalHeaderLabels([str(i) for i in range(n_rows)])
+
+        # Populate cells
+        for r in range(n_rows):
+            for c in range(n_cols):
+                val = df.iloc[r, c]
+                if isinstance(val, float):
+                    text = f"{val:.6g}"
+                else:
+                    text = str(val)
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # Read-only
+                table.setItem(r, c, item)
+
+        # Auto-resize columns to content, then allow user to resize
+        table.horizontalHeader().setStretchLastSection(True)
+        for c in range(n_cols):
+            table.resizeColumnToContents(c)
+            # Cap column width to prevent one column taking all space
+            if table.columnWidth(c) > 200:
+                table.setColumnWidth(c, 200)
+
+        # Show total row count in status if truncated
+        if len(df) > max_rows:
+            table.setToolTip(f"Showing first {max_rows} of {len(df):,} rows")
+        else:
+            table.setToolTip(f"{len(df):,} rows")
+
+        # Alternating row colors for readability
+        table.setAlternatingRowColors(True)
+        table.setStyleSheet(table.styleSheet() + """
+            QTableWidget {
+                alternate-background-color: #252526;
+            }
+        """)
+
     def _update_ai_preview_table(self):
         """Update AI data preview table."""
-        if self._ai_data is None or not hasattr(self, 'ai_preview_table'):
+        if self._ai_data is None:
             return
 
         col_names, rows = photometry.get_file_preview(self.file_paths['ai_data'], n_rows=5)
 
-        table = self.ai_preview_table
-        table.setColumnCount(len(col_names))
-        table.setRowCount(len(rows))
-        table.setHorizontalHeaderLabels(col_names)
+        # Populate V2 inline table (compact, 5 rows)
+        if hasattr(self, 'ai_preview_table'):
+            self._fill_table(self.ai_preview_table, col_names, rows)
 
-        for r, row in enumerate(rows):
-            for c, val in enumerate(row):
-                table.setItem(r, c, QTableWidgetItem(str(val)))
+        # Populate V3 sub-tab table (full preview from DataFrame)
+        if hasattr(self, '_ai_preview_table_v3'):
+            self._fill_table_from_dataframe(self._ai_preview_table_v3, self._ai_data, max_rows=100)
 
     def _update_timestamps_info(self):
-        """Update timestamps info label."""
-        if not hasattr(self, 'ts_info_label'):
-            return
-
+        """Update timestamps info label and V3 preview table."""
         if self._timestamps is not None and len(self._timestamps) > 0:
             t_min = self._timestamps.min()
             t_max = self._timestamps.max()
             n_samples = len(self._timestamps)
-            self.ts_info_label.setText(
-                f"{n_samples:,} samples, {t_min:.1f} - {t_max:.1f} ms"
-            )
+            dt = (t_max - t_min) / max(1, n_samples - 1) if n_samples > 1 else 0
+            sr = 1000.0 / dt if dt > 0 else 0  # timestamps are in ms
+            text = (f"{n_samples:,} samples  |  {t_min:.1f} - {t_max:.1f} ms  |  "
+                    f"~{sr:.1f} Hz  |  Duration: {(t_max - t_min)/1000:.1f}s")
         else:
-            self.ts_info_label.setText("No timestamps loaded")
+            text = "No timestamps loaded"
+
+        if hasattr(self, 'ts_info_label'):
+            self.ts_info_label.setText(text)
+        if hasattr(self, '_ts_info_label_v3'):
+            self._ts_info_label_v3.setText(text)
+
+        # Populate V3 timestamp table preview
+        if hasattr(self, '_ts_preview_table_v3') and self._timestamps is not None and len(self._timestamps) > 0:
+            import pandas as pd
+            ts_path = self.file_paths.get('timestamps')
+            if ts_path and Path(ts_path).exists():
+                try:
+                    ts_df = pd.read_csv(ts_path, nrows=100)
+                    self._fill_table_from_dataframe(self._ts_preview_table_v3, ts_df, max_rows=100)
+                except Exception:
+                    # Fallback: show raw array
+                    n = min(100, len(self._timestamps))
+                    self._ts_preview_table_v3.setColumnCount(1)
+                    self._ts_preview_table_v3.setRowCount(n)
+                    self._ts_preview_table_v3.setHorizontalHeaderLabels(["Timestamp (ms)"])
+                    for i in range(n):
+                        self._ts_preview_table_v3.setItem(i, 0, QTableWidgetItem(f"{self._timestamps[i]:.2f}"))
 
     def _update_notes_info(self):
-        """Update notes preview label."""
-        if not hasattr(self, 'notes_preview_label'):
-            return
-
+        """Update notes preview label and V3 full text view."""
         notes_path = self.file_paths.get('notes')
         if not notes_path:
-            self.notes_preview_label.setText("No notes file selected")
-            return
+            short_text = "No notes file selected"
+            full_text = ""
+        else:
+            try:
+                with open(notes_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    full_text = f.read()
+                lines = full_text.strip().split('\n')
+                preview = '\n'.join(lines[:3]).strip()
+                if len(preview) > 100:
+                    preview = preview[:100] + "..."
+                short_text = preview if preview else "(empty file)"
+            except Exception as e:
+                short_text = f"Error reading: {e}"
+                full_text = ""
 
-        try:
-            # Read first few lines
-            with open(notes_path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()[:3]
-            preview = ''.join(lines).strip()
-            if len(preview) > 100:
-                preview = preview[:100] + "..."
-            self.notes_preview_label.setText(preview if preview else "(empty file)")
-        except Exception as e:
-            self.notes_preview_label.setText(f"Error reading: {e}")
+        # V2 inline label (compact)
+        if hasattr(self, 'notes_preview_label'):
+            self.notes_preview_label.setText(short_text)
+
+        # V3 label (file path info)
+        if hasattr(self, '_notes_preview_label_v3'):
+            if notes_path:
+                self._notes_preview_label_v3.setText(str(notes_path))
+                self._notes_preview_label_v3.setStyleSheet("color: #d4d4d4; font-size: 11px;")
+            else:
+                self._notes_preview_label_v3.setText("No notes file selected")
+                self._notes_preview_label_v3.setStyleSheet("color: #888888; font-size: 11px;")
+
+        # V3 full text view
+        if hasattr(self, '_notes_text_v3'):
+            self._notes_text_v3.setPlainText(full_text)
 
     def _show_notes_popout(self):
         """Show notes file in a popout dialog."""
@@ -767,10 +1202,16 @@ class DataAssemblyWidget(QWidget):
         # Mark that changes have been made
         self._has_unsaved_changes = True
 
-        if not hasattr(self, 'preview_tab_widget'):
-            return
+        # Determine which tab widget holds experiment tabs
+        if self._layout_version >= 2:
+            if not hasattr(self, 'experiment_tab_widget'):
+                return
+            tab_widget = self.experiment_tab_widget
+        else:
+            if not hasattr(self, 'preview_tab_widget'):
+                return
+            tab_widget = self.preview_tab_widget
 
-        tab_widget = self.preview_tab_widget
         tab_index = exp_idx + 1  # +1 because "All Channels" is at index 0
 
         if tab_index < tab_widget.count():
@@ -781,10 +1222,14 @@ class DataAssemblyWidget(QWidget):
 
     def _update_experiment_tabs(self, n_experiments: int):
         """Create or remove experiment preview tabs based on experiment count."""
-        if not hasattr(self, 'preview_tab_widget'):
-            return
-
-        tab_widget = self.preview_tab_widget
+        if self._layout_version >= 2:
+            if not hasattr(self, 'experiment_tab_widget'):
+                return
+            tab_widget = self.experiment_tab_widget
+        else:
+            if not hasattr(self, 'preview_tab_widget'):
+                return
+            tab_widget = self.preview_tab_widget
 
         # Count current experiment tabs (excluding "All Channels")
         current_exp_tabs = tab_widget.count() - 1
@@ -848,8 +1293,8 @@ class DataAssemblyWidget(QWidget):
 
             exp_main_layout.addWidget(splitter)
 
-            # Install wheel filter
-            if hasattr(self, 'scroll_area'):
+            # Install wheel filter (V2 only — V3 plots are in tabs, not scroll area)
+            if self._layout_version < 2 and hasattr(self, 'scroll_area'):
                 wheel_filter = WheelEventFilter(self.scroll_area, self)
                 graphics_layout.installEventFilter(wheel_filter)
 
@@ -1235,7 +1680,6 @@ class DataAssemblyWidget(QWidget):
 
         if not exp_fibers:
             print(f"[Photometry] No fiber channels assigned to Exp {exp_idx + 1}")
-            return
 
         # Get graphics layout for this experiment
         if exp_idx not in self._experiment_layouts:
@@ -1244,8 +1688,9 @@ class DataAssemblyWidget(QWidget):
         graphics_layout = self._experiment_layouts[exp_idx]
         _safe_clear_graphics_layout(graphics_layout)
 
-        # Clear fit regions for this experiment
+        # Clear fit regions and stale curve refs for this experiment
         self._plotter.clear_fit_regions(exp_idx)
+        self._plotter._curve_refs.pop(exp_idx, None)
 
         # Store processed results
         if not hasattr(self, '_processed_results'):
@@ -1263,20 +1708,41 @@ class DataAssemblyWidget(QWidget):
 
         row = 0
         all_plot_items = []
+        self._ai_plotted_for_exp = False
 
         for fiber_col in exp_fibers:
             # Use preprocessed fiber data (already interpolated to common time)
             if fiber_col not in self._preprocessed['fibers']:
                 print(f"[Photometry] Skipping {fiber_col}: not in preprocessed data")
+                warn_plot = graphics_layout.addPlot(row=row, col=0)
+                all_plot_items.append(warn_plot)
+                warn_plot.hideAxis('left')
+                warn_plot.hideAxis('bottom')
+                warn_plot.setTitle(
+                    f'{fiber_col} — No data (all NaN)',
+                    color='#ff6666', size='10pt'
+                )
+                self._setup_plot_wheel(warn_plot)
+                row += 1
                 continue
 
             fiber_preproc = self._preprocessed['fibers'][fiber_col]
             iso_signal = fiber_preproc['iso']
             gcamp_signal = fiber_preproc['gcamp']
 
-            # Skip channels with all-NaN values
+            # Skip channels with all-NaN values — show warning on plot
             if np.all(np.isnan(iso_signal)) or np.all(np.isnan(gcamp_signal)):
                 print(f"[Photometry] Skipping {fiber_col}: all NaN values")
+                warn_plot = graphics_layout.addPlot(row=row, col=0)
+                all_plot_items.append(warn_plot)
+                warn_plot.hideAxis('left')
+                warn_plot.hideAxis('bottom')
+                warn_plot.setTitle(
+                    f'{fiber_col} — No data (all NaN)',
+                    color='#ff6666', size='10pt'
+                )
+                self._setup_plot_wheel(warn_plot)
+                row += 1
                 continue
 
             # Compute dF/F using FAST path (data already aligned, no interpolation needed)
@@ -1368,7 +1834,7 @@ class DataAssemblyWidget(QWidget):
                     controls['spin_fit_end'].setValue(fit_end)
                     controls['spin_fit_end'].blockSignals(False)
 
-            # Create callback for fit region changes
+            # Create callback for fit region changes (uses fast path for setData updates)
             def on_fit_region_changed(start, end, idx=exp_idx):
                 ctrl_key = f'exp_{idx}'
                 if hasattr(self, '_dff_controls') and ctrl_key in self._dff_controls:
@@ -1381,7 +1847,7 @@ class DataAssemblyWidget(QWidget):
                         ctrls['spin_fit_end'].blockSignals(True)
                         ctrls['spin_fit_end'].setValue(end)
                         ctrls['spin_fit_end'].blockSignals(False)
-                self._compute_dff(idx)
+                self._recompute_dff_fast(idx)
 
             # Use preprocessed AI data (already on common time base)
             ai_data_for_plot = self._preprocessed.get('ai_channels', {})
@@ -1403,7 +1869,7 @@ class DataAssemblyWidget(QWidget):
                 dff_results=dff_results,
                 ai_data=ai_data_for_plot,
                 ai_time=common_time_sec,
-                ai_channels=ai_channels if row == 0 else [],
+                ai_channels=ai_channels if not self._ai_plotted_for_exp else [],
                 show_intermediates=show_intermediates,
                 graphics_layout=graphics_layout,
                 fit_region_enabled=fit_region_enabled,
@@ -1411,8 +1877,28 @@ class DataAssemblyWidget(QWidget):
                 fit_end=fit_end,
                 on_region_changed=on_fit_region_changed
             )
+            self._ai_plotted_for_exp = True
 
             all_plot_items.extend(plot_items)
+
+        # If no fiber produced real data plots, plot AI channels standalone
+        # (AI channels are normally plotted inside plot_experiment on the first valid fiber)
+        if not self._ai_plotted_for_exp and ai_channels:
+            ai_data_for_plot = self._preprocessed.get('ai_channels', {})
+            if ai_data_for_plot:
+                ai_plots = self._plotter._plot_ai_channels(
+                    ai_data_for_plot, common_time_sec, ai_channels,
+                    graphics_layout, row, None
+                )
+                all_plot_items.extend(ai_plots)
+                # Show X tick labels on bottom plot
+                if all_plot_items:
+                    all_plot_items[-1].getAxis('bottom').setStyle(showValues=True)
+                    all_plot_items[-1].setLabel('bottom', 'Time (min)', color='#cccccc')
+                # Auto-range
+                for plot in ai_plots:
+                    plot.enableAutoRange()
+                    plot.autoRange()
 
         # Update fit parameters display
         self._update_fit_params_label(exp_idx)
@@ -1427,6 +1913,127 @@ class DataAssemblyWidget(QWidget):
 
         total_time = time_module.perf_counter() - t_start
         print(f"[Timing] Total _compute_dff for Exp {exp_idx + 1}: {total_time:.3f}s ({len(all_plot_items)} plots)")
+
+    def _recompute_dff_fast(self, exp_idx: int):
+        """Fast-path dF/F recompute: recompute data and update curves in-place via setData().
+
+        Falls back to full _compute_dff() if curve refs are missing (e.g. after structure change).
+        """
+        import time as time_module
+        t_start = time_module.perf_counter()
+
+        # Get current params
+        params = self._get_dff_params(exp_idx)
+        controls_key = f'exp_{exp_idx}'
+
+        if self._preprocessed is None:
+            self._compute_dff(exp_idx)
+            return
+
+        # Find fiber channels for this experiment (same logic as _compute_dff)
+        exp_assignments = self._get_experiment_assignments()
+        exp_fibers = []
+        for channel_name, assigned_exp in exp_assignments.items():
+            if assigned_exp == exp_idx or assigned_exp == -1:
+                if '-GCaMP' in channel_name:
+                    fiber_col = channel_name.replace('-GCaMP', '')
+                    if fiber_col not in exp_fibers:
+                        exp_fibers.append(fiber_col)
+                elif '-Red' in channel_name:
+                    fiber_col = channel_name.replace('-Red', '')
+                    if fiber_col not in exp_fibers:
+                        exp_fibers.append(fiber_col)
+
+        if not exp_fibers:
+            self._compute_dff(exp_idx)
+            return
+
+        common_time_sec = self._preprocessed['common_time']
+        common_time_min = common_time_sec / 60.0
+
+        any_updated = False
+        for fiber_col in exp_fibers:
+            if fiber_col not in self._preprocessed['fibers']:
+                continue
+
+            fiber_preproc = self._preprocessed['fibers'][fiber_col]
+            iso_signal = fiber_preproc['iso']
+            gcamp_signal = fiber_preproc['gcamp']
+
+            if np.all(np.isnan(iso_signal)) or np.all(np.isnan(gcamp_signal)):
+                continue
+
+            # Recompute dF/F with new fit range
+            try:
+                if params['method'] == 'simple':
+                    dff, fit_params = photometry.compute_dff_simple(gcamp_signal, iso_signal)
+                    fitted_iso = iso_signal
+                else:
+                    dff, fit_params = photometry.compute_dff_fitted(
+                        gcamp_signal, iso_signal, common_time_min,
+                        fit_start=params['fit_start'],
+                        fit_end=params['fit_end']
+                    )
+                    fitted_iso = fit_params.get('fitted_iso', iso_signal)
+
+                dff_raw = dff.copy()
+                detrend_curve = None
+                if params['detrend_method'] != 'none':
+                    dff, detrend_curve, detrend_params = photometry.detrend_signal(
+                        dff, common_time_min,
+                        method=params['detrend_method'],
+                        fit_start=params['fit_start'],
+                        fit_end=params['fit_end']
+                    )
+                    fit_params.update(detrend_params)
+
+                if params['lowpass_hz'] is not None and params['lowpass_hz'] > 0:
+                    sample_rate = self._preprocessed['sample_rate']
+                    dff = photometry.lowpass_filter(dff, params['lowpass_hz'], sample_rate)
+
+            except Exception as e:
+                print(f"[Photometry] Fast recompute error for {fiber_col}: {e}")
+                self._compute_dff(exp_idx)
+                return
+
+            # Build results for update
+            intermediates = {
+                'time': common_time_sec,
+                'iso_aligned': iso_signal,
+                'gcamp_aligned': gcamp_signal,
+                'fitted_iso': fitted_iso,
+                'dff_raw': dff_raw,
+                'detrend_curve': detrend_curve,
+                'fit_params': fit_params
+            }
+            dff_results = {
+                'time': common_time_sec,
+                'dff': dff,
+                'intermediates': intermediates
+            }
+
+            # Store results
+            if not hasattr(self, '_processed_results'):
+                self._processed_results = {}
+            if controls_key not in self._processed_results:
+                self._processed_results[controls_key] = {}
+            self._processed_results[controls_key][fiber_col] = dff_results
+
+            # Try fast update via setData()
+            if self._plotter.update_experiment_data(exp_idx, dff_results):
+                any_updated = True
+            else:
+                # Curve refs missing or stale — fall back to full rebuild
+                print(f"[Photometry] Fast path failed for {fiber_col}, falling back to full rebuild")
+                self._compute_dff(exp_idx)
+                return
+
+        if any_updated:
+            self._update_fit_params_label(exp_idx)
+            elapsed = time_module.perf_counter() - t_start
+            print(f"[Timing] Fast dF/F recompute for Exp {exp_idx + 1}: {elapsed:.3f}s")
+        else:
+            self._compute_dff(exp_idx)
 
     def _get_ai_channels_for_experiment(self, exp_idx: int) -> List[Tuple[int, str]]:
         """Get list of AI channels assigned to this experiment.
@@ -1676,7 +2283,7 @@ class DataAssemblyWidget(QWidget):
         """Apply consistent styling to a dF/F plot."""
         plot.setMouseEnabled(x=True, y=True)
         plot.vb.setMouseMode(pg.ViewBox.PanMode)
-        plot.vb.wheelEvent = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+        self._setup_plot_wheel(plot)
         plot.getAxis('left').setPen('#3e3e42')
         plot.getAxis('left').setTextPen('#cccccc')
         plot.getAxis('bottom').setPen('#3e3e42')
@@ -2348,6 +2955,10 @@ class DataAssemblyWidget(QWidget):
         # Resize table to fit content
         self._resize_channel_table(table.rowCount())
 
+        # Sync V3 inline controls if they exist
+        if self._layout_version >= 2:
+            self._sync_v3_controls_from_table()
+
     def _update_output_file_list(self):
         """Update the output files label to show the single NPZ file that will be created."""
         if not hasattr(self, 'output_files_label'):
@@ -2461,7 +3072,7 @@ class DataAssemblyWidget(QWidget):
         self._update_preview_plot()
 
         # Auto-compute dF/F for affected experiment(s)
-        if self._fp_data is not None:
+        if self._fp_data is not None or self._preprocessed is not None:
             if new_exp > 0:  # Assigned to specific experiment (1 = Exp 1, etc.)
                 exp_idx = new_exp - 1
                 if exp_idx in self._experiment_layouts:
@@ -2471,6 +3082,10 @@ class DataAssemblyWidget(QWidget):
                 for exp_idx in self._experiment_layouts.keys():
                     print(f"[Photometry] Auto-computing dF/F for Exp {exp_idx + 1} after assignment change")
                     self._compute_dff(exp_idx)
+
+        # Sync V3 inline controls (handles paired channel updates)
+        if self._layout_version >= 2:
+            self._sync_v3_controls_from_table()
 
     def _on_preview_tab_changed(self, index: int):
         """Handle preview tab change - render All Channels or compute dF/F as needed."""
@@ -2495,6 +3110,38 @@ class DataAssemblyWidget(QWidget):
                     getattr(self, f'_exp_{exp_idx}_dirty', True)
                 )
 
+                if needs_compute:
+                    print(f"[Photometry] Computing dF/F for Exp {exp_idx + 1} (first view or params changed)")
+                    self._compute_dff(exp_idx)
+                    setattr(self, f'_exp_{exp_idx}_dirty', False)
+
+    def _on_main_tab_changed(self, index: int):
+        """Handle main tab change in V3 layout (Tab 0=Data Files, Tab 1=Visualization)."""
+        if index == 1 and self._preprocessed is not None:
+            # Switching to Visualization tab — ensure preview is rendered
+            if not self._plot_items:
+                self._update_preview_plot()
+
+    def _on_experiment_tab_changed(self, index: int):
+        """Handle experiment tab change in V3 layout.
+
+        index 0 = All Channels, index > 0 = experiment tabs (exp_idx = index - 1)
+        """
+        if index == 0:
+            # All Channels tab
+            if self._preprocessed is not None and not self._plot_items:
+                self._update_preview_plot()
+        elif index > 0 and self._preprocessed is not None:
+            exp_idx = index - 1
+            if exp_idx in self._experiment_layouts:
+                if not hasattr(self, '_processed_results'):
+                    self._processed_results = {}
+                controls_key = f'exp_{exp_idx}'
+                needs_compute = (
+                    controls_key not in self._processed_results or
+                    not self._processed_results[controls_key] or
+                    getattr(self, f'_exp_{exp_idx}_dirty', True)
+                )
                 if needs_compute:
                     print(f"[Photometry] Computing dF/F for Exp {exp_idx + 1} (first view or params changed)")
                     self._compute_dff(exp_idx)
@@ -2528,6 +3175,26 @@ class DataAssemblyWidget(QWidget):
         else:
             # Pass to parent scroll area
             event.ignore()
+
+    def _on_scroll_repaint(self):
+        """Force repaint on visible graphics layouts when scroll position changes.
+
+        Fixes OpenGL compositing glitch where plots go blank after scrolling out of view.
+        """
+        # Repaint the main preview layout
+        if hasattr(self, 'graphics_layout'):
+            self.graphics_layout.viewport().update()
+        # Repaint any visible experiment layouts
+        for layout in self._experiment_layouts.values():
+            if layout.isVisible():
+                layout.viewport().update()
+
+    def _setup_plot_wheel(self, plot):
+        """Set wheel event handler on ViewBox and both axes so scroll works everywhere."""
+        handler = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+        plot.vb.wheelEvent = handler
+        plot.getAxis('bottom').wheelEvent = handler
+        plot.getAxis('left').wheelEvent = handler
 
     def _add_context_menu_to_plot(self, plot, channel_name: str):
         """Add custom menu items to PyQtGraph's native ViewBox context menu."""
@@ -2587,7 +3254,11 @@ class DataAssemblyWidget(QWidget):
             action.triggered.connect(lambda checked, t=signal_type: self._set_channel_type(channel_name, t))
 
     def _get_channel_experiment(self, channel_name: str) -> int:
-        """Get current experiment assignment for a channel. Returns -1 for 'All'."""
+        """Get current experiment assignment for a channel.
+
+        Returns: -2 = None/skip, -1 = All, 0+ = experiment index.
+        Combo items: [None(0), All(1), Exp 1(2), Exp 2(3), ...]
+        """
         if not hasattr(self, 'channel_table'):
             return -1
 
@@ -2598,11 +3269,20 @@ class DataAssemblyWidget(QWidget):
                 combo = table.cellWidget(row, 2)
                 if combo:
                     idx = combo.currentIndex()
-                    return -1 if idx == 0 else idx - 1
+                    if idx == 0:
+                        return -2  # None
+                    elif idx == 1:
+                        return -1  # All
+                    else:
+                        return idx - 2  # Exp N (0-indexed)
         return -1
 
     def _set_channel_experiment(self, channel_name: str, exp_idx: int):
-        """Set experiment assignment for a channel. -1 means 'All'."""
+        """Set experiment assignment for a channel.
+
+        exp_idx: -2 = None, -1 = All, 0+ = experiment index.
+        Combo items: [None(0), All(1), Exp 1(2), Exp 2(3), ...]
+        """
         if not hasattr(self, 'channel_table'):
             return
 
@@ -2612,8 +3292,12 @@ class DataAssemblyWidget(QWidget):
             if item and item.text() == channel_name:
                 combo = table.cellWidget(row, 2)
                 if combo:
-                    # 0 = "All", 1 = Exp 1, etc.
-                    combo_idx = 0 if exp_idx == -1 else exp_idx + 1
+                    if exp_idx == -2:
+                        combo_idx = 0  # None
+                    elif exp_idx == -1:
+                        combo_idx = 1  # All
+                    else:
+                        combo_idx = exp_idx + 2  # Exp N
                     combo.setCurrentIndex(combo_idx)
                 break
 
@@ -2645,6 +3329,164 @@ class DataAssemblyWidget(QWidget):
                     type_combo.setCurrentText(signal_type)
                 break
 
+    # ── V3 inline channel controls ──────────────────────────────────────
+
+    def _build_v3_channel_row(self, channel_name: str, is_fiber: bool,
+                               label_color: str = '#e0e0e0'):
+        """Build a single channel row with inline controls + PlotWidget for V3.
+
+        Returns (row_widget, plot_widget, assign_combo, type_combo).
+        """
+        from PyQt6.QtWidgets import QSizePolicy
+
+        row = QWidget()
+        row.setFixedHeight(MIN_HEIGHT_PER_PANEL)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+
+        # Left controls panel (fixed 120px)
+        controls = QWidget()
+        controls.setFixedWidth(120)
+        controls.setStyleSheet("""
+            QWidget { background-color: #252526; border-right: 1px solid #3e3e42; }
+            QLabel { color: #d4d4d4; font-size: 10px; padding: 1px 4px;
+                     background: transparent; border: none; }
+            QComboBox {
+                background-color: #1e1e1e; color: #d4d4d4; border: 1px solid #3e3e42;
+                padding: 2px 4px; font-size: 10px; min-height: 18px;
+            }
+            QComboBox:hover { border: 1px solid #007acc; }
+            QComboBox::drop-down { border: none; width: 16px; }
+        """)
+        cl = QVBoxLayout(controls)
+        cl.setContentsMargins(4, 4, 4, 4)
+        cl.setSpacing(2)
+
+        name_label = QLabel(channel_name)
+        name_label.setStyleSheet(
+            f"font-weight: bold; color: {label_color}; font-size: 10px; "
+            "background: transparent; border: none;"
+        )
+        name_label.setWordWrap(True)
+        cl.addWidget(name_label)
+
+        # Assign dropdown
+        cl.addWidget(QLabel("Assign:"))
+        assign_combo = QComboBox()
+        n_exp = self.spin_num_experiments.value() if hasattr(self, 'spin_num_experiments') else 1
+        assign_combo.addItem("None")
+        assign_combo.addItem("All")
+        for i in range(n_exp):
+            assign_combo.addItem(f"Exp {i + 1}")
+        assign_combo.currentIndexChanged.connect(
+            lambda idx, ch=channel_name: self._on_v3_assign_changed(ch)
+        )
+        cl.addWidget(assign_combo)
+
+        # Type dropdown
+        cl.addWidget(QLabel("Type:"))
+        type_combo = QComboBox()
+        if is_fiber:
+            type_combo.addItems(["GCaMP", "Isosbestic", "Red", "Other"])
+        else:
+            type_combo.addItems(["Pleth", "Thermal", "Stim", "Other"])
+        type_combo.currentIndexChanged.connect(
+            lambda idx, ch=channel_name: self._on_v3_type_changed(ch)
+        )
+        cl.addWidget(type_combo)
+        cl.addStretch()
+
+        row_layout.addWidget(controls)
+
+        # Right: PlotWidget with fixed Y-axis width for alignment
+        plot_widget = pg.PlotWidget()
+        plot_widget.setBackground('#1e1e1e')
+        plot_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        plot_widget.getPlotItem().getAxis('left').setWidth(50)
+        plot_widget.getPlotItem().getAxis('bottom').setHeight(20)
+        row_layout.addWidget(plot_widget, 1)
+
+        # Store references
+        self._v3_channel_controls[channel_name] = {
+            'assign_combo': assign_combo,
+            'type_combo': type_combo,
+            'plot_widget': plot_widget,
+            'row_widget': row,
+            'name_label': name_label,
+        }
+        self._v3_channel_rows.append(row)
+
+        return row, plot_widget, assign_combo, type_combo
+
+    def _clear_v3_channel_rows(self):
+        """Remove all V3 channel rows from the scroll area."""
+        if not hasattr(self, '_v3_channels_layout'):
+            return
+        # Remove row widgets (keep trailing stretch)
+        while self._v3_channels_layout.count() > 1:
+            item = self._v3_channels_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._v3_channel_controls.clear()
+        self._v3_channel_rows.clear()
+
+    def _on_v3_assign_changed(self, channel_name: str):
+        """Handle inline assign dropdown change — sync to hidden channel_table."""
+        if channel_name not in self._v3_channel_controls:
+            return
+        combo = self._v3_channel_controls[channel_name]['assign_combo']
+        text = combo.currentText()
+        if text == "None":
+            exp_idx = -2
+        elif text == "All":
+            exp_idx = -1
+        else:
+            try:
+                exp_idx = int(text.replace("Exp ", "")) - 1
+            except ValueError:
+                exp_idx = -1
+        # Sync to channel_table (triggers _on_experiment_assignment_changed)
+        self._set_channel_experiment(channel_name, exp_idx)
+
+    def _on_v3_type_changed(self, channel_name: str):
+        """Handle inline type dropdown change — sync to hidden channel_table."""
+        if channel_name not in self._v3_channel_controls:
+            return
+        combo = self._v3_channel_controls[channel_name]['type_combo']
+        self._set_channel_type(channel_name, combo.currentText())
+
+    def _sync_v3_controls_from_table(self):
+        """Read channel_table and update all V3 inline controls to match."""
+        if not hasattr(self, '_v3_channel_controls') or not self._v3_channel_controls:
+            return
+        if not hasattr(self, 'channel_table'):
+            return
+        table = self.channel_table
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if not item:
+                continue
+            ch = item.text()
+            if ch not in self._v3_channel_controls:
+                continue
+            ctrls = self._v3_channel_controls[ch]
+            # Sync assign combo
+            table_combo = table.cellWidget(row, 2)
+            if table_combo and ctrls['assign_combo']:
+                ctrls['assign_combo'].blockSignals(True)
+                idx = ctrls['assign_combo'].findText(table_combo.currentText())
+                if idx >= 0:
+                    ctrls['assign_combo'].setCurrentIndex(idx)
+                ctrls['assign_combo'].blockSignals(False)
+            # Sync type combo
+            table_type = table.cellWidget(row, 3)
+            if table_type and ctrls['type_combo']:
+                ctrls['type_combo'].blockSignals(True)
+                ctrls['type_combo'].setCurrentText(table_type.currentText())
+                ctrls['type_combo'].blockSignals(False)
+
     def _reset_all_plots(self):
         """Reset all plots to show full data range."""
         for plot in self._plot_items:
@@ -2674,6 +3516,10 @@ class DataAssemblyWidget(QWidget):
             if graphics_layout is not None:
                 _safe_clear_graphics_layout(graphics_layout)
 
+        # Clear V3 inline channel rows
+        if self._layout_version >= 2 and hasattr(self, '_v3_channels_layout'):
+            self._clear_v3_channel_rows()
+
         # CRITICAL: Reset plot tracking lists to prevent duplication
         self._plot_items = []
         self._plot_to_channel = {}
@@ -2702,7 +3548,7 @@ class DataAssemblyWidget(QWidget):
                 if '_debounce_timer' in controls:
                     try:
                         controls['_debounce_timer'].stop()
-                    except:
+                    except Exception:
                         pass
 
         print("[Photometry] All plots cleared")
@@ -2733,7 +3579,15 @@ class DataAssemblyWidget(QWidget):
             return np.full(len(target_time), np.nan)
 
     def _update_preview_plot(self):
-        """Update the raw signals preview plot with separated iso/gcamp channels using PyQtGraph."""
+        """Schedule a debounced preview plot update.
+
+        Multiple rapid calls (e.g., from cascading UI changes) are collapsed
+        into a single actual redraw after 150ms of quiet.
+        """
+        self._preview_plot_debounce.start()
+
+    def _do_update_preview_plot(self):
+        """Actually update the raw signals preview plot with separated iso/gcamp channels using PyQtGraph."""
         # Check if we have data - either raw FP data or preprocessed
         has_raw_data = self._fp_data is not None
         has_preprocessed = self._preprocessed is not None and 'fibers' in self._preprocessed
@@ -2787,12 +3641,16 @@ class DataAssemblyWidget(QWidget):
                 time_divisor = 60  # seconds
 
             # Separate isosbestic and GCaMP data
-            data = self._fp_data.copy()
+            data = self._fp_data
             iso_mask = data[led_col] == 1
             gcamp_mask = data[led_col] == 2
 
             iso_time_raw = data.loc[iso_mask, time_col].values
             gcamp_time_raw = data.loc[gcamp_mask, time_col].values
+
+            # Batch-extract all fiber columns at once (single .loc[] per mask)
+            iso_fiber_data = data.loc[iso_mask, selected_fibers]
+            gcamp_fiber_data = data.loc[gcamp_mask, selected_fibers]
 
             # Check if we have AI timestamps for common time base
             normalize = hasattr(self, 'chk_normalize_time') and self.chk_normalize_time.isChecked()
@@ -2800,7 +3658,7 @@ class DataAssemblyWidget(QWidget):
                                and len(self._timestamps) > 0)
 
             if use_ai_timebase:
-                common_time_raw = self._timestamps.copy()
+                common_time_raw = self._timestamps
                 if normalize:
                     t_min = np.min(common_time_raw)
                     common_time = (common_time_raw - t_min) / 60000
@@ -2813,8 +3671,8 @@ class DataAssemblyWidget(QWidget):
 
                 fiber_data = {}
                 for fiber_col in selected_fibers:
-                    iso_signal_raw = data.loc[iso_mask, fiber_col].values
-                    gcamp_signal_raw = data.loc[gcamp_mask, fiber_col].values
+                    iso_signal_raw = iso_fiber_data[fiber_col].values
+                    gcamp_signal_raw = gcamp_fiber_data[fiber_col].values
 
                     iso_interp = self._interpolate_to_timestamps(
                         iso_time_for_interp, iso_signal_raw,
@@ -2844,8 +3702,8 @@ class DataAssemblyWidget(QWidget):
                 fiber_data = {}
                 for fiber_col in selected_fibers:
                     fiber_data[fiber_col] = {
-                        'iso_time': iso_time, 'iso': data.loc[iso_mask, fiber_col].values,
-                        'gcamp_time': gcamp_time, 'gcamp': data.loc[gcamp_mask, fiber_col].values,
+                        'iso_time': iso_time, 'iso': iso_fiber_data[fiber_col].values,
+                        'gcamp_time': gcamp_time, 'gcamp': gcamp_fiber_data[fiber_col].values,
                         'label': fiber_col
                     }
                 ai_time = None
@@ -2859,6 +3717,11 @@ class DataAssemblyWidget(QWidget):
 
             n_plots = len(fiber_data) + len(ai_channels)
             if n_plots == 0:
+                return
+
+            # V3: Use individual plot rows with inline controls
+            if self._layout_version >= 2:
+                self._render_v3_preview_rows(fiber_data, ai_channels, ai_time)
                 return
 
             # Resize preview area
@@ -2881,7 +3744,7 @@ class DataAssemblyWidget(QWidget):
                 plot.setMouseEnabled(x=True, y=True)
                 plot.vb.setMouseMode(pg.ViewBox.PanMode)
                 # Custom wheel event: shift+scroll = X zoom, otherwise ignore
-                plot.vb.wheelEvent = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+                self._setup_plot_wheel(plot)
 
                 # Add custom items to PyQtGraph's native context menu
                 self._add_context_menu_to_plot(plot, channel_name)
@@ -2902,18 +3765,28 @@ class DataAssemblyWidget(QWidget):
                 else:
                     plot.setXLink(first_plot)
 
-                # Plot GCaMP (green)
-                if len(fdata['gcamp_time']) > 0:
-                    t_plot, s_plot = self._subsample_for_preview(fdata['gcamp_time'], fdata['gcamp'])
-                    # Filter out NaN values
-                    valid = ~np.isnan(s_plot)
-                    plot.plot(t_plot[valid], s_plot[valid], pen=pg.mkPen('#00cc00', width=1), name='GCaMP')
+                # Check if data is all NaN
+                gcamp_all_nan = len(fdata['gcamp']) == 0 or np.all(np.isnan(fdata['gcamp']))
+                iso_all_nan = len(fdata['iso']) == 0 or np.all(np.isnan(fdata['iso']))
 
-                # Plot Isosbestic (blue) - use ViewBox for second Y axis
-                if len(fdata['iso_time']) > 0:
-                    t_plot, s_plot = self._subsample_for_preview(fdata['iso_time'], fdata['iso'])
-                    valid = ~np.isnan(s_plot)
-                    plot.plot(t_plot[valid], s_plot[valid], pen=pg.mkPen('#5555ff', width=1), name='Iso')
+                if gcamp_all_nan and iso_all_nan:
+                    plot.setTitle(f'{fiber_col} — No data (all NaN)', color='#ff6666', size='9pt')
+                    row += 1
+                    continue
+
+                # Plot GCaMP (green) - pre-downsampled for smooth scrolling
+                if len(fdata['gcamp_time']) > 0 and not gcamp_all_nan:
+                    valid = ~np.isnan(fdata['gcamp'])
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                        fdata['gcamp_time'][valid], fdata['gcamp'][valid])
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen('#00cc00', width=1), name='GCaMP')
+
+                # Plot Isosbestic (blue) - pre-downsampled for smooth scrolling
+                if len(fdata['iso_time']) > 0 and not iso_all_nan:
+                    valid = ~np.isnan(fdata['iso'])
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                        fdata['iso_time'][valid], fdata['iso'][valid])
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen('#5555ff', width=1), name='Iso')
 
                 row += 1
 
@@ -2932,7 +3805,7 @@ class DataAssemblyWidget(QWidget):
                     # Configure mouse interaction
                     plot.setMouseEnabled(x=True, y=True)
                     plot.vb.setMouseMode(pg.ViewBox.PanMode)
-                    plot.vb.wheelEvent = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+                    self._setup_plot_wheel(plot)
 
                     # Add custom items to PyQtGraph's native context menu
                     self._add_context_menu_to_plot(plot, channel_name)
@@ -2956,8 +3829,8 @@ class DataAssemblyWidget(QWidget):
                     t_arr = ai_time[:min_len]
                     s_arr = ai_signal[:min_len]
 
-                    t_plot, s_plot = self._subsample_for_preview(t_arr, s_arr)
-                    plot.plot(t_plot, s_plot, pen=pg.mkPen(color, width=1))
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(t_arr, s_arr)
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
 
                     row += 1
 
@@ -2993,6 +3866,8 @@ class DataAssemblyWidget(QWidget):
             return
 
         self._show_progress("Drawing preview from cached data...")
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()  # Show progress before blocking work
 
         try:
             # Clear existing plots
@@ -3005,8 +3880,11 @@ class DataAssemblyWidget(QWidget):
             ai_channels_data = self._preprocessed.get('ai_channels', {})
 
             if len(fibers) == 0:
-                plot = self.graphics_layout.addPlot(row=0, col=0)
-                plot.setTitle("No fiber data available", color='#888888')
+                return
+
+            # V3: Use individual plot rows with inline controls
+            if self._layout_version >= 2:
+                self._render_v3_preview_from_preprocessed(fibers, common_time, ai_channels_data)
                 return
 
             # Convert time to minutes
@@ -3025,6 +3903,19 @@ class DataAssemblyWidget(QWidget):
                 if iso_signal is None or gcamp_signal is None:
                     continue
 
+                # Check for all-NaN data
+                if np.all(np.isnan(iso_signal)) and np.all(np.isnan(gcamp_signal)):
+                    warn_plot = self.graphics_layout.addPlot(row=row, col=0)
+                    self._plot_items.append(warn_plot)
+                    warn_plot.hideAxis('left')
+                    warn_plot.hideAxis('bottom')
+                    warn_plot.setTitle(f'{fiber_col} — No data (all NaN)', color='#ff6666', size='10pt')
+                    self._setup_plot_wheel(warn_plot)
+                    if first_plot is None:
+                        first_plot = warn_plot
+                    row += 1
+                    continue
+
                 # Create Iso plot
                 plot_iso = self.graphics_layout.addPlot(row=row, col=0)
                 self._plot_items.append(plot_iso)
@@ -3037,7 +3928,7 @@ class DataAssemblyWidget(QWidget):
 
                 plot_iso.setMouseEnabled(x=True, y=True)
                 plot_iso.vb.setMouseMode(pg.ViewBox.PanMode)
-                plot_iso.vb.wheelEvent = lambda ev, p=plot_iso, axis=None: self._handle_wheel_event(ev, p, axis)
+                self._setup_plot_wheel(plot_iso)
 
                 color = iso_colors[i % len(iso_colors)]
                 plot_iso.setLabel('left', f'{fiber_col}\nIso', color=color)
@@ -3047,9 +3938,8 @@ class DataAssemblyWidget(QWidget):
                 plot_iso.getAxis('bottom').setStyle(showValues=False)
                 plot_iso.showGrid(x=False, y=False)
 
-                t_plot, s_plot = self._subsample_for_preview(common_time_min, iso_signal)
-                plot_iso.plot(t_plot, s_plot, pen=pg.mkPen(color, width=1),
-                             clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                t_ds, s_ds = ExperimentPlotter._downsample_for_plot(common_time_min, iso_signal)
+                plot_iso.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
                 row += 1
 
                 # Create GCaMP plot
@@ -3060,7 +3950,7 @@ class DataAssemblyWidget(QWidget):
 
                 plot_gcamp.setMouseEnabled(x=True, y=True)
                 plot_gcamp.vb.setMouseMode(pg.ViewBox.PanMode)
-                plot_gcamp.vb.wheelEvent = lambda ev, p=plot_gcamp, axis=None: self._handle_wheel_event(ev, p, axis)
+                self._setup_plot_wheel(plot_gcamp)
 
                 color = gcamp_colors[i % len(gcamp_colors)]
                 plot_gcamp.setLabel('left', f'{fiber_col}\nGCaMP', color=color)
@@ -3070,9 +3960,8 @@ class DataAssemblyWidget(QWidget):
                 plot_gcamp.getAxis('bottom').setStyle(showValues=False)
                 plot_gcamp.showGrid(x=False, y=False)
 
-                t_plot, s_plot = self._subsample_for_preview(common_time_min, gcamp_signal)
-                plot_gcamp.plot(t_plot, s_plot, pen=pg.mkPen(color, width=1),
-                               clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                t_ds, s_ds = ExperimentPlotter._downsample_for_plot(common_time_min, gcamp_signal)
+                plot_gcamp.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
                 row += 1
 
             # Plot AI channels
@@ -3093,7 +3982,7 @@ class DataAssemblyWidget(QWidget):
 
                     plot.setMouseEnabled(x=True, y=True)
                     plot.vb.setMouseMode(pg.ViewBox.PanMode)
-                    plot.vb.wheelEvent = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+                    self._setup_plot_wheel(plot)
 
                     color = ai_colors[col_idx_int % len(ai_colors)]
                     plot.setLabel('left', channel_name, color=color)
@@ -3103,9 +3992,8 @@ class DataAssemblyWidget(QWidget):
                     plot.getAxis('bottom').setStyle(showValues=False)
                     plot.showGrid(x=False, y=False)
 
-                    t_plot, s_plot = self._subsample_for_preview(common_time_min, ai_signal)
-                    plot.plot(t_plot, s_plot, pen=pg.mkPen(color, width=1),
-                             clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(common_time_min, ai_signal)
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
                     row += 1
 
             # Show X tick labels only on bottom plot
@@ -3125,6 +4013,233 @@ class DataAssemblyWidget(QWidget):
 
         finally:
             self._hide_progress()
+
+    # ── V3 preview rendering (individual rows with inline controls) ────
+
+    def _render_v3_preview_rows(self, fiber_data, ai_channels, ai_time):
+        """Render V3 All Channels tab: individual rows with inline controls + PlotWidget.
+
+        Called from _do_update_preview_plot() when layout_version >= 2.
+
+        Args:
+            fiber_data: dict of fiber_col -> {iso_time, iso, gcamp_time, gcamp, label}
+            ai_channels: list of (col_idx, col_name, label)
+            ai_time: time array for AI channels (or None)
+        """
+        self._clear_v3_channel_rows()
+        self._plot_items.clear()
+        self._plot_to_channel.clear()
+
+        first_plot_item = None
+        ai_colors = ['#ff9900', '#00cccc', '#ff66ff', '#ffff00', '#ff6666']
+
+        for fiber_col, fdata in fiber_data.items():
+            channel_name = f"{fiber_col}-GCaMP"
+            row_w, pw, ac, tc = self._build_v3_channel_row(
+                channel_name, is_fiber=True, label_color='#00cc00')
+            # Set dual-color HTML label showing both channel names
+            lbl = self._v3_channel_controls[channel_name]['name_label']
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setText(
+                f'<span style="color:#5555ff">{fiber_col}-Iso</span><br>'
+                f'<span style="color:#00cc00">{fiber_col}-GCaMP</span>'
+            )
+            self._v3_channels_layout.insertWidget(
+                self._v3_channels_layout.count() - 1, row_w)  # before stretch
+
+            plot = pw.getPlotItem()
+            self._plot_items.append(plot)
+            self._plot_to_channel[plot] = channel_name
+            plot.setMouseEnabled(x=True, y=True)
+            plot.vb.setMouseMode(pg.ViewBox.PanMode)
+            self._setup_plot_wheel(plot)
+            plot.setTitle(f'Raw: {fiber_col}', color='#cccccc', size='9pt')
+            plot.getAxis('left').setPen('#3e3e42')
+            plot.getAxis('left').setTextPen('#cccccc')
+            plot.getAxis('bottom').setPen('#3e3e42')
+            plot.getAxis('bottom').setTextPen('#cccccc')
+            plot.getAxis('bottom').setStyle(showValues=False)
+            plot.showGrid(x=False, y=False)
+
+            if first_plot_item is None:
+                first_plot_item = plot
+            else:
+                plot.setXLink(first_plot_item)
+
+            gcamp_nan = len(fdata['gcamp']) == 0 or np.all(np.isnan(fdata['gcamp']))
+            iso_nan = len(fdata['iso']) == 0 or np.all(np.isnan(fdata['iso']))
+
+            if gcamp_nan and iso_nan:
+                plot.setTitle(f'{fiber_col} — No data (all NaN)', color='#ff6666', size='9pt')
+                continue
+
+            if len(fdata['gcamp_time']) > 0 and not gcamp_nan:
+                valid = ~np.isnan(fdata['gcamp'])
+                t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                    fdata['gcamp_time'][valid], fdata['gcamp'][valid])
+                plot.plot(t_ds, s_ds, pen=pg.mkPen('#00cc00', width=1), name='GCaMP')
+
+            if len(fdata['iso_time']) > 0 and not iso_nan:
+                valid = ~np.isnan(fdata['iso'])
+                t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                    fdata['iso_time'][valid], fdata['iso'][valid])
+                plot.plot(t_ds, s_ds, pen=pg.mkPen('#5555ff', width=1), name='Iso')
+
+        # AI channels
+        if ai_channels and ai_time is not None:
+            for col_idx, col, label in ai_channels:
+                channel_name = f"AI-{col}"
+                color = ai_colors[col_idx % len(ai_colors)]
+                row_w, pw, ac, tc = self._build_v3_channel_row(
+                    channel_name, is_fiber=False, label_color=color)
+                self._v3_channels_layout.insertWidget(
+                    self._v3_channels_layout.count() - 1, row_w)
+
+                plot = pw.getPlotItem()
+                self._plot_items.append(plot)
+                self._plot_to_channel[plot] = channel_name
+                plot.setMouseEnabled(x=True, y=True)
+                plot.vb.setMouseMode(pg.ViewBox.PanMode)
+                self._setup_plot_wheel(plot)
+
+                plot.setTitle(label, color='#cccccc', size='9pt')
+                plot.getAxis('left').setPen('#3e3e42')
+                plot.getAxis('left').setTextPen('#cccccc')
+                plot.getAxis('bottom').setPen('#3e3e42')
+                plot.getAxis('bottom').setTextPen('#cccccc')
+                plot.getAxis('bottom').setStyle(showValues=False)
+                plot.showGrid(x=False, y=False)
+
+                if first_plot_item:
+                    plot.setXLink(first_plot_item)
+
+                ai_signal = self._ai_data[col].values
+                min_len = min(len(ai_time), len(ai_signal))
+                t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                    ai_time[:min_len], ai_signal[:min_len])
+                plot.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
+
+        # Bottom plot shows X labels
+        if self._plot_items:
+            self._plot_items[-1].getAxis('bottom').setStyle(showValues=True)
+            self._plot_items[-1].setLabel('bottom', 'Time (minutes)', color='#cccccc')
+
+        for p in self._plot_items:
+            p.enableAutoRange()
+            p.autoRange()
+
+        # Sync inline controls from channel table
+        self._sync_v3_controls_from_table()
+
+    def _render_v3_preview_from_preprocessed(self, fibers, common_time, ai_channels_data):
+        """Render V3 All Channels tab from preprocessed/cached data.
+
+        Called from _update_preview_plot_from_preprocessed() when layout_version >= 2.
+        """
+        self._clear_v3_channel_rows()
+        self._plot_items.clear()
+        self._plot_to_channel.clear()
+
+        common_time_min = common_time / 60.0
+        first_plot_item = None
+        iso_colors = ['#9d4edd', '#c77dff', '#e0aaff']
+        gcamp_colors = ['#2e8b57', '#3cb371', '#66cdaa']
+        ai_colors = ['#ff9900', '#00cccc', '#ff66ff', '#ffff00', '#ff6666']
+
+        for i, (fiber_col, fiber_data) in enumerate(fibers.items()):
+            iso_signal = fiber_data.get('iso')
+            gcamp_signal = fiber_data.get('gcamp')
+            if iso_signal is None or gcamp_signal is None:
+                continue
+
+            all_nan = np.all(np.isnan(iso_signal)) and np.all(np.isnan(gcamp_signal))
+            iso_color = iso_colors[i % len(iso_colors)]
+            gcamp_color = gcamp_colors[i % len(gcamp_colors)]
+
+            # One row per fiber — Iso + GCaMP overlaid on same plot
+            channel_name = f"{fiber_col}-GCaMP"
+            row_w, pw, ac, tc = self._build_v3_channel_row(
+                channel_name, is_fiber=True, label_color=gcamp_color)
+            # Dual-color HTML label
+            lbl = self._v3_channel_controls[channel_name]['name_label']
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setText(
+                f'<span style="color:{iso_color}">{fiber_col}-Iso</span><br>'
+                f'<span style="color:{gcamp_color}">{fiber_col}-GCaMP</span>'
+            )
+            self._v3_channels_layout.insertWidget(
+                self._v3_channels_layout.count() - 1, row_w)
+
+            plot = pw.getPlotItem()
+            self._plot_items.append(plot)
+            self._plot_to_channel[plot] = channel_name
+            plot.setMouseEnabled(x=True, y=True)
+            plot.vb.setMouseMode(pg.ViewBox.PanMode)
+            self._setup_plot_wheel(plot)
+
+            if first_plot_item is None:
+                first_plot_item = plot
+            else:
+                plot.setXLink(first_plot_item)
+
+            if all_nan:
+                plot.setTitle(f'{fiber_col} — No data (all NaN)', color='#ff6666', size='10pt')
+            else:
+                plot.setTitle(f'{fiber_col}', color='#cccccc', size='9pt')
+                plot.getAxis('left').setPen('#3e3e42')
+                plot.getAxis('left').setTextPen('#cccccc')
+                plot.getAxis('bottom').setStyle(showValues=False)
+
+                # Iso trace
+                if not np.all(np.isnan(iso_signal)):
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                        common_time_min, iso_signal)
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen(iso_color, width=1), name='Iso')
+
+                # GCaMP trace
+                if not np.all(np.isnan(gcamp_signal)):
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                        common_time_min, gcamp_signal)
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen(gcamp_color, width=1), name='GCaMP')
+
+        # AI channels
+        if ai_channels_data:
+            for col_idx, ai_signal in ai_channels_data.items():
+                col_idx_int = int(col_idx) if isinstance(col_idx, str) else col_idx
+                channel_name = f"AI-{col_idx}"
+                color = ai_colors[col_idx_int % len(ai_colors)]
+                row_w, pw, ac, tc = self._build_v3_channel_row(
+                    channel_name, is_fiber=False, label_color=color)
+                self._v3_channels_layout.insertWidget(
+                    self._v3_channels_layout.count() - 1, row_w)
+
+                plot = pw.getPlotItem()
+                self._plot_items.append(plot)
+                self._plot_to_channel[plot] = channel_name
+                plot.setMouseEnabled(x=True, y=True)
+                plot.vb.setMouseMode(pg.ViewBox.PanMode)
+                self._setup_plot_wheel(plot)
+
+                if first_plot_item:
+                    plot.setXLink(first_plot_item)
+                plot.setTitle(channel_name, color='#cccccc', size='9pt')
+                plot.getAxis('left').setPen('#3e3e42')
+                plot.getAxis('left').setTextPen(color)
+                plot.getAxis('bottom').setStyle(showValues=False)
+                t_ds, s_ds = ExperimentPlotter._downsample_for_plot(common_time_min, ai_signal)
+                plot.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
+
+        # Bottom plot shows X labels
+        if self._plot_items:
+            self._plot_items[-1].getAxis('bottom').setStyle(showValues=True)
+            self._plot_items[-1].setLabel('bottom', 'Time (minutes)', color='#cccccc')
+
+        for p in self._plot_items:
+            p.enableAutoRange()
+            p.autoRange()
+
+        # Sync inline controls from channel table
+        self._sync_v3_controls_from_table()
 
     def _update_experiment_preview_plots(self, fiber_data, ai_channels, ai_time, normalize):
         """Update per-experiment preview tabs based on channel assignments using PyQtGraph."""
@@ -3173,6 +4288,20 @@ class DataAssemblyWidget(QWidget):
                     continue
 
                 fdata = fiber_data[fiber_col]
+
+                # Check for all-NaN data
+                gcamp_nan = len(fdata['gcamp']) == 0 or np.all(np.isnan(fdata['gcamp']))
+                iso_nan = len(fdata['iso']) == 0 or np.all(np.isnan(fdata['iso']))
+                if gcamp_nan and iso_nan:
+                    warn_plot = graphics_layout.addPlot(row=row, col=0)
+                    plot_items.append(warn_plot)
+                    warn_plot.hideAxis('left')
+                    warn_plot.hideAxis('bottom')
+                    warn_plot.setTitle(f'{fiber_col} — No data (all NaN)', color='#ff6666', size='10pt')
+                    self._setup_plot_wheel(warn_plot)
+                    row += 1
+                    continue
+
                 plot = graphics_layout.addPlot(row=row, col=0)
                 plot_items.append(plot)
 
@@ -3180,7 +4309,7 @@ class DataAssemblyWidget(QWidget):
                 channel_name = f"{fiber_col}-GCaMP"
                 plot.setMouseEnabled(x=True, y=True)
                 plot.vb.setMouseMode(pg.ViewBox.PanMode)
-                plot.vb.wheelEvent = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+                self._setup_plot_wheel(plot)
 
                 # Add context menu to PyQtGraph's native menu
                 self._add_context_menu_to_plot(plot, channel_name)
@@ -3200,17 +4329,19 @@ class DataAssemblyWidget(QWidget):
                 else:
                     plot.setXLink(first_plot)
 
-                # GCaMP
-                if len(fdata['gcamp_time']) > 0:
-                    t_plot, s_plot = self._subsample_for_preview(fdata['gcamp_time'], fdata['gcamp'])
-                    valid = ~np.isnan(s_plot)
-                    plot.plot(t_plot[valid], s_plot[valid], pen=pg.mkPen('#00cc00', width=1))
+                # GCaMP - pre-downsampled for smooth scrolling
+                if len(fdata['gcamp_time']) > 0 and not gcamp_nan:
+                    valid = ~np.isnan(fdata['gcamp'])
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                        fdata['gcamp_time'][valid], fdata['gcamp'][valid])
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen('#00cc00', width=1))
 
-                # Iso
-                if len(fdata['iso_time']) > 0:
-                    t_plot, s_plot = self._subsample_for_preview(fdata['iso_time'], fdata['iso'])
-                    valid = ~np.isnan(s_plot)
-                    plot.plot(t_plot[valid], s_plot[valid], pen=pg.mkPen('#5555ff', width=1))
+                # Iso - pre-downsampled for smooth scrolling
+                if len(fdata['iso_time']) > 0 and not iso_nan:
+                    valid = ~np.isnan(fdata['iso'])
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(
+                        fdata['iso_time'][valid], fdata['iso'][valid])
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen('#5555ff', width=1))
 
                 row += 1
 
@@ -3235,7 +4366,7 @@ class DataAssemblyWidget(QWidget):
                     channel_name = f"AI-{ai_col}"
                     plot.setMouseEnabled(x=True, y=True)
                     plot.vb.setMouseMode(pg.ViewBox.PanMode)
-                    plot.vb.wheelEvent = lambda ev, p=plot, axis=None: self._handle_wheel_event(ev, p, axis)
+                    self._setup_plot_wheel(plot)
 
                     # Add context menu to PyQtGraph's native menu
                     self._add_context_menu_to_plot(plot, channel_name)
@@ -3258,8 +4389,8 @@ class DataAssemblyWidget(QWidget):
                     min_len = min(len(ai_time), len(ai_signal))
                     t_arr = ai_time[:min_len]
                     s_arr = ai_signal[:min_len]
-                    t_plot, s_plot = self._subsample_for_preview(t_arr, s_arr)
-                    plot.plot(t_plot, s_plot, pen=pg.mkPen(color, width=1))
+                    t_ds, s_ds = ExperimentPlotter._downsample_for_plot(t_arr, s_arr)
+                    plot.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
 
                     row += 1
 
@@ -3854,13 +4985,13 @@ class DataAssemblyWidget(QWidget):
                 # File paths
                 if 'file_paths' in data:
                     try:
-                        parsed['file_paths'] = eval(str(data['file_paths'][0]))
+                        parsed['file_paths'] = ast.literal_eval(str(data['file_paths'][0]))
                     except Exception as e:
                         print(f"[Photometry] Error loading file paths: {e}")
 
                 # Preprocessed data
                 if 'common_time' in data:
-                    common_time = np.array(data['common_time'])
+                    common_time = data['common_time']
                     sample_rate = float(data['sample_rate'][0]) if 'sample_rate' in data else 100.0
                     duration = float(data['duration'][0]) if 'duration' in data else 0
                     time_offset = float(data['time_offset'][0]) if 'time_offset' in data else 0
@@ -3873,15 +5004,15 @@ class DataAssemblyWidget(QWidget):
                         gcamp_key = f'fiber_{fiber_col}_gcamp'
                         if iso_key in data and gcamp_key in data:
                             fibers[fiber_col] = {
-                                'iso': np.array(data[iso_key]),
-                                'gcamp': np.array(data[gcamp_key])
+                                'iso': data[iso_key],
+                                'gcamp': data[gcamp_key]
                             }
 
                     ai_channels = {}
                     for key in data.files:
                         if key.startswith('ai_channel_'):
                             col_idx = key.replace('ai_channel_', '')
-                            ai_channels[col_idx] = np.array(data[key])
+                            ai_channels[col_idx] = data[key]
 
                     parsed['preprocessed'] = {
                         'common_time': common_time,
@@ -3898,14 +5029,14 @@ class DataAssemblyWidget(QWidget):
                 # dF/F params
                 if 'dff_params' in data:
                     try:
-                        parsed['dff_params'] = eval(str(data['dff_params'][0]))
+                        parsed['dff_params'] = ast.literal_eval(str(data['dff_params'][0]))
                     except Exception:
                         pass
 
                 # Animal IDs
                 if 'animal_ids' in data:
                     try:
-                        parsed['animal_ids'] = eval(str(data['animal_ids'][0]))
+                        parsed['animal_ids'] = ast.literal_eval(str(data['animal_ids'][0]))
                     except Exception:
                         pass
 
@@ -3916,7 +5047,7 @@ class DataAssemblyWidget(QWidget):
                 # Experiment assignments
                 if 'experiment_assignments' in data:
                     try:
-                        parsed['experiment_assignments'] = eval(str(data['experiment_assignments'][0]))
+                        parsed['experiment_assignments'] = ast.literal_eval(str(data['experiment_assignments'][0]))
                     except Exception:
                         pass
 
@@ -4000,7 +5131,12 @@ class DataAssemblyWidget(QWidget):
                 self._compute_dff(exp_idx)
 
             # Switch to first experiment tab
-            if hasattr(self, 'preview_tab_widget') and n_experiments > 0:
+            if self._layout_version >= 2 and n_experiments > 0:
+                if hasattr(self, 'main_tab_widget'):
+                    self.main_tab_widget.setCurrentIndex(1)  # Visualization tab
+                if hasattr(self, 'experiment_tab_widget'):
+                    self.experiment_tab_widget.setCurrentIndex(1)  # First experiment
+            elif hasattr(self, 'preview_tab_widget') and n_experiments > 0:
                 self.preview_tab_widget.setCurrentIndex(1)
 
             # Track the loaded path
@@ -4022,7 +5158,25 @@ class DataAssemblyWidget(QWidget):
             traceback.print_exc()
 
     def _reload_raw_csvs_for_preview(self):
-        """Reload raw CSV files in background to populate preview tables after NPZ load."""
+        """Reload raw CSV files in background to populate preview tables after NPZ load.
+
+        Skips the reload if raw data is already in memory (e.g., from cached data
+        passed via load_from_cached_data), since the preview tables can be populated
+        directly from the existing DataFrames.
+        """
+        # Skip disk I/O if raw data is already populated from the SAME file
+        # (e.g., from cached reopen via load_from_cached_data).
+        # Must check source path to avoid showing stale data when switching NPZ files.
+        current_fp_path = str(self.file_paths.get('fp_data', ''))
+        if self._fp_data is not None and self._fp_data_source == current_fp_path:
+            print("[Photometry] Raw CSV data already in memory, skipping reload")
+            self._update_fp_preview_table()
+            if self._ai_data is not None:
+                self._update_ai_preview_table()
+            if self._timestamps is not None:
+                self._update_timestamps_info()
+            return
+
         from core.file_load_worker import FileLoadWorker
         from core import photometry
 
@@ -4066,6 +5220,7 @@ class DataAssemblyWidget(QWidget):
         """Apply reloaded raw CSV data to preview tables (runs on main thread)."""
         if results['fp_data'] is not None:
             self._fp_data = results['fp_data']
+            self._fp_data_source = str(self.file_paths.get('fp_data', ''))
             self._populate_fp_column_combos()
             self._update_fp_preview_table()
 
@@ -4226,7 +5381,12 @@ class DataAssemblyWidget(QWidget):
             QApplication.processEvents()
 
             # Switch to first experiment tab
-            if hasattr(self, 'preview_tab_widget') and n_experiments > 0:
+            if self._layout_version >= 2 and n_experiments > 0:
+                if hasattr(self, 'main_tab_widget'):
+                    self.main_tab_widget.setCurrentIndex(1)  # Visualization tab
+                if hasattr(self, 'experiment_tab_widget'):
+                    self.experiment_tab_widget.setCurrentIndex(1)  # First experiment
+            elif hasattr(self, 'preview_tab_widget') and n_experiments > 0:
                 self.preview_tab_widget.setCurrentIndex(1)
 
             # Track the NPZ path for saving back to same file
@@ -4262,8 +5422,8 @@ class DataAssemblyWidget(QWidget):
                 # Load file paths
                 if 'file_paths' in data:
                     try:
-                        metadata['file_paths'] = eval(str(data['file_paths'][0]))
-                    except:
+                        metadata['file_paths'] = ast.literal_eval(str(data['file_paths'][0]))
+                    except Exception:
                         metadata['file_paths'] = {}
 
                 # Load n_experiments
@@ -4273,22 +5433,22 @@ class DataAssemblyWidget(QWidget):
                 # Load experiment assignments
                 if 'experiment_assignments' in data:
                     try:
-                        metadata['experiment_assignments'] = eval(str(data['experiment_assignments'][0]))
-                    except:
+                        metadata['experiment_assignments'] = ast.literal_eval(str(data['experiment_assignments'][0]))
+                    except Exception:
                         metadata['experiment_assignments'] = {}
 
                 # Load dF/F params
                 if 'dff_params' in data:
                     try:
-                        metadata['dff_params'] = eval(str(data['dff_params'][0]))
-                    except:
+                        metadata['dff_params'] = ast.literal_eval(str(data['dff_params'][0]))
+                    except Exception:
                         metadata['dff_params'] = {}
 
                 # Load animal IDs
                 if 'animal_ids' in data:
                     try:
-                        metadata['animal_ids'] = eval(str(data['animal_ids'][0]))
-                    except:
+                        metadata['animal_ids'] = ast.literal_eval(str(data['animal_ids'][0]))
+                    except Exception:
                         metadata['animal_ids'] = {}
 
                 return metadata

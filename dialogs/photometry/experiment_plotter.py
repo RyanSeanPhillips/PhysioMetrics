@@ -68,6 +68,7 @@ class ExperimentPlotter:
     def __init__(self):
         """Initialize the plotter."""
         self._fit_regions: Dict[int, List] = {}
+        self._curve_refs: Dict[int, Dict] = {}
         self._updating_regions = False
 
     def plot_experiment(
@@ -112,6 +113,12 @@ class ExperimentPlotter:
         row = 0
         first_plot = None
 
+        # Curve refs for fast data-only updates (populated conditionally below)
+        fitted_iso_curve = None
+        dff_raw_curve = None
+        detrend_curve_ref = None
+        dff_final_curve = None
+
         # Extract fiber data
         iso_time = fiber_data.get('iso_time', np.array([]))
         iso_signal = fiber_data.get('iso', np.array([]))
@@ -140,11 +147,13 @@ class ExperimentPlotter:
         first_plot = plot_raw
         self._style_plot(plot_raw)
 
-        # Plot both signals on the same Y-axis (with downsampling for performance)
-        plot_raw.plot(iso_t_min, iso_signal, pen=pg.mkPen(COLORS['isosbestic'], width=1), name='Iso',
-                      clipToView=True, autoDownsample=True, downsampleMethod='subsample')
-        plot_raw.plot(gcamp_t_min, gcamp_signal, pen=pg.mkPen(COLORS['gcamp'], width=1), name='GCaMP',
-                      clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+        # Plot both signals on the same Y-axis
+        # Pre-downsample to a fixed small array so fit region drag doesn't trigger
+        # per-frame downsampling (same pattern as main app's plot backend)
+        iso_t_ds, iso_s_ds = self._downsample_for_plot(iso_t_min, iso_signal)
+        gcamp_t_ds, gcamp_s_ds = self._downsample_for_plot(gcamp_t_min, gcamp_signal)
+        plot_raw.plot(iso_t_ds, iso_s_ds, pen=pg.mkPen(COLORS['isosbestic'], width=1), name='Iso')
+        plot_raw.plot(gcamp_t_ds, gcamp_s_ds, pen=pg.mkPen(COLORS['gcamp'], width=1), name='GCaMP')
         plot_raw.setLabel('left', 'Raw Signal (V)', color=COLORS['text'])
         plot_raw.setTitle(f'{fiber_col} - Raw Signals (Iso + GCaMP)', color=COLORS['text'], size='9pt')
 
@@ -163,18 +172,18 @@ class ExperimentPlotter:
                 self._style_plot(plot_fit, first_plot)
                 plot_fit.setXLink(first_plot)
 
-                # Plot GCaMP aligned (with downsampling for performance)
-                plot_fit.plot(t_plot_min, intermediates['gcamp_aligned'],
-                             pen=pg.mkPen(COLORS['gcamp'], width=1), name='GCaMP',
-                             clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                # Plot GCaMP aligned (pre-downsampled for fast repaint)
+                t_ds, s_ds = self._downsample_for_plot(t_plot_min, intermediates['gcamp_aligned'])
+                plot_fit.plot(t_ds, s_ds,
+                             pen=pg.mkPen(COLORS['gcamp'], width=1), name='GCaMP')
 
                 # Plot fitted isosbestic (dashed red)
                 if intermediates.get('fitted_iso') is not None:
-                    plot_fit.plot(t_plot_min, intermediates['fitted_iso'],
+                    t_ds, s_ds = self._downsample_for_plot(t_plot_min, intermediates['fitted_iso'])
+                    fitted_iso_curve = plot_fit.plot(t_ds, s_ds,
                                  pen=pg.mkPen(COLORS['fitted_iso'], width=1.5,
                                              style=Qt.PenStyle.DashLine),
-                                 name='Fitted Iso',
-                                 clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                                 name='Fitted Iso')
 
                 plot_fit.setLabel('left', 'Signal (V)', color=COLORS['text'])
                 plot_fit.setTitle('GCaMP + Fitted Isosbestic', color='#888888', size='8pt')
@@ -192,17 +201,18 @@ class ExperimentPlotter:
                 self._style_plot(plot_dff_raw, first_plot)
                 plot_dff_raw.setXLink(first_plot)
 
-                # Plot dF/F raw (with downsampling for performance)
-                plot_dff_raw.plot(t_plot_min, intermediates['dff_raw'],
-                                 pen=pg.mkPen(COLORS['dff_raw'], width=1), name='dF/F raw',
-                                 clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                # Plot dF/F raw (pre-downsampled for fast repaint)
+                t_ds, s_ds = self._downsample_for_plot(t_plot_min, intermediates['dff_raw'])
+                dff_raw_curve = plot_dff_raw.plot(t_ds, s_ds,
+                                 pen=pg.mkPen(COLORS['dff_raw'], width=1), name='dF/F raw')
 
                 # Plot detrending curve (if present)
+                detrend_curve_ref = None
                 if intermediates.get('detrend_curve') is not None:
-                    plot_dff_raw.plot(t_plot_min, intermediates['detrend_curve'],
+                    t_ds, s_ds = self._downsample_for_plot(t_plot_min, intermediates['detrend_curve'])
+                    detrend_curve_ref = plot_dff_raw.plot(t_ds, s_ds,
                                      pen=pg.mkPen(COLORS['detrend'], width=1.5),
-                                     name='Detrend',
-                                     clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+                                     name='Detrend')
 
                 plot_dff_raw.setLabel('left', 'dF/F (%)', color=COLORS['text'])
                 plot_dff_raw.setTitle('dF/F Raw + Detrend Curve', color='#888888', size='8pt')
@@ -220,8 +230,8 @@ class ExperimentPlotter:
             self._style_plot(plot_final, first_plot)
             plot_final.setXLink(first_plot)
 
-            plot_final.plot(t_plot_min, dff, pen=pg.mkPen(COLORS['final_dff'], width=1),
-                          clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+            t_ds, s_ds = self._downsample_for_plot(t_plot_min, dff)
+            dff_final_curve = plot_final.plot(t_ds, s_ds, pen=pg.mkPen(COLORS['final_dff'], width=1))
             plot_final.setLabel('left', 'dF/F (%)', color=COLORS['text'])
             plot_final.setTitle(f'{fiber_col} - Final dF/F', color=COLORS['text'], size='9pt')
 
@@ -248,7 +258,16 @@ class ExperimentPlotter:
             plot.enableAutoRange()
             plot.autoRange()
 
-        # Add fit regions if enabled (to photometry plots only, not AI)
+        # Store curve references for fast data-only updates
+        self._curve_refs[exp_idx] = {
+            't_plot_min': t_plot_min,
+            'fitted_iso': fitted_iso_curve,
+            'dff_raw': dff_raw_curve,
+            'detrend': detrend_curve_ref,
+            'dff_final': dff_final_curve,
+        }
+
+        # Add fit regions to all photometry plots (not AI)
         photometry_plots = [p for p in plot_items if p not in ai_plots]
         if fit_region_enabled and len(photometry_plots) > 0:
             self.add_fit_regions(exp_idx, photometry_plots, fit_start, fit_end, on_region_changed)
@@ -325,8 +344,8 @@ class ExperimentPlotter:
             # Use column index for consistent colors across all views
             color = COLORS['ai_channels'][col_idx_int % len(COLORS['ai_channels'])]
 
-            plot.plot(ai_time_min[:min_len], ai_signal[:min_len], pen=pg.mkPen(color, width=1),
-                     clipToView=True, autoDownsample=True, downsampleMethod='subsample')
+            t_ds, s_ds = self._downsample_for_plot(ai_time_min[:min_len], ai_signal[:min_len])
+            plot.plot(t_ds, s_ds, pen=pg.mkPen(color, width=1))
             plot.setLabel('left', channel_name, color=color)
             plot.setTitle(channel_name, color='#888888', size='8pt')
 
@@ -360,6 +379,9 @@ class ExperimentPlotter:
                 event.ignore()
 
         plot.vb.wheelEvent = handle_wheel
+        # Also override axis wheel events so scroll works when mouse is over axes
+        plot.getAxis('bottom').wheelEvent = handle_wheel
+        plot.getAxis('left').wheelEvent = handle_wheel
 
         # Axis styling
         plot.getAxis('left').setPen(COLORS['axis'])
@@ -412,51 +434,39 @@ class ExperimentPlotter:
 
         self._fit_regions[exp_idx] = regions
 
-        # Connect first region to sync all others
-        # Note: Use try/except to handle case where C++ objects are deleted
-        def on_region_change():
+        # Sync regions visually during drag (cheap — all curves pre-downsampled)
+        def on_region_changed_from(source_region):
             if self._updating_regions:
                 return
             self._updating_regions = True
             try:
-                min_val, max_val = regions[0].getRegion()
-
-                # Sync all other regions
-                for region in regions[1:]:
-                    region.blockSignals(True)
-                    region.setRegion([min_val, max_val])
-                    region.blockSignals(False)
+                min_val, max_val = source_region.getRegion()
+                for region in regions:
+                    if region is not source_region:
+                        region.blockSignals(True)
+                        region.setRegion([min_val, max_val])
+                        region.blockSignals(False)
             except RuntimeError:
                 pass  # C++ object deleted
             finally:
                 self._updating_regions = False
 
-        def on_region_change_finished():
+        # Recompute dF/F only on release (not during drag)
+        def on_region_change_finished_from(source_region):
             if on_region_changed:
                 try:
-                    min_val, max_val = regions[0].getRegion()
+                    min_val, max_val = source_region.getRegion()
                     on_region_changed(min_val, max_val)
                 except RuntimeError:
                     pass  # C++ object deleted
 
-        regions[0].sigRegionChanged.connect(on_region_change)
-        regions[0].sigRegionChangeFinished.connect(on_region_change_finished)
-
-        # Connect other regions to sync back to first
-        for region in regions[1:]:
-            def sync_to_first(r=region):
-                if self._updating_regions:
-                    return
-                self._updating_regions = True
-                try:
-                    min_val, max_val = r.getRegion()
-                    regions[0].setRegion([min_val, max_val])
-                except RuntimeError:
-                    pass  # C++ object deleted
-                finally:
-                    self._updating_regions = False
-            region.sigRegionChanged.connect(sync_to_first)
-            region.sigRegionChangeFinished.connect(on_region_change_finished)
+        for region in regions:
+            region.sigRegionChanged.connect(
+                lambda r=region: on_region_changed_from(r)
+            )
+            region.sigRegionChangeFinished.connect(
+                lambda r=region: on_region_change_finished_from(r)
+            )
 
         return regions
 
@@ -481,6 +491,68 @@ class ExperimentPlotter:
         for region in self._fit_regions[exp_idx]:
             region.setRegion([fit_start, fit_end])
         self._updating_regions = False
+
+    def update_experiment_data(self, exp_idx: int, dff_results: Dict) -> bool:
+        """Update dF/F curves in-place via setData(). Returns False if full rebuild needed."""
+        refs = self._curve_refs.get(exp_idx)
+        if not refs:
+            return False
+        try:
+            t = refs['t_plot_min']
+            if t is None or len(t) == 0:
+                return False
+            intermediates = dff_results.get('intermediates', {})
+            dff = dff_results.get('dff', np.array([]))
+
+            if refs.get('fitted_iso') and intermediates.get('fitted_iso') is not None:
+                t_ds, s_ds = self._downsample_for_plot(t, intermediates['fitted_iso'])
+                refs['fitted_iso'].setData(t_ds, s_ds)
+            if refs.get('dff_raw') and intermediates.get('dff_raw') is not None:
+                t_ds, s_ds = self._downsample_for_plot(t, intermediates['dff_raw'])
+                refs['dff_raw'].setData(t_ds, s_ds)
+            if refs.get('detrend') and intermediates.get('detrend_curve') is not None:
+                t_ds, s_ds = self._downsample_for_plot(t, intermediates['detrend_curve'])
+                refs['detrend'].setData(t_ds, s_ds)
+            if refs.get('dff_final') and len(dff) > 0:
+                t_ds, s_ds = self._downsample_for_plot(t, dff)
+                refs['dff_final'].setData(t_ds, s_ds)
+            return True
+        except RuntimeError:
+            return False  # C++ objects deleted, need full rebuild
+
+    @staticmethod
+    def _downsample_for_plot(time: np.ndarray, signal: np.ndarray, max_points: int = 20000) -> Tuple[np.ndarray, np.ndarray]:
+        """Pre-downsample using min-max envelope for fast repaint during drag.
+
+        Keeps both min and max per bucket so peaks/valleys are preserved.
+        Returns a fixed small array — no per-frame computation needed.
+        """
+        n = len(time)
+        if n <= max_points:
+            return time, signal
+        # Each bucket produces 2 points (min + max), so use half as many buckets
+        n_buckets = max_points // 2
+        bucket_size = n // n_buckets
+        out_t = np.empty(n_buckets * 2)
+        out_s = np.empty(n_buckets * 2)
+        for i in range(n_buckets):
+            start = i * bucket_size
+            end = start + bucket_size
+            chunk = signal[start:end]
+            idx_min = start + np.argmin(chunk)
+            idx_max = start + np.argmax(chunk)
+            # Always put min before max in time order
+            if idx_min <= idx_max:
+                out_t[2*i] = time[idx_min]
+                out_s[2*i] = signal[idx_min]
+                out_t[2*i+1] = time[idx_max]
+                out_s[2*i+1] = signal[idx_max]
+            else:
+                out_t[2*i] = time[idx_max]
+                out_s[2*i] = signal[idx_max]
+                out_t[2*i+1] = time[idx_min]
+                out_s[2*i+1] = signal[idx_min]
+        return out_t, out_s
 
     @staticmethod
     def subsample(time: np.ndarray, signal: np.ndarray, max_points: int = 10000) -> Tuple[np.ndarray, np.ndarray]:

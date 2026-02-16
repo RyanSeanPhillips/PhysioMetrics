@@ -5,7 +5,9 @@ Project MCP Server — exposes project metadata tools for Claude Code.
 Runs as a stdio MCP server. Works WITHOUT the app running — operates
 directly on .physiometrics JSON files and recording files on disk.
 
-v3: Decorator-based tool registration. Adding a new tool = one decorated function.
+v4: SQLite primary store. Dropped 9 redundant tools (discover_notes,
+read_notes, match_notes, cache_pattern, get_patterns, cache_vocabulary,
+check_cache, apply_patterns, label_file). Added project_add_custom_column.
 
 Configure in .mcp.json:
 {
@@ -33,7 +35,7 @@ from core.services.project_service import ProjectService
 
 # === Server + Service ===
 
-server = MCPServer("project", "3.0.0")
+server = MCPServer("project", "4.0.0")
 
 _service = None
 
@@ -51,8 +53,7 @@ def _resolve(path_str: str) -> str:
 
 
 # ============================================================
-# TOOLS — each decorated function IS the tool. To add a new
-# tool, just write a new @server.tool(...) function below.
+# TOOLS (16 total)
 # ============================================================
 
 
@@ -103,10 +104,11 @@ def project_scan(args):
 
 @server.tool(
     name="project_get_files",
-    description="List all files in the project with their current metadata. Returns file_path, file_name, experiment, strain, stim_type, power, sex, animal_id, protocol, channel, status, etc.",
+    description="List all files in the project with their current metadata. Returns file_path, file_name, experiment, strain, stim_type, power, sex, animal_id, protocol, channel, status, etc. Includes custom column values.",
     params={
         "filter_field": {"type": "string", "description": "Optional field to filter by"},
         "filter_value": {"type": "string", "description": "Value to filter for"},
+        "order_by": {"type": "string", "description": "Field to sort by (e.g. 'animal_id', 'experiment')"},
         "offset": {"type": "integer", "default": 0, "description": "Skip first N files (for pagination)"},
         "limit": {"type": "integer", "default": 100, "description": "Max files to return"},
     },
@@ -132,12 +134,15 @@ def project_get_files(args):
     }
     simplified = []
     for f in files:
-        entry = {k: v for k, v in f.items() if k in KEEP_KEYS and v}
+        entry = {k: v for k, v in f.items() if (k in KEEP_KEYS or k not in (
+            'file_id', 'project_id', 'updated_at', 'field_timestamps',
+            'path_keywords', 'stim_channels', 'stim_frequency', 'exports',
+        )) and v}
         if "file_path" in entry:
             entry["file_path"] = s._to_relative(entry["file_path"])
-        subrows = f.get("subrows")
-        if subrows:
-            entry["subrow_count"] = len(subrows)
+        subrow_count = f.get("subrow_count")
+        if subrow_count:
+            entry["subrow_count"] = subrow_count
         simplified.append(entry)
 
     return {"total": total, "offset": offset, "limit": limit, "files": simplified}
@@ -153,7 +158,7 @@ def project_get_files_grouped(args):
 
 @server.tool(
     name="project_update_file",
-    description="Update metadata for a single recording file. Accepts relative or absolute paths. Only editable fields can be changed: experiment, strain, stim_type, power, sex, animal_id, channel, stim_channel, events_channel, status, tags, notes, group, weight, age, date_recorded.",
+    description="Update metadata for a single recording file. Accepts ANY field — standard fields update directly, unknown fields become custom columns. No restriction on editable fields.",
     params={
         "file_path": {"type": "string", "description": "Path to the file to update (relative or absolute)"},
         "updates": {"type": "object", "description": "Dict of field->value pairs to update", "additionalProperties": True},
@@ -172,7 +177,7 @@ def project_update_file(args):
 
 @server.tool(
     name="project_batch_update",
-    description="Apply the same metadata updates to multiple files at once. Accepts relative or absolute paths.",
+    description="Apply the same metadata updates to multiple files at once. Accepts ANY field.",
     params={
         "file_paths": {"type": "array", "items": {"type": "string"}, "description": "List of file paths to update (relative or absolute)"},
         "updates": {"type": "object", "description": "Dict of field->value pairs to apply to all files", "additionalProperties": True},
@@ -182,46 +187,12 @@ def project_update_file(args):
 )
 def project_batch_update(args):
     provenance = args.get("provenance")
-    count = 0
-    for fp in args["file_paths"]:
-        result = svc().update_file_metadata(_resolve(fp), args["updates"], provenance=provenance)
-        if result is not None:
-            count += 1
+    count = svc().batch_update(
+        [_resolve(fp) for fp in args["file_paths"]],
+        args["updates"],
+        provenance=provenance,
+    )
     return {"files_updated": count, "total_requested": len(args["file_paths"])}
-
-
-@server.tool(
-    name="project_read_notes",
-    description="Read and parse a notes file (Excel/CSV/TXT/DOCX). Returns structured content with detected ABF file references.",
-    params={"path": {"type": "string", "description": "Path to the notes file (relative or absolute)"}},
-    required=["path"],
-)
-def project_read_notes(args):
-    return svc().read_notes_file(Path(_resolve(args["path"])))
-
-
-@server.tool(
-    name="project_match_notes",
-    description="Fuzzy-match notes entries to recording files in the project. Supports exact, suffix (last N digits), and fuzzy numeric matching.",
-    params={
-        "notes_entries": {"type": "array", "description": "Output from project_read_notes"},
-        "fuzzy_range": {"type": "integer", "default": 5, "description": "Numeric range for fuzzy matching"},
-    },
-    required=["notes_entries"],
-)
-def project_match_notes(args):
-    s = svc()
-    matches = s.match_notes_to_files(args["notes_entries"], fuzzy_range=args.get("fuzzy_range", 5))
-    for m in matches:
-        if "file_path" in m:
-            m["file_path"] = s._to_relative(m["file_path"])
-    return {
-        "matches": matches,
-        "total_matches": len(matches),
-        "exact": sum(1 for m in matches if m.get("match_type") == "exact"),
-        "suffix": sum(1 for m in matches if m.get("match_type") == "suffix"),
-        "fuzzy": sum(1 for m in matches if m.get("match_type") == "fuzzy"),
-    }
 
 
 @server.tool(name="project_completeness", description="Get percentage of metadata filled for each column. Shows which fields need attention.")
@@ -242,7 +213,7 @@ def project_get_unique(args):
 
 @server.tool(
     name="project_save",
-    description="Persist current project state to disk (.physiometrics file).",
+    description="Persist current project state to disk (.physiometrics file). DB is always up-to-date; this exports JSON to network drive.",
     params={"name": {"type": "string", "description": "Optional project name (uses existing name if not provided)"}},
 )
 def project_save(args):
@@ -319,101 +290,6 @@ def project_preview_file(args):
 
 
 @server.tool(
-    name="project_discover_notes",
-    description="Discover notes files (Excel, CSV, TXT, DOCX) in the project folder. Returns candidates with confidence scores and classification reasons.",
-    params={"folder": {"type": "string", "description": "Folder to search (defaults to project folder)"}},
-)
-def project_discover_notes(args):
-    folder = args.get("folder")
-    notes = svc().discover_notes_files(Path(folder) if folder else None)
-    return {"notes_files": notes, "count": len(notes)}
-
-
-@server.tool(
-    name="project_cache_pattern",
-    description="Store a successful extraction pattern for reuse on future runs. Patterns describe how metadata values were extracted from folder structure, filenames, or notes.",
-    params={
-        "type": {"type": "string", "enum": ["subfolder", "filename", "notes_column", "regex", "literal"], "description": "Pattern type"},
-        "source": {"type": "string", "description": "What to match (e.g. subfolder name pattern, column header, regex)"},
-        "target": {"type": "string", "description": "Target metadata field (e.g. 'strain', 'stim_type', 'animal_id')"},
-        "extractor": {"type": "string", "description": "How to extract the value (e.g. 'literal:VgatCre', 'regex:\\\\d+mW')"},
-        "confidence": {"type": "number", "default": 0.8, "description": "Confidence score 0.0-1.0"},
-        "notes": {"type": "string", "description": "Human-readable explanation of the pattern"},
-    },
-    required=["type", "source", "target", "extractor"],
-)
-def project_cache_pattern(args):
-    pid = svc().save_extraction_pattern(
-        type=args["type"], source=args["source"], target=args["target"],
-        extractor=args["extractor"], confidence=args.get("confidence", 0.8), notes=args.get("notes"),
-    )
-    return {"pattern_id": pid, "status": "saved"}
-
-
-@server.tool(
-    name="project_get_patterns",
-    description="Retrieve cached extraction patterns, sorted by confidence and usage. Use at the start of extraction to apply learned patterns automatically.",
-    params={
-        "target_field": {"type": "string", "description": "Filter by target field (e.g. 'strain')"},
-        "type": {"type": "string", "description": "Filter by pattern type (e.g. 'subfolder')"},
-        "min_confidence": {"type": "number", "default": 0.0, "description": "Minimum confidence threshold"},
-    },
-)
-def project_get_patterns(args):
-    patterns = svc().get_extraction_patterns(
-        target_field=args.get("target_field"), type=args.get("type"),
-        min_confidence=args.get("min_confidence", 0.0),
-    )
-    vocab = svc().get_vocabulary(args.get("target_field"))
-    return {"patterns": patterns, "pattern_count": len(patterns), "vocabulary": vocab, "vocab_count": len(vocab)}
-
-
-@server.tool(
-    name="project_cache_vocabulary",
-    description="Record known values for a metadata field. Builds a vocabulary for validation and autocomplete.",
-    params={
-        "field": {"type": "string", "description": "Metadata field name (e.g. 'strain', 'animal_id')"},
-        "value": {"type": "string", "description": "The value to record"},
-    },
-    required=["field", "value"],
-)
-def project_cache_vocabulary(args):
-    svc().add_vocabulary_value(args["field"], args["value"])
-    return {"status": "recorded", "field": args["field"], "value": args["value"]}
-
-
-@server.tool(
-    name="project_check_cache",
-    description="Check if a notes file needs re-reading by comparing its current hash to the cached hash.",
-    params={"path": {"type": "string", "description": "Path to the notes file to check"}},
-    required=["path"],
-)
-def project_check_cache(args):
-    notes_path = Path(_resolve(args["path"]))
-    if not notes_path.exists():
-        raise FileNotFoundError(f"File not found: {args['path']}")
-    cached = svc().get_cached_notes(notes_path)
-    if cached is not None:
-        all_refs = []
-        for entry in cached:
-            all_refs.extend(entry.get("abf_references", []))
-        return {
-            "cached": True, "entry_count": len(cached),
-            "abf_ref_count": len(set(all_refs)),
-            "message": "File unchanged — cached parse available.",
-        }
-    return {"cached": False, "message": "File is new or modified — needs parsing."}
-
-
-@server.tool(
-    name="project_apply_patterns",
-    description="Apply all cached extraction patterns to unfilled metadata fields server-side. Returns summary only (zero context cost). Use after caching patterns to auto-fill remaining files.",
-)
-def project_apply_patterns(args):
-    return svc().apply_patterns()
-
-
-@server.tool(
     name="project_add_subrow",
     description="Create a child entry for a multi-animal recording file. Subrows inherit protocol/stim_type/power from parent.",
     params={
@@ -448,7 +324,7 @@ def project_get_subrows(args):
 
 @server.tool(
     name="project_get_provenance",
-    description="Get provenance records showing how metadata values were determined. Shows source type (notes/folder/pattern/user), confidence, and correction chains.",
+    description="Get provenance records showing how metadata values were determined. Shows source type (notes/folder/user/merge), confidence, and correction chains.",
     params={
         "file_path": {"type": "string", "description": "Path to the recording file"},
         "field": {"type": "string", "description": "Optional: filter by specific field"},
@@ -461,18 +337,26 @@ def project_get_provenance(args):
 
 
 @server.tool(
-    name="project_label_file",
-    description="Label a file's type for ML classifier training. Labels: 'data', 'notes', 'export', 'cage_card', 'surgery_notes', 'other'.",
+    name="project_add_custom_column",
+    description="Define a new custom metadata column for the project. Custom columns appear alongside standard fields and persist across saves.",
     params={
-        "file_path": {"type": "string", "description": "Path to the file"},
-        "label": {"type": "string", "description": "File type label"},
+        "column_key": {"type": "string", "description": "Internal key (e.g. 'virus', 'ear_tag', 'fiber_coords')"},
+        "display_name": {"type": "string", "description": "Human-readable name (e.g. 'Virus Type')"},
+        "column_type": {"type": "string", "default": "text", "description": "Column type: text, number, boolean"},
+        "sort_order": {"type": "integer", "default": 0, "description": "Display order (lower = earlier)"},
     },
-    required=["file_path", "label"],
+    required=["column_key", "display_name"],
 )
-def project_label_file(args):
-    if svc().cache:
-        svc().cache.save_file_label(args["file_path"], args["label"])
-    return {"status": "labeled", "file_path": args["file_path"], "label": args["label"]}
+def project_add_custom_column(args):
+    col_id = svc().add_custom_column(
+        column_key=args["column_key"],
+        display_name=args["display_name"],
+        column_type=args.get("column_type", "text"),
+        sort_order=args.get("sort_order", 0),
+    )
+    if col_id:
+        return {"status": "created", "column_id": col_id, "column_key": args["column_key"]}
+    raise RuntimeError("No project open — call project_open first")
 
 
 # ============================================================

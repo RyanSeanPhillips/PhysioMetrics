@@ -849,6 +849,45 @@ class FileTableModel(QAbstractTableModel):
         """Get list of custom column definitions."""
         return list(self._custom_columns)
 
+    def sync_custom_columns_from_db(self, db_columns: List[Dict[str, Any]]):
+        """
+        Sync custom column definitions from the SQLite store.
+
+        Adds any DB-defined custom columns that aren't already in the model.
+        Called when a project is loaded to pick up project-specific columns.
+
+        Args:
+            db_columns: List of dicts with keys: column_key, display_name, column_type
+        """
+        existing_keys = {c.key for c in self._column_defs + self._custom_columns}
+
+        for db_col in db_columns:
+            key = db_col.get("column_key", "")
+            if not key or key in existing_keys:
+                continue
+
+            display_name = db_col.get("display_name", key)
+            col_type = db_col.get("column_type", "text")
+
+            col_def = ColumnDef(
+                key=key,
+                header=display_name,
+                width=70,
+                min_width=40,
+                column_type=ColumnType.TEXT,
+                editable=True,
+                tooltip=f"Custom column: {display_name}"
+            )
+
+            self._custom_columns.append(col_def)
+            self._column_order.append(key)
+            existing_keys.add(key)
+
+        self._rebuild_column_index()
+        # Notify view of structure change
+        self.beginResetModel()
+        self.endResetModel()
+
 
 # Convenience function to get default column keys
 def get_default_column_keys() -> List[str]:

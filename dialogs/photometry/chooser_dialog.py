@@ -10,7 +10,7 @@ This provides a streamlined workflow for returning to previously processed data.
 """
 
 from pathlib import Path
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,

@@ -78,3 +78,4 @@ _internal/
 
 # Claude project instructions (local only, not on GitHub)
 CLAUDE.md
+.mcp.json

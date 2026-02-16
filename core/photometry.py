@@ -10,6 +10,7 @@ File patterns:
 - timestamps_*.csv: Common time vector
 """
 
+import ast
 import re
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -267,8 +268,8 @@ def get_npz_experiment_info(npz_path: Path) -> Optional[Dict]:
             if 'animal_ids' in data:
                 animal_ids_str = str(data['animal_ids'][0])
                 try:
-                    animal_ids = eval(animal_ids_str)  # Safe here since we created the file
-                except:
+                    animal_ids = ast.literal_eval(animal_ids_str)
+                except Exception:
                     pass
 
             # Get fiber columns
@@ -280,16 +281,16 @@ def get_npz_experiment_info(npz_path: Path) -> Optional[Dict]:
             assignments = {}
             if 'experiment_assignments' in data:
                 try:
-                    assignments = eval(str(data['experiment_assignments'][0]))
-                except:
+                    assignments = ast.literal_eval(str(data['experiment_assignments'][0]))
+                except Exception:
                     pass
 
             # Get file paths
             file_paths = {}
             if 'file_paths' in data:
                 try:
-                    file_paths = eval(str(data['file_paths'][0]))
-                except:
+                    file_paths = ast.literal_eval(str(data['file_paths'][0]))
+                except Exception:
                     pass
 
             # Build experiment info
@@ -352,8 +353,8 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
             animal_ids = {}
             if 'animal_ids' in data:
                 try:
-                    animal_ids = eval(str(data['animal_ids'][0]))
-                except:
+                    animal_ids = ast.literal_eval(str(data['animal_ids'][0]))
+                except Exception:
                     pass
             animal_id = animal_ids.get(exp_idx, '')
 
@@ -361,8 +362,8 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
             dff_params_all = {}
             if 'dff_params' in data:
                 try:
-                    dff_params_all = eval(str(data['dff_params'][0]))
-                except:
+                    dff_params_all = ast.literal_eval(str(data['dff_params'][0]))
+                except Exception:
                     pass
             params = dff_params_all.get(exp_idx, {
                 'method': 'fitted',
@@ -376,8 +377,8 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
             assignments = {}
             if 'experiment_assignments' in data:
                 try:
-                    assignments = eval(str(data['experiment_assignments'][0]))
-                except:
+                    assignments = ast.literal_eval(str(data['experiment_assignments'][0]))
+                except Exception:
                     pass
 
             # Get fiber columns
@@ -424,8 +425,8 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
                     print(f"[Photometry] Available keys: {list(data.keys())}")
                     continue
 
-                iso_signal = np.array(data[iso_key])
-                gcamp_signal = np.array(data[gcamp_key])
+                iso_signal = data[iso_key]
+                gcamp_signal = data[gcamp_key]
 
                 # Compute dF/F using the same approach as the dialog
                 try:
@@ -503,8 +504,7 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
                 if key.startswith('ai_channel_'):
                     ai_col = key.replace('ai_channel_', '')
                     ai_name = f'AI-{ai_col}'
-                    ai_data = np.array(data[key])
-                    sweeps[ai_name] = ai_data.reshape(-1, 1)
+                    sweeps[ai_name] = data[key].reshape(-1, 1)
                     channel_names.append(ai_name)
                     channel_visibility[ai_name] = True
 
@@ -520,8 +520,8 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
                 gcamp_key = f'fiber_{fiber_col}_gcamp'
                 if iso_key in data and gcamp_key in data:
                     fibers_raw[fiber_col] = {
-                        'iso': np.array(data[iso_key]),
-                        'gcamp': np.array(data[gcamp_key])
+                        'iso': data[iso_key],
+                        'gcamp': data[gcamp_key]
                     }
 
             ai_channels_raw = {}
@@ -529,7 +529,7 @@ def load_experiment_from_npz(npz_path: Path, exp_idx: int = 0) -> Optional[Dict]
                 # NPZ saves with 'ai_channel_' prefix
                 if key.startswith('ai_channel_'):
                     ai_col = key.replace('ai_channel_', '')
-                    ai_channels_raw[ai_col] = np.array(data[key])
+                    ai_channels_raw[ai_col] = data[key]
 
             raw_photometry_data = {
                 'fibers': fibers_raw,
@@ -904,7 +904,7 @@ def detect_fiber_columns(df: pd.DataFrame) -> List[str]:
                     sample = pd.to_numeric(df[col].head(10), errors='coerce')
                     if sample.notna().any():
                         fiber_cols.append(col)
-                except:
+                except Exception:
                     pass
 
     return fiber_cols
@@ -939,7 +939,7 @@ def detect_led_states(df: pd.DataFrame, led_col: str = 'LedState') -> Dict[int, 
     try:
         unique_states = df[led_col].dropna().unique()
         unique_states = [int(x) for x in unique_states if not np.isnan(x)]
-    except:
+    except Exception:
         return {}
 
     interpretations = {
@@ -1039,7 +1039,7 @@ def get_available_led_states(data: pd.DataFrame, led_col: str = 'LedState') -> D
 
     try:
         led_counts = data[led_col].value_counts()
-    except:
+    except Exception:
         return {}
 
     result = {}
@@ -1200,15 +1200,18 @@ def separate_channels_multi_fiber(
     iso_mask = data[led_col] == iso_led
     iso_time = data.loc[iso_mask, time_col].values
 
+    # Pre-filter DataFrame once per mask — column indexing on the result is cheap
+    iso_data = data.loc[iso_mask]
+
     # Create masks for all signal LEDs we might use
-    signal_masks = {}
     signal_times = {}
+    signal_data = {}  # Pre-filtered DataFrames keyed by LED state
 
     for led_state in set([signal_led, red_led]):
         if led_state is not None:
             mask = data[led_col] == led_state
-            signal_masks[led_state] = mask
             signal_times[led_state] = data.loc[mask, time_col].values
+            signal_data[led_state] = data.loc[mask]
 
     # Check which LED states are present
     has_green = signal_led in signal_times and len(signal_times[signal_led]) > 0
@@ -1252,12 +1255,11 @@ def separate_channels_multi_fiber(
             print(f"[photometry] Warning: No signal data for fiber {fiber_col}")
             continue
 
-        # Extract signals for this fiber
-        signal_mask = signal_masks[used_led]
+        # Extract signals for this fiber (from pre-filtered DataFrames — no repeated mask application)
         signal_time = signal_times[used_led]
 
-        iso_signal = data.loc[iso_mask, fiber_col].values
-        signal_signal = data.loc[signal_mask, fiber_col].values
+        iso_signal = iso_data[fiber_col].values
+        signal_signal = signal_data[used_led][fiber_col].values
 
         result[fiber_col] = {
             'iso_time': iso_time,

@@ -4,6 +4,10 @@ Project view model — Qt integration for the project service.
 Provides QObject signals for UI binding and commands for user actions.
 Acts as the bridge between the UI (ProjectBuilderManager) and the
 service layer (ProjectService).
+
+v2: Uses sync_json() for merge instead of full reload on file change.
+Removed pattern/vocabulary/label methods (dropped in v4 MCP).
+Added custom columns and analysis recording forwarding.
 """
 
 from pathlib import Path
@@ -29,6 +33,7 @@ class ProjectViewModel(QObject):
         project_saved(str)           — path to saved file
         completeness_changed(dict)   — completeness stats
         external_update(list)        — list of changed file_paths from file watcher
+        merge_report(dict)           — merge report from JSON sync
     """
 
     # Signals
@@ -42,6 +47,7 @@ class ProjectViewModel(QObject):
     project_saved = pyqtSignal(str)
     completeness_changed = pyqtSignal(dict)
     external_update = pyqtSignal(list)
+    merge_report = pyqtSignal(dict)
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -73,6 +79,12 @@ class ProjectViewModel(QObject):
         self._setup_file_watcher()
         self.project_loaded.emit(result)
         self.metadata_changed.emit()
+
+        # Emit merge report if there was one
+        mr = result.get("merge_report")
+        if mr:
+            self.merge_report.emit(mr)
+
         return result
 
     def load_project(self, project_path: str) -> Dict[str, Any]:
@@ -110,18 +122,7 @@ class ProjectViewModel(QObject):
         file_types: Optional[List[str]] = None,
         auto_add: bool = True,
     ) -> List[Dict[str, Any]]:
-        """
-        Scan for new files.
-
-        Args:
-            root: Folder to scan (None = project data_directory).
-            recursive: Search subdirectories.
-            file_types: Types to scan.
-            auto_add: If True, automatically add discovered files to project.
-
-        Returns:
-            List of newly discovered file entries.
-        """
+        """Scan for new files."""
         def progress(current, total, msg):
             self.scan_progress.emit(current, total, msg)
 
@@ -227,22 +228,6 @@ class ProjectViewModel(QObject):
         """Match notes entries to recording files."""
         return self._service.match_notes_to_files(notes_entries)
 
-    def discover_notes_files(self, root: Optional[str] = None) -> List[Dict]:
-        """Discover notes files in project folder."""
-        return self._service.discover_notes_files(Path(root) if root else None)
-
-    # ------------------------------------------------------------------
-    # Pattern application
-    # ------------------------------------------------------------------
-
-    def apply_patterns(self) -> Dict[str, Any]:
-        """Apply cached patterns to unfilled fields."""
-        result = self._service.apply_patterns()
-        if result.get("applied", 0) > 0:
-            self.metadata_changed.emit()
-            self.completeness_changed.emit(self._service.get_metadata_completeness())
-        return result
-
     # ------------------------------------------------------------------
     # Subrows
     # ------------------------------------------------------------------
@@ -267,13 +252,29 @@ class ProjectViewModel(QObject):
         return self._service.get_provenance(file_path, field)
 
     # ------------------------------------------------------------------
-    # File labels (ML training data)
+    # Custom columns
     # ------------------------------------------------------------------
 
-    def label_file(self, file_path: str, label: str) -> None:
-        """Label a file's type for ML classifier training."""
-        if self._service.cache:
-            self._service.cache.save_file_label(file_path, label)
+    def add_custom_column(self, column_key: str, display_name: str,
+                          column_type: str = 'text') -> Optional[int]:
+        """Define a custom metadata column."""
+        result = self._service.add_custom_column(column_key, display_name, column_type)
+        if result:
+            self.metadata_changed.emit()
+        return result
+
+    def get_custom_columns(self) -> List[Dict]:
+        """Get custom column definitions."""
+        return self._service.get_custom_columns()
+
+    # ------------------------------------------------------------------
+    # Analyses
+    # ------------------------------------------------------------------
+
+    def record_analysis(self, file_path: str, analysis_type: str,
+                        output_path: str = '', parameters: Optional[Dict] = None) -> Optional[int]:
+        """Record an analysis output for a file."""
+        return self._service.record_analysis(file_path, analysis_type, output_path, parameters)
 
     # ------------------------------------------------------------------
     # Grouped view
@@ -284,7 +285,15 @@ class ProjectViewModel(QObject):
         return self._service.get_files_grouped()
 
     # ------------------------------------------------------------------
-    # File watcher (Phase 3 — real-time UI updates)
+    # Backup
+    # ------------------------------------------------------------------
+
+    def backup(self, trigger_event: str = "manual") -> str:
+        """Create a backup of the database."""
+        return self._service.backup(trigger_event)
+
+    # ------------------------------------------------------------------
+    # File watcher
     # ------------------------------------------------------------------
 
     def _setup_file_watcher(self):
@@ -323,11 +332,8 @@ class ProjectViewModel(QObject):
     @staticmethod
     def _is_mapped_drive(path_str: str) -> bool:
         """Check if a drive letter is a mapped network drive."""
-        import os
         if len(path_str) >= 2 and path_str[1] == ':':
             drive = path_str[0].upper()
-            # Check common network drive letters (Z:, Y:, X:, etc.)
-            # More reliable: use win32api if available
             try:
                 import ctypes
                 drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive}:\\")
@@ -367,12 +373,10 @@ class ProjectViewModel(QObject):
         """Handle file change notification (debounced)."""
         if self._saving:
             return  # Ignore changes we caused
-
-        # Restart debounce timer
         self._debounce_timer.start()
 
     def _on_file_change_debounced(self):
-        """Process debounced file change — diff and emit updates."""
+        """Process debounced file change — use sync_json() for smart merge."""
         if self._saving:
             return
 
@@ -380,35 +384,24 @@ class ProjectViewModel(QObject):
         if project_path is None or not project_path.exists():
             return
 
-        # Reload from disk and diff
-        old_files = {
-            str(Path(f.get("file_path", "")).resolve()): dict(f)
-            for f in self._service._files
-        }
+        # Use sync_json() for smart merge instead of full reload
+        report = self._service.sync_json()
+        if report:
+            # Determine changed paths from merge report
+            changed_paths = []
+            for conflict in report.get("conflicts", []):
+                fp = conflict.get("file_path", "")
+                if fp:
+                    changed_paths.append(fp)
 
-        try:
-            self._service.load_project(project_path)
-        except Exception as e:
-            print(f"[project-viewmodel] Error reloading project: {e}")
-            return
+            # If new files were added or accepted, just refresh everything
+            if report.get("new", 0) > 0 or report.get("accepted", 0) > 0:
+                self.metadata_changed.emit()
 
-        # Find changed files
-        changed_paths = []
-        for f in self._service._files:
-            fp = str(Path(f.get("file_path", "")).resolve())
-            old = old_files.get(fp)
-            if old is None:
-                changed_paths.append(f.get("file_path", ""))
-            else:
-                # Check if any field changed
-                for key in f:
-                    if f.get(key) != old.get(key):
-                        changed_paths.append(f.get("file_path", ""))
-                        break
+            if changed_paths:
+                self.external_update.emit(changed_paths)
 
-        if changed_paths:
-            self.external_update.emit(changed_paths)
-            self.metadata_changed.emit()
+            self.merge_report.emit(report)
 
         # Re-add file to watcher (Qt removes it after change on some platforms)
         if self._watcher and project_path.exists():

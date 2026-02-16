@@ -560,7 +560,7 @@ class PlotManager:
             'thermal': '#ff4444',  # Thermal stim - red
         }
 
-        # Check if we should force auto-range (e.g., after snap to sweep)
+        # Check if we should force auto-range (e.g., after snap to sweep or new file load)
         force_autorange = getattr(self.plot_host, '_force_autorange', False)
         if force_autorange:
             self.plot_host._force_autorange = False  # Reset flag
@@ -788,11 +788,21 @@ class PlotManager:
                 self._draw_y2_metric_pyqtgraph(s, t_plot)
 
         # View range handling:
-        # - If we have previous view range, restore it and disable auto-range
-        # - If force_autorange, let auto-range work and then disable for future edits
-        # - Otherwise (first draw), let auto-range complete
+        # - If force_autorange, explicitly set X range to full data extent (needed when
+        #   reusing PlotItems that had auto-range disabled from a previous file)
+        # - If we have previous view range, restore it
+        # - Otherwise (first draw), let auto-range complete naturally
         view_was_restored = False
-        if plots and (prev_x_range is not None or prev_y_range is not None):
+        if plots and force_autorange:
+            # Explicitly set range to full data extent — more reliable than autoRange()
+            # which can fail when auto-range was previously disabled on reused plots
+            x_min, x_max = float(t_plot[0]), float(t_plot[-1])
+            first_plot = plots[0]
+            first_plot.setXRange(x_min, x_max, padding=0.02)
+            first_plot.enableAutoRange(axis='y')
+            first_plot.autoRange()
+            view_was_restored = True
+        elif plots and (prev_x_range is not None or prev_y_range is not None):
             try:
                 first_plot = plots[0]
                 if prev_x_range is not None:

@@ -3,11 +3,14 @@ Project service — pure Python, no PyQt6 imports.
 
 Provides high-level operations for scanning folders, parsing notes,
 reading/writing project metadata, and querying file metadata.
-Designed to be callable from MCP (no Qt dependency) and from the
-ProjectViewModel (Qt bridge).
+
+v2: SQLite as primary store. JSON on network drive as portable export.
+The DB lives at %APPDATA%/PhysioMetrics/PhysioMetrics.db (local only).
+JSON files are auto-merged on open and exported on save.
 """
 
 import re
+import json
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -24,36 +27,42 @@ METADATA_COLUMNS = [
     'status', 'exports', 'linked_notes',
 ]
 
-# Editable metadata columns (subset that Claude / user can write to)
-EDITABLE_COLUMNS = [
-    'experiment', 'strain', 'stim_type', 'power', 'sex', 'animal_id',
-    'channel', 'stim_channel', 'events_channel', 'status', 'tags',
-    'notes', 'group', 'weight', 'age', 'date_recorded',
-]
-
 
 class ProjectService:
     """
     Pure-Python service for project metadata operations.
 
-    Wraps ProjectManager (save/load) and adds:
-    - Folder scanning with metadata extraction
-    - Notes file parsing (Excel/CSV/TXT/DOCX)
-    - Fuzzy matching of notes to recording files
-    - CRUD operations on file metadata
-    - Completeness and uniqueness queries
+    Uses SQLite as primary store (ProjectStoreSQLite in %APPDATA%).
+    JSON .physiometrics files on network drives are portable exports,
+    auto-merged on open and exported on save.
     """
 
     def __init__(self, project_manager: Optional[ProjectManager] = None):
         self._pm = project_manager or ProjectManager()
-        self._files: List[Dict[str, Any]] = []
-        self._project_path: Optional[Path] = None
+        self._store = None  # Lazy-loaded ProjectStoreSQLite
+        self._project_id: Optional[int] = None
+        self._project_path: Optional[Path] = None  # .physiometrics JSON path
         self._project_name: str = ""
         self._data_directory: Optional[Path] = None
         self._experiments: List[Dict] = []
         self._notes_files_data: List[Dict] = []
         self._dirty = False
-        self._cache = None  # Lazy-loaded ProjectCacheSQLite
+        self._last_merge_report: Optional[Dict] = None
+
+        # Legacy compatibility: in-memory file list (populated from DB)
+        self._files: List[Dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # Store (lazy-loaded)
+    # ------------------------------------------------------------------
+
+    @property
+    def store(self):
+        """Lazy-load the SQLite store."""
+        if self._store is None:
+            from core.adapters.project_store_sqlite import ProjectStoreSQLite
+            self._store = ProjectStoreSQLite()
+        return self._store
 
     # ------------------------------------------------------------------
     # Project open / save / load
@@ -63,11 +72,12 @@ class ProjectService:
         """
         Open or create a project for a folder.
 
-        If a .physiometrics file exists in the folder, load it.
-        Otherwise, create a new empty project.
+        1. Upsert project in SQLite DB by data_directory
+        2. If .physiometrics JSON exists, merge it into DB
+        3. Populate in-memory _files from DB
 
         Returns:
-            Summary dict with project_name, file_count, data_directory.
+            Summary dict with project_name, file_count, data_directory, merge_report.
         """
         folder = Path(folder)
         if not folder.is_dir():
@@ -75,71 +85,191 @@ class ProjectService:
 
         # Look for existing .physiometrics file
         pm_files = list(folder.glob("*.physiometrics"))
-
+        json_path = None
         if pm_files:
-            # Load the most recently modified one
             pm_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return self.load_project(pm_files[0])
+            json_path = pm_files[0]
 
-        # No project file — create new empty project
-        self._project_name = folder.name
+        project_name = folder.name
+        if json_path:
+            try:
+                with open(json_path, 'r') as f:
+                    json_data = json.load(f)
+                project_name = json_data.get("project_name", folder.name)
+            except Exception:
+                json_data = None
+        else:
+            json_data = None
+
+        # Upsert project in DB
+        self._project_id = self.store.upsert_project(
+            name=project_name,
+            data_directory=str(folder),
+            json_path=str(json_path) if json_path else None,
+        )
+        self._project_name = project_name
         self._data_directory = folder
-        self._project_path = None
-        self._files = []
-        self._experiments = []
-        self._notes_files_data = []
-        self._dirty = False
+        self._project_path = json_path
 
-        return {
+        # Merge JSON into DB if it exists and is newer
+        merge_report = None
+        if json_path and json_data:
+            merge_report = self._sync_json(json_path, json_data)
+
+        # Populate in-memory file list from DB
+        self._refresh_files_from_db()
+        self._dirty = False
+        self._last_merge_report = merge_report
+
+        result = {
             "project_name": self._project_name,
             "data_directory": str(folder),
-            "file_count": 0,
-            "status": "created_new",
+            "file_count": len(self._files),
+            "status": "loaded" if json_path else "created_new",
         }
+        if merge_report:
+            result["merge_report"] = merge_report
+
+        return result
 
     def load_project(self, project_path: Path) -> Dict[str, Any]:
-        """Load a project from a .physiometrics file."""
+        """Load a project from a .physiometrics file (legacy compat)."""
         project_path = Path(project_path)
-        data = self._pm.load_project(project_path)
-
-        self._project_path = project_path
-        self._project_name = data.get("project_name", project_path.stem)
-        self._data_directory = Path(data.get("data_directory", project_path.parent))
-        self._files = data.get("files", [])
-        self._experiments = data.get("experiments", [])
-        self._notes_files_data = data.get("notes_files", [])
-        self._dirty = False
-
-        # Ensure file paths are strings for consistency
-        for f in self._files:
-            if "file_path" in f and not isinstance(f["file_path"], str):
-                f["file_path"] = str(f["file_path"])
-
-        return {
-            "project_name": self._project_name,
-            "data_directory": str(self._data_directory),
-            "file_count": len(self._files),
-            "experiment_count": len(self._experiments),
-            "status": "loaded",
-        }
+        folder = project_path.parent
+        return self.open_project(folder)
 
     def save_project(self, name: Optional[str] = None) -> str:
-        """Save the current project to disk."""
+        """
+        Save the current project.
+
+        1. Flush any in-memory changes to DB
+        2. Export DB -> JSON on network drive
+        3. Update JSON sync metadata
+
+        Returns path to saved .physiometrics file.
+        """
         if self._data_directory is None:
             raise RuntimeError("No project open — call open_project() first")
 
         project_name = name or self._project_name or self._data_directory.name
         self._project_name = project_name
 
+        # Update project name in DB
+        if self._project_id:
+            self.store.upsert_project(
+                name=project_name,
+                data_directory=str(self._data_directory),
+                json_path=str(self._project_path) if self._project_path else None,
+            )
+
+        # Export DB -> JSON
+        json_data = self.store.export_to_json(self._project_id)
+        json_data["experiments"] = self._experiments
+        json_data["notes_files"] = self._notes_files_data
+
+        # Write JSON to network drive via ProjectManager
         self._project_path = self._pm.save_project(
             project_name=project_name,
             data_directory=self._data_directory,
-            files_data=self._files,
+            files_data=json_data["files"],
             experiments=self._experiments,
             notes_files=self._notes_files_data,
         )
+
+        # Update sync metadata
+        if self._project_path and self._project_path.exists():
+            mtime = self._project_path.stat().st_mtime
+            file_hash = self.file_hash(self._project_path)
+            self.store.update_project_json_sync(
+                self._project_id, mtime, file_hash,
+            )
+
         self._dirty = False
         return str(self._project_path)
+
+    def _sync_json(
+        self, json_path: Path, json_data: Optional[Dict] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Sync a .physiometrics JSON file into the DB.
+
+        Compares mtime/hash to skip unnecessary re-imports.
+        Returns merge report or None if no sync needed.
+        """
+        if not json_path.exists():
+            return None
+
+        project = self.store.get_project(self._project_id)
+        if not project:
+            return None
+
+        try:
+            current_mtime = json_path.stat().st_mtime
+            current_hash = self.file_hash(json_path)
+        except OSError:
+            return None
+
+        # Skip if already synced
+        if (project["json_hash"] == current_hash and
+                project["json_mtime"] == current_mtime):
+            return None
+
+        # Backup before merge
+        try:
+            self.store.backup(trigger_event="merge")
+        except Exception as e:
+            print(f"[project-service] Backup before merge failed: {e}")
+
+        # Load JSON if not provided
+        if json_data is None:
+            try:
+                with open(json_path, 'r') as f:
+                    json_data = json.load(f)
+            except Exception as e:
+                print(f"[project-service] Error reading JSON: {e}")
+                return None
+
+        # Import/merge
+        report = self.store.import_from_json(
+            self._project_id, json_data, self._data_directory,
+        )
+
+        # Store experiments and notes from JSON
+        self._experiments = json_data.get("experiments", [])
+        self._notes_files_data = json_data.get("notes_files", [])
+
+        # Update sync metadata
+        self.store.update_project_json_sync(
+            self._project_id, current_mtime, current_hash,
+        )
+
+        return report
+
+    def sync_json(self) -> Optional[Dict[str, Any]]:
+        """Public method to trigger JSON sync (called by ViewModel on file change)."""
+        if self._project_path and self._project_path.exists():
+            report = self._sync_json(self._project_path)
+            if report:
+                self._refresh_files_from_db()
+            return report
+        return None
+
+    def _refresh_files_from_db(self):
+        """Reload in-memory _files list from DB."""
+        if self._project_id is None:
+            self._files = []
+            return
+
+        files, _ = self.store.get_project_files(self._project_id)
+
+        # Convert to format expected by legacy code (absolute paths)
+        for f in files:
+            rel_path = f.get('file_path', '')
+            if self._data_directory and rel_path:
+                abs_path = self._data_directory / rel_path
+                f['file_path'] = str(abs_path)
+
+        self._files = files
 
     @property
     def is_dirty(self) -> bool:
@@ -153,15 +283,20 @@ class ProjectService:
     def data_directory(self) -> Optional[Path]:
         return self._data_directory
 
+    @property
+    def project_id(self) -> Optional[int]:
+        return self._project_id
+
+    @property
+    def last_merge_report(self) -> Optional[Dict]:
+        return self._last_merge_report
+
     # ------------------------------------------------------------------
     # Relative / absolute path helpers
     # ------------------------------------------------------------------
 
     def _to_relative(self, abs_path: str) -> str:
-        """Convert an absolute path to a relative path from the project data directory.
-
-        Returns the original path if it can't be made relative (different drive, etc.).
-        """
+        """Convert an absolute path to relative from data_directory."""
         if not self._data_directory or not abs_path:
             return abs_path
         try:
@@ -171,10 +306,7 @@ class ProjectService:
             return abs_path
 
     def _to_absolute(self, rel_or_abs: str) -> str:
-        """Resolve a relative-or-absolute path against the project data directory.
-
-        If the path is already absolute (or data_directory is unset), returns as-is.
-        """
+        """Resolve a relative-or-absolute path against data_directory."""
         if not rel_or_abs:
             return rel_or_abs
         p = Path(rel_or_abs)
@@ -184,85 +316,33 @@ class ProjectService:
             return str(self._data_directory / p)
         return rel_or_abs
 
-    # ------------------------------------------------------------------
-    # Cache (lazy-loaded)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _cache_dir_for_project(data_directory: Path) -> Path:
-        """Get the AppData cache directory for a project, keyed by path hash."""
-        import os
-        appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        folder_hash = hashlib.sha256(str(data_directory.resolve()).encode()).hexdigest()[:16]
-        return appdata / "PhysioMetrics" / "project_cache" / folder_hash
-
-    @property
-    def cache(self):
-        """Lazy-load the project cache DB. Stored in %APPDATA%/PhysioMetrics/project_cache/<hash>/."""
-        if self._cache is None and self._data_directory is not None:
-            from core.adapters.project_cache_sqlite import ProjectCacheSQLite
-            cache_dir = self._cache_dir_for_project(self._data_directory)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            db_path = cache_dir / "cache.db"
-            self._cache = ProjectCacheSQLite(db_path)
-            # Store a breadcrumb so we can map hash back to project
-            self._cache.set_knowledge("_project_path", str(self._data_directory.resolve()))
-        return self._cache
-
-    def get_cached_notes(self, path: Path) -> Optional[List[Dict[str, Any]]]:
-        """Check cache for parsed notes. Returns cached content if hash matches, else None."""
-        if self.cache is None:
+    def _resolve_file_id(self, file_path: str) -> Optional[int]:
+        """Resolve a file path (relative or absolute) to a file_id in the DB."""
+        if self._project_id is None:
             return None
-        current_hash = self.file_hash(path)
-        cached = self.cache.get_notes_cache(current_hash)
-        if cached:
-            return cached["content"]
+
+        # Try relative path first
+        rel_path = self._to_relative(file_path)
+        fid = self.store.get_file_id_by_path(self._project_id, rel_path)
+        if fid:
+            return fid
+
+        # Try with forward slashes
+        rel_path_fwd = rel_path.replace("\\", "/")
+        if rel_path_fwd != rel_path:
+            fid = self.store.get_file_id_by_path(self._project_id, rel_path_fwd)
+            if fid:
+                return fid
+
+        # Try resolving absolute path then making relative
+        abs_path = self._to_absolute(file_path)
+        rel_path2 = self._to_relative(abs_path)
+        if rel_path2 != rel_path:
+            fid = self.store.get_file_id_by_path(self._project_id, rel_path2)
+            if fid:
+                return fid
+
         return None
-
-    def cache_notes_result(self, path: Path, content: List[Dict], abf_refs: List[str]) -> None:
-        """Store parsed notes in the cache."""
-        if self.cache is None:
-            return
-        current_hash = self.file_hash(path)
-        self.cache.save_notes_cache(str(path), current_hash, content, abf_refs)
-
-    def save_extraction_pattern(self, type: str, source: str, target: str,
-                                 extractor: str, confidence: float = 0.5,
-                                 notes: Optional[str] = None) -> Optional[int]:
-        """Store an extraction pattern. Returns pattern_id or None."""
-        if self.cache is None:
-            return None
-        return self.cache.save_pattern(type, source, target, extractor, confidence, notes)
-
-    def get_extraction_patterns(self, target_field: Optional[str] = None,
-                                 type: Optional[str] = None,
-                                 min_confidence: float = 0.0) -> List[Dict]:
-        """Retrieve cached extraction patterns."""
-        if self.cache is None:
-            return []
-        return self.cache.get_patterns(target_field, type, min_confidence)
-
-    def add_vocabulary_value(self, field: str, value: str) -> None:
-        """Record a known value for a metadata field."""
-        if self.cache is not None:
-            self.cache.add_vocabulary(field, value)
-
-    def get_vocabulary(self, field: Optional[str] = None) -> List[Dict]:
-        """Get known vocabulary values."""
-        if self.cache is None:
-            return []
-        return self.cache.get_vocabulary(field)
-
-    def set_knowledge(self, key: str, value: Any) -> None:
-        """Store a key-value pair in the cache."""
-        if self.cache is not None:
-            self.cache.set_knowledge(key, value)
-
-    def get_knowledge(self, key: str) -> Optional[Any]:
-        """Retrieve a cached key-value pair."""
-        if self.cache is None:
-            return None
-        return self.cache.get_knowledge(key)
 
     # ------------------------------------------------------------------
     # Scanning
@@ -278,14 +358,7 @@ class ProjectService:
         """
         Discover recording files in a folder tree.
 
-        Args:
-            root: Folder to scan (defaults to project data_directory).
-            recursive: Whether to search subdirectories.
-            file_types: List of types to scan for ('abf', 'smrx', 'edf', 'photometry').
-            progress_callback: Optional callback(current, total, message).
-
-        Returns:
-            List of newly discovered file dicts (not yet added to project).
+        Returns list of newly discovered file dicts (not yet added to project).
         """
         from core import project_builder
         from core.fast_abf_reader import extract_path_keywords
@@ -305,12 +378,15 @@ class ProjectService:
 
         all_data_files = abf_files + smrx_files + edf_files
 
-        # Build set of existing paths
-        existing_paths = {
-            str(Path(f["file_path"]).resolve())
-            for f in self._files
-            if f.get("file_path")
-        }
+        # Build set of existing paths (from DB)
+        existing_paths = set()
+        if self._project_id:
+            db_files, _ = self.store.get_project_files(self._project_id)
+            for f in db_files:
+                fp = f.get("file_path", "")
+                if fp and self._data_directory:
+                    abs_p = str((self._data_directory / fp).resolve())
+                    existing_paths.add(abs_p)
 
         new_entries = []
         total = len(all_data_files) + len(photometry_files)
@@ -425,9 +501,6 @@ class ProjectService:
         Load detailed metadata (protocol, channels, sweeps) for file entries.
 
         Operates on self._files if file_entries is None.
-
-        Returns:
-            Number of files updated.
         """
         from core.fast_abf_reader import read_file_metadata_fast
 
@@ -440,9 +513,9 @@ class ProjectService:
             if not file_path.exists():
                 continue
             if entry.get("file_type") == "photometry":
-                continue  # Already has metadata from scan
+                continue
             if entry.get("protocol") and entry["protocol"] not in ("", "Loading..."):
-                continue  # Already loaded
+                continue
 
             metadata = read_file_metadata_fast(file_path)
             if metadata:
@@ -458,6 +531,18 @@ class ProjectService:
                 updated += 1
                 self._dirty = True
 
+                # Also update DB
+                rel_path = self._to_relative(str(file_path))
+                fid = self._resolve_file_id(str(file_path))
+                if fid:
+                    self.store.update_file(fid, {
+                        "protocol": entry["protocol"],
+                        "channel_count": entry["channel_count"],
+                        "sweep_count": entry["sweep_count"],
+                        "stim_type": entry.get("stim_type", ""),
+                        "events_channel": entry.get("events_channel", ""),
+                    }, record_field_timestamps=False)
+
             if progress_callback and (i % 10 == 0 or i == total - 1):
                 progress_callback(i + 1, total, f"Loading metadata... {i + 1}/{total}")
 
@@ -467,31 +552,28 @@ class ProjectService:
     # Notes file reading and matching
     # ------------------------------------------------------------------
 
-    def read_notes_file(self, path: Path) -> List[Dict[str, Any]]:
+    def read_notes_file(self, path: Path, max_rows: int = 5) -> List[Dict[str, Any]]:
         """
         Read and parse a notes file (Excel/CSV/TXT/DOCX).
 
-        Checks the cache first — if the file hash matches a cached parse,
-        returns the cached result immediately. Otherwise parses and caches.
-
-        Returns a list of dicts, each representing a row or text block
-        with extracted content and ABF file references found.
+        Checks DB notes cache first. Otherwise parses and caches.
         """
         path = Path(path)
 
-        # Check cache first
-        cached = self.get_cached_notes(path)
-        if cached is not None:
-            return cached
+        # Check cache
+        if max_rows == 5 and self._project_id:
+            cached = self._get_cached_notes(path)
+            if cached is not None:
+                return cached
 
         suffix = path.suffix.lower()
         entries = []
 
         try:
             if suffix in (".xlsx", ".xls"):
-                entries = self._parse_excel_notes(path)
+                entries = self._parse_excel_notes(path, max_rows=max_rows)
             elif suffix == ".csv":
-                entries = self._parse_csv_notes(path)
+                entries = self._parse_csv_notes(path, max_rows=max_rows)
             elif suffix == ".txt":
                 entries = self._parse_text_notes(path)
             elif suffix == ".docx":
@@ -501,14 +583,30 @@ class ProjectService:
             return [{"error": str(e), "path": str(path)}]
 
         # Cache the result
-        all_refs = []
-        for entry in entries:
-            all_refs.extend(entry.get("abf_references", []))
-        self.cache_notes_result(path, entries, sorted(set(all_refs)))
+        if self._project_id:
+            all_refs = []
+            for entry in entries:
+                all_refs.extend(entry.get("abf_references", []))
+            current_hash = self.file_hash(path)
+            self.store.save_notes_cache(
+                self._project_id, str(path), current_hash,
+                entries, sorted(set(all_refs)),
+            )
 
         return entries
 
-    def _parse_excel_notes(self, path: Path) -> List[Dict]:
+    def _get_cached_notes(self, path: Path) -> Optional[List[Dict]]:
+        """Check DB cache for parsed notes."""
+        try:
+            current_hash = self.file_hash(path)
+            cached = self.store.get_notes_cache(self._project_id, current_hash)
+            if cached:
+                return cached["content"]
+        except (OSError, Exception):
+            pass
+        return None
+
+    def _parse_excel_notes(self, path: Path, max_rows: int = 5) -> List[Dict]:
         """Parse Excel file, returning rows as dicts with ABF refs detected."""
         import pandas as pd
 
@@ -516,12 +614,16 @@ class ProjectService:
         sheets = pd.read_excel(path, sheet_name=None, nrows=1000)
 
         for sheet_name, df in sheets.items():
-            # Convert all cells to strings and search for ABF references
             abf_refs = set()
             for col in df.columns:
                 for val in df[col].astype(str):
                     refs = self._extract_abf_references(val)
                     abf_refs.update(refs)
+
+            if max_rows <= 0:
+                preview = df.to_dict(orient="records")
+            else:
+                preview = df.head(max_rows).to_dict(orient="records")
 
             entries.append({
                 "source_file": str(path),
@@ -530,12 +632,12 @@ class ProjectService:
                 "row_count": len(df),
                 "columns": list(df.columns),
                 "abf_references": sorted(abf_refs),
-                "content_preview": df.head(5).to_dict(orient="records"),
+                "content_preview": preview,
             })
 
         return entries
 
-    def _parse_csv_notes(self, path: Path) -> List[Dict]:
+    def _parse_csv_notes(self, path: Path, max_rows: int = 5) -> List[Dict]:
         """Parse CSV file."""
         import pandas as pd
 
@@ -547,13 +649,18 @@ class ProjectService:
                 refs = self._extract_abf_references(val)
                 abf_refs.update(refs)
 
+        if max_rows <= 0:
+            preview = df.to_dict(orient="records")
+        else:
+            preview = df.head(max_rows).to_dict(orient="records")
+
         return [{
             "source_file": str(path),
             "source_name": path.name,
             "row_count": len(df),
             "columns": list(df.columns),
             "abf_references": sorted(abf_refs),
-            "content_preview": df.head(5).to_dict(orient="records"),
+            "content_preview": preview,
         }]
 
     def _parse_text_notes(self, path: Path) -> List[Dict]:
@@ -564,7 +671,7 @@ class ProjectService:
         return [{
             "source_file": str(path),
             "source_name": path.name,
-            "content": content[:5000],  # Limit for MCP response size
+            "content": content[:5000],
             "line_count": content.count("\n") + 1,
             "abf_references": sorted(abf_refs),
         }]
@@ -605,20 +712,35 @@ class ProjectService:
         """
         Extract ABF file stem references from text.
 
-        Looks for patterns like:
-        - "25708007" (8-digit numbers)
-        - "25708007.abf"
-        - Numeric sequences that look like ABF file IDs
+        Supports multiple reference styles:
+        - Full filename: "2024_03_21_0017.abf"
+        - 6-10 digit numbers: "25708007"
+        - Date_sequence patterns: "2024_03_21_0017"
+        - Short numeric references: 3-5 digit numbers near ABF context
         """
         refs = set()
 
-        # Match .abf file references
         abf_matches = re.findall(r"(\w+)\.abf", text, re.IGNORECASE)
         refs.update(abf_matches)
 
-        # Match 6-10 digit numbers (common ABF file naming)
+        date_seq = re.findall(r"\b(\d{4}_\d{2}_\d{2}_\d{4})\b", text)
+        refs.update(date_seq)
+
         num_matches = re.findall(r"\b(\d{6,10})\b", text)
         refs.update(num_matches)
+
+        short_matches = re.findall(r"(?:file|abf|recording|#)\s*(\d{2,5})\b", text, re.IGNORECASE)
+        refs.update(short_matches)
+
+        range_matches = re.findall(r"(?:file|recording|abf)s?\s+(\d+)\s*[-\u2013]\s*(\d+)", text, re.IGNORECASE)
+        for start, end in range_matches:
+            try:
+                s, e = int(start), int(end)
+                if e - s < 50:
+                    for i in range(s, e + 1):
+                        refs.add(str(i).zfill(len(start)))
+            except ValueError:
+                pass
 
         return refs
 
@@ -627,45 +749,32 @@ class ProjectService:
         notes_entries: List[Dict],
         fuzzy_range: int = 5,
     ) -> List[Dict[str, Any]]:
-        """
-        Match notes entries to recording files using multiple strategies:
-
-        1. Exact stem match: "2024_03_21_0017" matches file stem exactly
-        2. Suffix match: "017" or "17" matches the last N digits of a file stem
-        3. Fuzzy numeric: look for numeric neighbors within +-fuzzy_range
-
-        Returns:
-            List of match dicts with file_path, file_name, match_type, matched_ref, notes_source.
-        """
+        """Match notes entries to recording files."""
         matches = []
 
-        # Build lookups
         stem_to_files: Dict[str, List[Dict]] = {}
-        suffix_to_files: Dict[str, List[Dict]] = {}  # last 3-5 digits → files
+        suffix_to_files: Dict[str, List[Dict]] = {}
 
         for f in self._files:
             stem = Path(f.get("file_name", "")).stem
             if stem:
                 stem_to_files.setdefault(stem, []).append(f)
-                # Extract trailing digits for suffix matching
                 trailing = re.search(r"(\d{3,5})$", stem)
                 if trailing:
                     suffix = trailing.group(1)
                     suffix_to_files.setdefault(suffix, []).append(f)
-                    # Also store shorter suffixes (last 3 and last 4)
                     if len(suffix) >= 4:
                         suffix_to_files.setdefault(suffix[-3:], []).append(f)
                     if len(suffix) >= 5:
                         suffix_to_files.setdefault(suffix[-4:], []).append(f)
 
-        seen_matches = set()  # (file_path, ref) to avoid duplicates
+        seen_matches = set()
 
         for note in notes_entries:
             abf_refs = note.get("abf_references", [])
             source = note.get("source_name", "unknown")
 
             for ref in abf_refs:
-                # Strategy 1: Exact stem match
                 if ref in stem_to_files:
                     for f in stem_to_files[ref]:
                         key = (f.get("file_path", ""), ref)
@@ -680,7 +789,6 @@ class ProjectService:
                             })
                     continue
 
-                # Strategy 2: Suffix match (last N digits)
                 if ref.isdigit() and len(ref) <= 5 and ref in suffix_to_files:
                     for f in suffix_to_files[ref]:
                         key = (f.get("file_path", ""), ref)
@@ -695,7 +803,6 @@ class ProjectService:
                             })
                     continue
 
-                # Strategy 3: Fuzzy numeric match
                 numeric_parts = re.findall(r"\d+", ref)
                 if not numeric_parts:
                     continue
@@ -756,160 +863,235 @@ class ProjectService:
         """
         Update metadata for a single file.
 
-        Args:
-            file_path: Path to the file to update.
-            updates: Dict of field->value pairs to update.
-            provenance: Optional provenance info: {source_type, source_detail, reason}.
-
-        Returns:
-            Updated file dict, or None if file not found.
+        Accepts ANY field — standard fields update columns directly,
+        unknown fields go to custom_values. No EDITABLE_COLUMNS restriction.
         """
-        # Try both absolute resolution and relative-path resolution
-        file_path_resolved = str(Path(self._to_absolute(file_path)).resolve())
+        fid = self._resolve_file_id(file_path)
+        if fid is None:
+            return None
 
+        # Update DB
+        self.store.update_file(fid, updates)
+
+        # Record provenance if available
+        if provenance:
+            for key, value in updates.items():
+                self.store.add_provenance(
+                    file_id=fid,
+                    field=key,
+                    value=str(value),
+                    source_type=provenance.get("source_type", "user"),
+                    source_detail=provenance.get("source_detail", ""),
+                    source_preview=provenance.get("source_preview", ""),
+                    confidence=float(provenance.get("confidence", 0.8)),
+                    reason=provenance.get("reason", ""),
+                )
+
+        # Update in-memory list
+        file_path_resolved = str(Path(self._to_absolute(file_path)).resolve())
         for f in self._files:
             if str(Path(f.get("file_path", "")).resolve()) == file_path_resolved:
-                rel_path = self._to_relative(f.get("file_path", ""))
-                # Only update editable fields
                 for key, value in updates.items():
-                    if key in EDITABLE_COLUMNS or key.startswith("custom_"):
-                        f[key] = value
-                        # Record provenance if available
-                        if provenance:
-                            self._record_provenance(
-                                file_path=rel_path,
-                                field=key,
-                                value=str(value),
-                                source_type=provenance.get("source_type", "user"),
-                                source_detail=provenance.get("source_detail", ""),
-                                source_preview=provenance.get("source_preview", ""),
-                                confidence=float(provenance.get("confidence", 0.8)),
-                                reason=provenance.get("reason", ""),
-                            )
+                    f[key] = value
                 self._dirty = True
                 return dict(f)
 
-        return None
+        # File in DB but not in memory — refresh
+        self._refresh_files_from_db()
+        self._dirty = True
+        return self.get_file_by_path(file_path)
 
-    def batch_update(self, file_paths: List[str], updates: Dict[str, Any]) -> int:
-        """
-        Apply the same metadata updates to multiple files.
-
-        Returns:
-            Number of files updated.
-        """
+    def batch_update(self, file_paths: List[str], updates: Dict[str, Any],
+                     provenance: Optional[Dict[str, str]] = None) -> int:
+        """Apply the same metadata updates to multiple files."""
         count = 0
         for fp in file_paths:
-            result = self.update_file_metadata(fp, updates)
+            result = self.update_file_metadata(fp, updates, provenance=provenance)
             if result is not None:
                 count += 1
         return count
 
     def add_files(self, file_entries: List[Dict[str, Any]]) -> int:
-        """
-        Add new file entries to the project.
-
-        Returns:
-            Number of files added.
-        """
-        existing_paths = {
-            str(Path(f["file_path"]).resolve())
-            for f in self._files
-            if f.get("file_path")
-        }
+        """Add new file entries to the project (both DB and in-memory)."""
+        if self._project_id is None:
+            return 0
 
         added = 0
         for entry in file_entries:
             fp = entry.get("file_path", "")
-            if fp and str(Path(fp).resolve()) not in existing_paths:
-                self._files.append(dict(entry))
-                existing_paths.add(str(Path(fp).resolve()))
-                added += 1
-                self._dirty = True
+            if not fp:
+                continue
+
+            rel_path = self._to_relative(fp)
+            # Check if already in DB
+            existing = self.store.get_file_id_by_path(self._project_id, rel_path)
+            if existing:
+                continue
+
+            # Convert to relative for DB storage
+            db_entry = dict(entry)
+            db_entry['file_path'] = rel_path
+            self.store.upsert_file(self._project_id, rel_path, db_entry)
+            added += 1
+            self._dirty = True
+
+        if added > 0:
+            self._refresh_files_from_db()
 
         return added
 
     def remove_file(self, file_path: str) -> bool:
-        """Remove a file from the project by path."""
-        file_path_resolved = str(Path(file_path).resolve())
-        for i, f in enumerate(self._files):
-            if str(Path(f.get("file_path", "")).resolve()) == file_path_resolved:
-                del self._files[i]
-                self._dirty = True
-                return True
-        return False
+        """Remove a file from the project."""
+        fid = self._resolve_file_id(file_path)
+        if fid is None:
+            return False
+
+        result = self.store.delete_file(fid)
+        if result:
+            self._refresh_files_from_db()
+            self._dirty = True
+        return result
+
+    # ------------------------------------------------------------------
+    # Subrow support (multi-animal recordings)
+    # ------------------------------------------------------------------
+
+    def add_subrow(
+        self, file_path: str, channel: str, animal_id: str = "",
+        sex: str = "", group: str = "", **extra
+    ) -> Optional[Dict[str, Any]]:
+        """Create a child entry for multi-animal recordings."""
+        fid = self._resolve_file_id(file_path)
+        if fid is None:
+            return None
+
+        # Get parent data for inheritance
+        parent = self.store.get_file(fid)
+        if not parent:
+            return None
+
+        subrow_data = {
+            "channel": channel,
+            "animal_id": animal_id,
+            "sex": sex,
+            "group": group,
+            "protocol": parent.get("protocol", ""),
+            "stim_type": parent.get("stim_type", ""),
+            "power": parent.get("power", ""),
+            "experiment": parent.get("experiment", ""),
+            "strain": parent.get("strain", ""),
+        }
+        subrow_data.update(extra)
+
+        subrow_id = self.store.add_subrow(fid, subrow_data)
+        self._dirty = True
+
+        # Return the subrow data with ID
+        subrow_data["subrow_id"] = subrow_id
+        return subrow_data
+
+    def get_subrows(self, file_path: str) -> List[Dict[str, Any]]:
+        """Get subrows for a file."""
+        fid = self._resolve_file_id(file_path)
+        if fid is None:
+            return []
+        return self.store.get_subrows(fid)
+
+    def update_subrow(
+        self, file_path: str, subrow_id: int, updates: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Update a specific subrow."""
+        result = self.store.update_subrow(subrow_id, updates)
+        if result:
+            self._dirty = True
+            return updates
+        return None
+
+    # ------------------------------------------------------------------
+    # Provenance tracking
+    # ------------------------------------------------------------------
+
+    def get_provenance(
+        self, file_path: str, field: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get provenance records for a file."""
+        fid = self._resolve_file_id(file_path)
+        if fid is None:
+            return []
+        return self.store.get_provenance(fid, field)
+
+    # ------------------------------------------------------------------
+    # Custom columns
+    # ------------------------------------------------------------------
+
+    def add_custom_column(
+        self, column_key: str, display_name: str,
+        column_type: str = 'text', sort_order: int = 0,
+    ) -> Optional[int]:
+        """Define a custom metadata column for the current project."""
+        if self._project_id is None:
+            return None
+        return self.store.add_custom_column(
+            self._project_id, column_key, display_name,
+            column_type, sort_order,
+        )
+
+    def get_custom_columns(self) -> List[Dict[str, Any]]:
+        """Get custom column definitions for the current project."""
+        if self._project_id is None:
+            return []
+        return self.store.get_custom_columns(self._project_id)
+
+    # ------------------------------------------------------------------
+    # Analyses
+    # ------------------------------------------------------------------
+
+    def record_analysis(
+        self, file_path: str, analysis_type: str,
+        output_path: str = '', parameters: Optional[Dict] = None,
+    ) -> Optional[int]:
+        """Record an analysis output for a file."""
+        fid = self._resolve_file_id(file_path)
+        if fid is None:
+            return None
+        return self.store.record_analysis(fid, analysis_type, output_path, parameters)
+
+    # ------------------------------------------------------------------
+    # Backup
+    # ------------------------------------------------------------------
+
+    def backup(self, trigger_event: str = "manual") -> str:
+        """Create a backup of the database."""
+        return self.store.backup(trigger_event)
 
     # ------------------------------------------------------------------
     # Analysis helpers
     # ------------------------------------------------------------------
 
     def get_metadata_completeness(self) -> Dict[str, Any]:
-        """
-        Get percentage filled for each metadata column.
-
-        Returns:
-            Dict with keys: per_column (dict of field->pct), overall_pct, total_files.
-        """
-        if not self._files:
+        """Get percentage filled for each metadata column."""
+        if self._project_id is None:
             return {"per_column": {}, "overall_pct": 0.0, "total_files": 0}
-
-        fields = ["experiment", "strain", "stim_type", "power", "sex",
-                   "animal_id", "channel", "stim_channel", "protocol"]
-
-        per_column = {}
-        total_filled = 0
-        total_cells = 0
-
-        for field in fields:
-            filled = sum(
-                1 for f in self._files
-                if f.get(field) and str(f[field]).strip()
-                and str(f[field]) not in ("Loading...", "Unknown", "pending")
-            )
-            pct = (filled / len(self._files)) * 100 if self._files else 0
-            per_column[field] = {
-                "filled": filled,
-                "total": len(self._files),
-                "percent": round(pct, 1),
-            }
-            total_filled += filled
-            total_cells += len(self._files)
-
-        overall = (total_filled / total_cells * 100) if total_cells > 0 else 0
-
-        return {
-            "per_column": per_column,
-            "overall_pct": round(overall, 1),
-            "total_files": len(self._files),
-        }
+        return self.store.get_metadata_completeness(self._project_id)
 
     def get_unique_values(self, field: str) -> List[str]:
-        """
-        Get sorted unique non-empty values for a metadata field.
-
-        Useful for autocomplete, validation, and pattern detection.
-        """
-        values = set()
-        for f in self._files:
-            val = f.get(field, "")
-            if val and str(val).strip() and str(val) not in ("Loading...", "Unknown"):
-                values.add(str(val).strip())
-        return sorted(values)
+        """Get sorted unique non-empty values for a metadata field."""
+        if self._project_id is None:
+            return []
+        return self.store.get_unique_values(self._project_id, field)
 
     def get_file_count(self) -> int:
         """Get total number of files in the project."""
-        return len(self._files)
+        if self._project_id is None:
+            return 0
+        return self.store.get_file_count(self._project_id)
 
     # ------------------------------------------------------------------
     # Grouped file listing
     # ------------------------------------------------------------------
 
     def get_files_grouped(self) -> Dict[str, Any]:
-        """
-        Return files grouped by folder with summary stats.
-
-        Much more context-efficient than a flat file list — saves ~80 chars/file.
-        """
+        """Return files grouped by folder with summary stats."""
         if not self._files:
             return {
                 "project_root": str(self._data_directory) if self._data_directory else "",
@@ -934,7 +1116,6 @@ class ProjectService:
             files_in_folder = folder_map[folder_path]
             count = len(files_in_folder)
 
-            # Compute fill percentage
             total_cells = count * len(fields_to_check)
             filled_cells = 0
             for f in files_in_folder:
@@ -944,7 +1125,6 @@ class ProjectService:
                         filled_cells += 1
             filled_pct = round((filled_cells / total_cells * 100) if total_cells else 0, 1)
 
-            # Collect common values (show if all files share them)
             common = {}
             for field in ["strain", "animal_id", "stim_type", "power", "experiment"]:
                 vals = set()
@@ -961,7 +1141,6 @@ class ProjectService:
                 "filled_pct": filled_pct,
             }
             entry.update(common)
-            # List file names (compact)
             entry["files"] = [f.get("file_name", "") for f in files_in_folder]
             folders.append(entry)
 
@@ -972,422 +1151,7 @@ class ProjectService:
         }
 
     # ------------------------------------------------------------------
-    # Notes file discovery (with scoring heuristics)
-    # ------------------------------------------------------------------
-
-    # Negative keywords in filenames — less likely to be experiment notes
-    _NEGATIVE_KEYWORDS = {
-        "consolidated", "export", "analysis", "output", "results", "summary",
-        "backup", "copy", "old", "archive", "temp", "template",
-    }
-
-    def discover_notes_files(self, root: Optional[Path] = None) -> List[Dict[str, Any]]:
-        """
-        Discover notes files (Excel, CSV, TXT, DOCX) in the project folder.
-
-        Returns candidates with confidence scores and classification reasons.
-        """
-        from core import project_builder
-
-        root = Path(root) if root else self._data_directory
-        if root is None:
-            return []
-
-        files = project_builder.discover_files(str(root), recursive=True, file_types=["notes"])
-        notes_files = files.get("notes_files", [])
-
-        # Build data file folder set for proximity scoring
-        data_folders: Set[Path] = set()
-        for f in self._files:
-            fp = f.get("file_path", "")
-            if fp:
-                data_folders.add(Path(fp).parent.resolve())
-
-        result = []
-        for nf in notes_files:
-            try:
-                stat = nf.stat()
-                size_bytes = stat.st_size
-                size_kb = size_bytes / 1024
-                modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-            except OSError:
-                size_bytes = 0
-                size_kb = 0
-                modified = ""
-
-            # --- Scoring ---
-            confidence = 0.5
-            reasons = []
-
-            # Size heuristic
-            if size_kb < 100:
-                confidence += 0.15
-                reasons.append("small file (<100KB)")
-            elif size_kb < 500:
-                confidence += 0.05
-                reasons.append("medium file (100-500KB)")
-            else:
-                confidence -= 0.2
-                reasons.append("large file (>500KB) — may be data export")
-
-            # Proximity to data files
-            nf_parent = nf.parent.resolve()
-            min_hops = self._folder_distance(nf_parent, data_folders, root)
-            if min_hops <= 1:
-                confidence += 0.15
-                reasons.append(f"near data files ({min_hops} hop{'s' if min_hops != 1 else ''})")
-            elif min_hops >= 3:
-                confidence -= 0.1
-                reasons.append(f"far from data files ({min_hops} hops)")
-
-            # Negative keywords
-            name_lower = nf.stem.lower()
-            neg_hits = [kw for kw in self._NEGATIVE_KEYWORDS if kw in name_lower]
-            if neg_hits:
-                confidence -= 0.2
-                reasons.append(f"negative keywords: {', '.join(neg_hits)}")
-
-            # Positive keywords
-            positive = ["log", "notes", "protocol", "record", "experiment", "animal"]
-            pos_hits = [kw for kw in positive if kw in name_lower]
-            if pos_hits:
-                confidence += 0.15
-                reasons.append(f"positive keywords: {', '.join(pos_hits)}")
-
-            confidence = max(0.0, min(1.0, confidence))
-
-            entry = {
-                "name": nf.name,
-                "path": self._to_relative(str(nf)),
-                "type": nf.suffix.lower().lstrip("."),
-                "size": f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB",
-                "size_bytes": size_bytes,
-                "modified": modified,
-                "confidence": round(confidence, 2),
-                "reasons": reasons,
-            }
-
-            # Content preview for Excel/CSV (first few rows)
-            if nf.suffix.lower() in (".xlsx", ".xls", ".csv") and size_kb < 500:
-                try:
-                    preview = self._quick_preview(nf)
-                    if preview:
-                        entry["preview"] = preview
-                except Exception:
-                    pass
-
-            result.append(entry)
-
-        # Sort by confidence descending
-        result.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-        return result
-
-    @staticmethod
-    def _folder_distance(target: Path, data_folders: Set[Path], root: Path) -> int:
-        """Count minimum 'hops' from target folder to nearest data file folder."""
-        if not data_folders:
-            return 99
-        try:
-            target_parts = target.relative_to(root.resolve()).parts
-        except ValueError:
-            return 99
-
-        min_dist = 99
-        for df in data_folders:
-            try:
-                df_parts = df.relative_to(root.resolve()).parts
-            except ValueError:
-                continue
-            # Count differing path components
-            common = 0
-            for a, b in zip(target_parts, df_parts):
-                if a == b:
-                    common += 1
-                else:
-                    break
-            dist = (len(target_parts) - common) + (len(df_parts) - common)
-            min_dist = min(min_dist, dist)
-        return min_dist
-
-    @staticmethod
-    def _quick_preview(path: Path) -> Optional[Dict]:
-        """Read first 5 rows of a tabular file for preview."""
-        import pandas as pd
-        suffix = path.suffix.lower()
-        try:
-            if suffix in (".xlsx", ".xls"):
-                df = pd.read_excel(path, nrows=5)
-            elif suffix == ".csv":
-                df = pd.read_csv(path, nrows=5, encoding="utf-8", on_bad_lines="skip")
-            else:
-                return None
-            return {
-                "columns": list(df.columns),
-                "row_count_preview": len(df),
-                "sample_rows": df.head(3).to_dict(orient="records"),
-            }
-        except Exception:
-            return None
-
-    # ------------------------------------------------------------------
-    # Pattern application (server-side, zero context cost)
-    # ------------------------------------------------------------------
-
-    def apply_patterns(self) -> Dict[str, Any]:
-        """
-        Apply all cached extraction patterns to unfilled metadata fields.
-
-        Returns summary of what was applied (no per-file details to save context).
-        """
-        patterns = self.get_extraction_patterns(min_confidence=0.3)
-        if not patterns:
-            return {"applied": 0, "skipped": 0, "message": "No patterns cached"}
-
-        applied = 0
-        skipped = 0
-        by_field: Dict[str, int] = {}
-
-        for f in self._files:
-            file_path = f.get("file_path", "")
-            rel_path = self._to_relative(file_path)
-            path_parts = Path(rel_path).parts
-
-            for pattern in patterns:
-                target = pattern["target"]
-                # Skip if field already filled
-                current = f.get(target, "")
-                if current and str(current).strip() and str(current) not in ("", "Loading...", "Unknown"):
-                    skipped += 1
-                    continue
-
-                value = self._try_apply_pattern(pattern, f, path_parts, rel_path)
-                if value is not None:
-                    f[target] = value
-                    applied += 1
-                    by_field[target] = by_field.get(target, 0) + 1
-                    self._dirty = True
-
-                    # Record provenance
-                    self._record_provenance(
-                        file_path=rel_path,
-                        field=target,
-                        value=str(value),
-                        source_type="pattern",
-                        source_detail=f"pattern#{pattern['pattern_id']}: {pattern['type']}:{pattern['source']}",
-                        confidence=pattern.get("confidence", 0.5),
-                        reason=f"Auto-applied pattern: {pattern.get('notes', pattern['extractor'])}",
-                    )
-
-                    # Increment pattern usage
-                    if self.cache:
-                        self.cache.increment_pattern_usage(pattern["pattern_id"])
-
-        return {
-            "applied": applied,
-            "skipped": skipped,
-            "by_field": by_field,
-            "patterns_used": len(patterns),
-        }
-
-    def _try_apply_pattern(
-        self, pattern: Dict, file_entry: Dict, path_parts: tuple, rel_path: str
-    ) -> Optional[str]:
-        """Try to apply a single pattern to a file entry. Returns extracted value or None."""
-        ptype = pattern["type"]
-        source = pattern["source"]
-        extractor = pattern["extractor"]
-
-        if ptype == "literal":
-            # Literal value applies to all files matching source scope
-            if source == "*" or source.lower() in rel_path.lower():
-                return extractor.replace("literal:", "", 1) if extractor.startswith("literal:") else extractor
-
-        elif ptype == "subfolder":
-            # Check if source string appears in any path component
-            for part in path_parts:
-                if source.lower() == part.lower() or source.lower() in part.lower():
-                    if extractor.startswith("literal:"):
-                        return extractor[len("literal:"):]
-                    elif extractor.startswith("regex:"):
-                        match = re.search(extractor[len("regex:"):], part)
-                        return match.group(0) if match else None
-                    return part
-
-        elif ptype == "filename":
-            fname = file_entry.get("file_name", "")
-            if extractor.startswith("regex:"):
-                match = re.search(extractor[len("regex:"):], fname)
-                return match.group(0) if match else None
-            elif extractor.startswith("literal:"):
-                return extractor[len("literal:"):]
-
-        elif ptype == "regex":
-            # Apply regex to full relative path
-            match = re.search(source, rel_path)
-            if match:
-                if extractor.startswith("group:"):
-                    try:
-                        idx = int(extractor[len("group:"):])
-                        return match.group(idx)
-                    except (ValueError, IndexError):
-                        return match.group(0)
-                return match.group(0)
-
-        return None
-
-    # ------------------------------------------------------------------
-    # Subrow support (multi-animal recordings)
-    # ------------------------------------------------------------------
-
-    def add_subrow(
-        self, file_path: str, channel: str, animal_id: str = "",
-        sex: str = "", group: str = "", **extra
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Create a child entry linked to a parent file for multi-animal recordings.
-
-        Subrows inherit protocol/stim_type/power from parent. Stored as nested
-        list in the file's metadata dict under 'subrows'.
-        """
-        file_path_resolved = str(Path(self._to_absolute(file_path)).resolve())
-
-        for f in self._files:
-            if str(Path(f.get("file_path", "")).resolve()) == file_path_resolved:
-                subrows = f.setdefault("subrows", [])
-                subrow = {
-                    "channel": channel,
-                    "animal_id": animal_id,
-                    "sex": sex,
-                    "group": group,
-                    "subrow_id": len(subrows),
-                    # Inherit from parent
-                    "protocol": f.get("protocol", ""),
-                    "stim_type": f.get("stim_type", ""),
-                    "power": f.get("power", ""),
-                    "experiment": f.get("experiment", ""),
-                    "strain": f.get("strain", ""),
-                }
-                subrow.update(extra)
-                subrows.append(subrow)
-                self._dirty = True
-                return subrow
-        return None
-
-    def get_subrows(self, file_path: str) -> List[Dict[str, Any]]:
-        """Get subrows for a file."""
-        file_path_resolved = str(Path(self._to_absolute(file_path)).resolve())
-        for f in self._files:
-            if str(Path(f.get("file_path", "")).resolve()) == file_path_resolved:
-                return list(f.get("subrows", []))
-        return []
-
-    def update_subrow(
-        self, file_path: str, subrow_id: int, updates: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        """Update a specific subrow by index."""
-        file_path_resolved = str(Path(self._to_absolute(file_path)).resolve())
-        for f in self._files:
-            if str(Path(f.get("file_path", "")).resolve()) == file_path_resolved:
-                subrows = f.get("subrows", [])
-                if 0 <= subrow_id < len(subrows):
-                    for key, value in updates.items():
-                        if key in EDITABLE_COLUMNS or key in ("channel", "group", "subrow_id"):
-                            subrows[subrow_id][key] = value
-                    self._dirty = True
-                    return dict(subrows[subrow_id])
-        return None
-
-    # ------------------------------------------------------------------
-    # Provenance tracking
-    # ------------------------------------------------------------------
-
-    def _record_provenance(
-        self,
-        file_path: str,
-        field: str,
-        value: str,
-        source_type: str,
-        source_detail: str = "",
-        source_preview: str = "",
-        confidence: float = 0.5,
-        reason: str = "",
-    ) -> Optional[int]:
-        """Record provenance for a metadata field value. Returns prov_id or None."""
-        if self.cache is None:
-            return None
-        return self.cache.add_provenance(
-            file_path=file_path,
-            field=field,
-            value=value,
-            source_type=source_type,
-            source_detail=source_detail,
-            source_preview=source_preview,
-            confidence=confidence,
-            reason=reason,
-        )
-
-    def get_provenance(
-        self, file_path: str, field: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Get provenance records for a file (optionally filtered by field)."""
-        if self.cache is None:
-            return []
-        rel_path = self._to_relative(file_path)
-        return self.cache.get_provenance(rel_path, field)
-
-    # ------------------------------------------------------------------
-    # Enhanced ABF reference extraction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_abf_references(text: str) -> Set[str]:
-        """
-        Extract ABF file stem references from text.
-
-        Supports multiple reference styles:
-        - Full filename: "2024_03_21_0017.abf"
-        - 6-10 digit numbers: "25708007"
-        - Date_sequence patterns: "2024_03_21_0017"
-        - Short numeric references: 3-5 digit numbers near ABF context
-        """
-        refs = set()
-
-        # Match .abf file references (with or without extension)
-        abf_matches = re.findall(r"(\w+)\.abf", text, re.IGNORECASE)
-        refs.update(abf_matches)
-
-        # Match underscore-separated date_sequence patterns (common ABF naming)
-        date_seq = re.findall(r"\b(\d{4}_\d{2}_\d{2}_\d{4})\b", text)
-        refs.update(date_seq)
-
-        # Match 6-10 digit numbers (common ABF file naming)
-        num_matches = re.findall(r"\b(\d{6,10})\b", text)
-        refs.update(num_matches)
-
-        # Match short numeric refs (3-5 digits) only if near ABF-related context
-        # These could be shorthand like "017" or "17" referring to file suffixes
-        short_matches = re.findall(r"(?:file|abf|recording|#)\s*(\d{2,5})\b", text, re.IGNORECASE)
-        refs.update(short_matches)
-
-        # Match sequential ranges like "files 5-8" or "recordings 10-15"
-        range_matches = re.findall(r"(?:file|recording|abf)s?\s+(\d+)\s*[-–]\s*(\d+)", text, re.IGNORECASE)
-        for start, end in range_matches:
-            try:
-                s, e = int(start), int(end)
-                if e - s < 50:  # Sanity limit
-                    for i in range(s, e + 1):
-                        refs.add(str(i).zfill(len(start)))
-            except ValueError:
-                pass
-
-        return refs
-
-    # ------------------------------------------------------------------
-    # Notes file discovery (legacy compat)
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # File hash for caching
+    # File hash
     # ------------------------------------------------------------------
 
     @staticmethod

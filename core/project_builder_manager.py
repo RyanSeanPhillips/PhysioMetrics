@@ -1460,6 +1460,16 @@ class ProjectBuilderManager:
         # Note: The model's _get_display_value() handles all formatting
         # (sub-row names, exports summary, status icons, etc.)
 
+        # Sync custom columns from DB if available
+        try:
+            vm = getattr(self.mw, '_project_viewmodel', None)
+            if vm is not None:
+                db_cols = vm.get_custom_columns()
+                if db_cols:
+                    self.mw._file_table_model.sync_custom_columns_from_db(db_cols)
+        except Exception as e:
+            print(f"[project-builder] Error syncing custom columns: {e}")
+
         # Set data on model - this triggers view update
         self.mw._file_table_model.set_files(self.mw._master_file_list)
 
