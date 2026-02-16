@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """
-Project MCP Server — exposes project metadata tools for Claude Code.
+Project MCP Server — exposes experiment metadata tools for Claude Code.
 
 Runs as a stdio MCP server. Works WITHOUT the app running — operates
 directly on .physiometrics JSON files and recording files on disk.
 
-v4: SQLite primary store. Dropped 9 redundant tools (discover_notes,
-read_notes, match_notes, cache_pattern, get_patterns, cache_vocabulary,
-check_cache, apply_patterns, label_file). Added project_add_custom_column.
+v5: Simplified experiment DB. Flat experiments table, snapshots replace
+projects, source documents + source_links for provenance. Dropped subrow
+tools, added source/link tools.
 
 Configure in .mcp.json:
 {
@@ -35,7 +35,7 @@ from core.services.project_service import ProjectService
 
 # === Server + Service ===
 
-server = MCPServer("project", "4.0.0")
+server = MCPServer("project", "5.0.0")
 
 _service = None
 
@@ -53,7 +53,7 @@ def _resolve(path_str: str) -> str:
 
 
 # ============================================================
-# TOOLS (16 total)
+# TOOLS (18 total)
 # ============================================================
 
 
@@ -94,7 +94,7 @@ def project_scan(args):
     return {
         "new_files_found": len(new_files),
         "files_added": count,
-        "total_files": svc().get_file_count(),
+        "total_experiments": svc().get_file_count(),
         "sample_files": [
             {"file_name": f["file_name"], "file_type": f.get("file_type", ""), "protocol": f.get("protocol", "")}
             for f in new_files[:10]
@@ -128,21 +128,17 @@ def project_get_files(args):
     files = files[offset:offset + limit]
 
     KEEP_KEYS = {
-        "file_path", "file_name", "experiment", "strain", "stim_type", "power",
-        "sex", "animal_id", "protocol", "channel", "stim_channel", "events_channel",
-        "status", "channel_count", "sweep_count", "file_type", "keywords_display", "linked_notes",
+        "file_path", "file_name", "experiment", "experiment_name", "strain",
+        "stim_type", "power", "sex", "animal_id", "protocol", "channel",
+        "stim_channel", "events_channel", "status", "channel_count",
+        "sweep_count", "file_type", "keywords_display", "group_name",
+        "tags", "notes", "weight", "age", "date_recorded",
     }
     simplified = []
     for f in files:
         entry = {k: v for k, v in f.items() if (k in KEEP_KEYS or k not in (
-            'file_id', 'project_id', 'updated_at', 'field_timestamps',
-            'path_keywords', 'stim_channels', 'stim_frequency', 'exports',
+            'experiment_id', 'created_at', 'updated_at',
         )) and v}
-        if "file_path" in entry:
-            entry["file_path"] = s._to_relative(entry["file_path"])
-        subrow_count = f.get("subrow_count")
-        if subrow_count:
-            entry["subrow_count"] = subrow_count
         simplified.append(entry)
 
     return {"total": total, "offset": offset, "limit": limit, "files": simplified}
@@ -290,41 +286,8 @@ def project_preview_file(args):
 
 
 @server.tool(
-    name="project_add_subrow",
-    description="Create a child entry for a multi-animal recording file. Subrows inherit protocol/stim_type/power from parent.",
-    params={
-        "file_path": {"type": "string", "description": "Path to the parent recording file"},
-        "channel": {"type": "string", "description": "Channel for this animal (e.g. 'IN 0', 'AD0')"},
-        "animal_id": {"type": "string", "description": "Animal ID for this subrow"},
-        "sex": {"type": "string", "description": "Sex (M/F)"},
-        "group": {"type": "string", "description": "Experimental group (e.g. 'GFP', 'ChR2')"},
-    },
-    required=["file_path", "channel"],
-)
-def project_add_subrow(args):
-    subrow = svc().add_subrow(
-        file_path=_resolve(args["file_path"]), channel=args["channel"],
-        animal_id=args.get("animal_id", ""), sex=args.get("sex", ""), group=args.get("group", ""),
-    )
-    if subrow:
-        return {"status": "created", "subrow": subrow}
-    raise FileNotFoundError(f"File not found: {args['file_path']}")
-
-
-@server.tool(
-    name="project_get_subrows",
-    description="Get all subrows (child entries) for a multi-animal recording file.",
-    params={"file_path": {"type": "string", "description": "Path to the recording file"}},
-    required=["file_path"],
-)
-def project_get_subrows(args):
-    subrows = svc().get_subrows(_resolve(args["file_path"]))
-    return {"subrows": subrows, "count": len(subrows)}
-
-
-@server.tool(
     name="project_get_provenance",
-    description="Get provenance records showing how metadata values were determined. Shows source type (notes/folder/user/merge), confidence, and correction chains.",
+    description="Get provenance records showing how metadata values were determined. Shows source documents, confidence, and extracted values.",
     params={
         "file_path": {"type": "string", "description": "Path to the recording file"},
         "field": {"type": "string", "description": "Optional: filter by specific field"},
@@ -332,8 +295,8 @@ def project_get_subrows(args):
     required=["file_path"],
 )
 def project_get_provenance(args):
-    provenance = svc().get_provenance(args["file_path"], field=args.get("field"))
-    return {"provenance": provenance, "count": len(provenance)}
+    links = svc().get_provenance(args["file_path"], field=args.get("field"))
+    return {"source_links": links, "count": len(links)}
 
 
 @server.tool(
@@ -348,15 +311,85 @@ def project_get_provenance(args):
     required=["column_key", "display_name"],
 )
 def project_add_custom_column(args):
-    col_id = svc().add_custom_column(
+    result = svc().add_custom_column(
         column_key=args["column_key"],
         display_name=args["display_name"],
         column_type=args.get("column_type", "text"),
         sort_order=args.get("sort_order", 0),
     )
-    if col_id:
-        return {"status": "created", "column_id": col_id, "column_key": args["column_key"]}
-    raise RuntimeError("No project open — call project_open first")
+    if result:
+        return {"status": "created", "column_key": args["column_key"]}
+    return {"status": "already_exists", "column_key": args["column_key"]}
+
+
+# ============================================================
+# NEW TOOLS: Sources & Links
+# ============================================================
+
+
+@server.tool(
+    name="add_source",
+    description="Register a reference document (notes file, spreadsheet, surgery log, etc.). Returns source_id for use with link_source.",
+    params={
+        "file_path": {"type": "string", "description": "Absolute path to the reference document"},
+    },
+    required=["file_path"],
+)
+def add_source(args):
+    source_id = svc().add_source(args["file_path"])
+    return {"source_id": source_id, "file_path": args["file_path"]}
+
+
+@server.tool(
+    name="link_source",
+    description="Create a link between a source document and an animal/experiment. Records what metadata was extracted and where.",
+    params={
+        "source_id": {"type": "integer", "description": "Source document ID (from add_source)"},
+        "animal_id": {"type": "string", "description": "Animal ID this data belongs to"},
+        "field": {"type": "string", "description": "Metadata field name (e.g. 'sex', 'strain', 'weight')"},
+        "value": {"type": "string", "description": "Extracted value"},
+        "experiment_id": {"type": "integer", "description": "Optional: specific experiment ID"},
+        "location": {"type": "string", "description": "JSON: {sheet, row, col, cell_ref, snippet} — where in the document"},
+        "confidence": {"type": "number", "default": 0.5, "description": "Confidence in extraction (0-1)"},
+    },
+    required=["source_id", "animal_id", "field", "value"],
+)
+def link_source(args):
+    link_id = svc().link_source(
+        source_id=args["source_id"],
+        animal_id=args["animal_id"],
+        field=args["field"],
+        value=args["value"],
+        experiment_id=args.get("experiment_id"),
+        location=args.get("location", ""),
+        confidence=args.get("confidence", 0.5),
+    )
+    return {"link_id": link_id}
+
+
+@server.tool(
+    name="get_sources",
+    description="List all registered source documents (notes, spreadsheets, surgery logs).",
+)
+def get_sources(args):
+    sources = svc().get_sources()
+    return {"sources": sources, "count": len(sources)}
+
+
+@server.tool(
+    name="get_source_links",
+    description="Query source links — shows what metadata was extracted from which documents for an animal.",
+    params={
+        "animal_id": {"type": "string", "description": "Filter by animal ID"},
+        "field": {"type": "string", "description": "Filter by metadata field"},
+    },
+)
+def get_source_links(args):
+    links = svc().get_source_links(
+        animal_id=args.get("animal_id"),
+        field=args.get("field"),
+    )
+    return {"links": links, "count": len(links)}
 
 
 # ============================================================

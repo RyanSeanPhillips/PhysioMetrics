@@ -353,23 +353,10 @@ class FileTableModel(QAbstractTableModel):
             # Highlight conflicts
             if row in self._conflict_rows:
                 return QBrush(QColor(100, 80, 50))  # Brownish highlight
-            # Sub-rows get lighter background
-            is_sub_row = row_data.get('is_sub_row', False)
-            if is_sub_row:
-                return QBrush(QColor(50, 55, 60))  # Slightly lighter than parent
             return None
 
         elif role == Qt.ItemDataRole.ForegroundRole:
-            # Sub-rows get muted text color
-            is_sub_row = row_data.get('is_sub_row', False)
-            if is_sub_row:
-                return QBrush(QColor(200, 200, 200))  # Muted text
-            # Linked notes column: orange for fuzzy matches
-            if col_def.key == 'linked_notes':
-                value = row_data.get('linked_notes', '')
-                if str(value).startswith('~'):
-                    return QBrush(QColor(255, 165, 0))  # Orange for fuzzy matches
-            # Status column coloring (for parent rows)
+            # Status column coloring
             if col_def.key == 'status':
                 status = row_data.get('status', '')
                 if status == 'completed':
@@ -378,16 +365,6 @@ class FileTableModel(QAbstractTableModel):
                     return QBrush(QColor(200, 100, 100))  # Red
                 elif status == 'in_progress':
                     return QBrush(QColor(200, 200, 100))  # Yellow
-            return None
-
-        elif role == Qt.ItemDataRole.FontRole:
-            # Parent rows get bold font
-            is_sub_row = row_data.get('is_sub_row', False)
-            if not is_sub_row:
-                from PyQt6.QtGui import QFont
-                font = QFont()
-                font.setBold(True)
-                return font
             return None
 
         elif role == self.FilePathRole:
@@ -409,10 +386,6 @@ class FileTableModel(QAbstractTableModel):
         value = row_data.get(col_def.key, "")
 
         if col_def.key == 'file_name':
-            # Sub-rows show "↳ channel" instead of file name
-            if row_data.get('is_sub_row', False):
-                channel = row_data.get('channel', '')
-                return f"  ↳ {channel}"
             return str(value) if value else ""
 
         elif col_def.key == 'channel_count':
@@ -851,13 +824,14 @@ class FileTableModel(QAbstractTableModel):
 
     def sync_custom_columns_from_db(self, db_columns: List[Dict[str, Any]]):
         """
-        Sync custom column definitions from the SQLite store.
+        Sync custom column definitions from the experiment store.
 
         Adds any DB-defined custom columns that aren't already in the model.
-        Called when a project is loaded to pick up project-specific columns.
+        Called when a project is loaded to pick up dynamic columns.
 
         Args:
             db_columns: List of dicts with keys: column_key, display_name, column_type
+                        (from ExperimentStore.get_dynamic_columns() or PRAGMA table_info)
         """
         existing_keys = {c.key for c in self._column_defs + self._custom_columns}
 
@@ -867,7 +841,6 @@ class FileTableModel(QAbstractTableModel):
                 continue
 
             display_name = db_col.get("display_name", key)
-            col_type = db_col.get("column_type", "text")
 
             col_def = ColumnDef(
                 key=key,
@@ -884,7 +857,6 @@ class FileTableModel(QAbstractTableModel):
             existing_keys.add(key)
 
         self._rebuild_column_index()
-        # Notify view of structure change
         self.beginResetModel()
         self.endResetModel()
 

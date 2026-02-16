@@ -5,9 +5,8 @@ Provides QObject signals for UI binding and commands for user actions.
 Acts as the bridge between the UI (ProjectBuilderManager) and the
 service layer (ProjectService).
 
-v2: Uses sync_json() for merge instead of full reload on file change.
-Removed pattern/vocabulary/label methods (dropped in v4 MCP).
-Added custom columns and analysis recording forwarding.
+v3: Uses ExperimentStore (v2 schema). Snapshots replace projects.
+Removed subrow methods, notes parsing. Added source/link methods.
 """
 
 from pathlib import Path
@@ -56,17 +55,16 @@ class ProjectViewModel(QObject):
 
         # File watcher state
         self._watcher = None
-        self._poll_timer = None  # For network drive polling fallback
-        self._last_mtime = 0.0  # Track project file mtime for polling
+        self._poll_timer = None
+        self._last_mtime = 0.0
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(200)
         self._debounce_timer.timeout.connect(self._on_file_change_debounced)
-        self._saving = False  # Suppress watcher while we save
+        self._saving = False
 
     @property
     def service(self) -> ProjectService:
-        """Access the underlying service."""
         return self._service
 
     # ------------------------------------------------------------------
@@ -80,7 +78,6 @@ class ProjectViewModel(QObject):
         self.project_loaded.emit(result)
         self.metadata_changed.emit()
 
-        # Emit merge report if there was one
         mr = result.get("merge_report")
         if mr:
             self.merge_report.emit(mr)
@@ -101,11 +98,9 @@ class ProjectViewModel(QObject):
         try:
             path = self._service.save_project(name)
             self.project_saved.emit(path)
-            # Re-setup watcher in case path changed
             self._setup_file_watcher()
             return path
         finally:
-            # Re-enable watcher after a short delay (OS may fire change event)
             QTimer.singleShot(500, self._clear_saving_flag)
 
     def _clear_saving_flag(self):
@@ -197,15 +192,12 @@ class ProjectViewModel(QObject):
     # ------------------------------------------------------------------
 
     def get_project_files(self) -> List[Dict[str, Any]]:
-        """Get all files with metadata."""
         return self._service.get_project_files()
 
     def get_metadata_completeness(self) -> Dict[str, Any]:
-        """Get completeness stats."""
         return self._service.get_metadata_completeness()
 
     def get_unique_values(self, field: str) -> List[str]:
-        """Get unique values for a field."""
         return self._service.get_unique_values(field)
 
     @property
@@ -217,38 +209,32 @@ class ProjectViewModel(QObject):
         return self._service.is_dirty
 
     # ------------------------------------------------------------------
-    # Notes
+    # Sources & Links
     # ------------------------------------------------------------------
 
-    def read_notes_file(self, path: str) -> List[Dict]:
-        """Read and parse a notes file."""
-        return self._service.read_notes_file(Path(path))
+    def add_source(self, path: str) -> int:
+        """Register a reference document."""
+        return self._service.add_source(path)
 
-    def match_notes_to_files(self, notes_entries: List[Dict]) -> List[Dict]:
-        """Match notes entries to recording files."""
-        return self._service.match_notes_to_files(notes_entries)
+    def link_source(self, source_id: int, animal_id: str, field: str, value: str,
+                    experiment_id: Optional[int] = None, **kwargs) -> int:
+        """Create a source link."""
+        return self._service.link_source(source_id, animal_id, field, value,
+                                          experiment_id=experiment_id, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Subrows
-    # ------------------------------------------------------------------
+    def get_source_links(self, animal_id: Optional[str] = None,
+                         field: Optional[str] = None) -> List[Dict]:
+        return self._service.get_source_links(animal_id=animal_id, field=field)
 
-    def add_subrow(self, file_path: str, channel: str, **kwargs) -> Optional[Dict]:
-        """Add a subrow to a multi-animal recording."""
-        result = self._service.add_subrow(file_path, channel, **kwargs)
-        if result:
-            self.file_updated.emit(file_path, {"subrows": "added"})
-        return result
-
-    def get_subrows(self, file_path: str) -> List[Dict]:
-        """Get subrows for a file."""
-        return self._service.get_subrows(file_path)
+    def get_experiments_for_animal(self, animal_id: str) -> List[Dict]:
+        """Get all experiments for an animal across all files."""
+        return self._service.get_experiments_for_animal(animal_id)
 
     # ------------------------------------------------------------------
-    # Provenance
+    # Provenance (via source_links)
     # ------------------------------------------------------------------
 
     def get_provenance(self, file_path: str, field: Optional[str] = None) -> List[Dict]:
-        """Get provenance records for a file."""
         return self._service.get_provenance(file_path, field)
 
     # ------------------------------------------------------------------
@@ -256,32 +242,20 @@ class ProjectViewModel(QObject):
     # ------------------------------------------------------------------
 
     def add_custom_column(self, column_key: str, display_name: str,
-                          column_type: str = 'text') -> Optional[int]:
-        """Define a custom metadata column."""
+                          column_type: str = 'text') -> bool:
         result = self._service.add_custom_column(column_key, display_name, column_type)
         if result:
             self.metadata_changed.emit()
         return result
 
     def get_custom_columns(self) -> List[Dict]:
-        """Get custom column definitions."""
         return self._service.get_custom_columns()
-
-    # ------------------------------------------------------------------
-    # Analyses
-    # ------------------------------------------------------------------
-
-    def record_analysis(self, file_path: str, analysis_type: str,
-                        output_path: str = '', parameters: Optional[Dict] = None) -> Optional[int]:
-        """Record an analysis output for a file."""
-        return self._service.record_analysis(file_path, analysis_type, output_path, parameters)
 
     # ------------------------------------------------------------------
     # Grouped view
     # ------------------------------------------------------------------
 
     def get_files_grouped(self) -> Dict[str, Any]:
-        """Get files grouped by folder with summary stats."""
         return self._service.get_files_grouped()
 
     # ------------------------------------------------------------------
@@ -289,7 +263,6 @@ class ProjectViewModel(QObject):
     # ------------------------------------------------------------------
 
     def backup(self, trigger_event: str = "manual") -> str:
-        """Create a backup of the database."""
         return self._service.backup(trigger_event)
 
     # ------------------------------------------------------------------
@@ -297,14 +270,12 @@ class ProjectViewModel(QObject):
     # ------------------------------------------------------------------
 
     def _setup_file_watcher(self):
-        """Set up QFileSystemWatcher on the project file.
+        """Set up file watcher on the project file.
 
-        Detects network paths (UNC or mapped drives) and falls back to
-        mtime polling when QFileSystemWatcher may not fire reliably.
+        Detects network paths and falls back to mtime polling.
         """
         from PyQt6.QtCore import QFileSystemWatcher
 
-        # Clean up old watcher + poll timer
         if self._watcher is not None:
             self._watcher.fileChanged.disconnect(self._on_file_changed)
             self._watcher.deleteLater()
@@ -317,21 +288,17 @@ class ProjectViewModel(QObject):
         if project_path is None or not project_path.exists():
             return
 
-        # Detect network path — UNC (\\server\share) or mapped drive
         path_str = str(project_path)
         is_network = path_str.startswith("\\\\") or self._is_mapped_drive(path_str)
 
         if is_network:
-            # Network drive: use polling fallback (5-second interval)
             self._start_polling_watcher(project_path)
         else:
-            # Local drive: use QFileSystemWatcher (instant)
             self._watcher = QFileSystemWatcher([path_str], self)
             self._watcher.fileChanged.connect(self._on_file_changed)
 
     @staticmethod
     def _is_mapped_drive(path_str: str) -> bool:
-        """Check if a drive letter is a mapped network drive."""
         if len(path_str) >= 2 and path_str[1] == ':':
             drive = path_str[0].upper()
             try:
@@ -343,19 +310,17 @@ class ProjectViewModel(QObject):
         return False
 
     def _start_polling_watcher(self, project_path: Path):
-        """Start mtime-based polling for network drive projects."""
         try:
             self._last_mtime = project_path.stat().st_mtime
         except OSError:
             self._last_mtime = 0.0
 
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(5000)  # 5 seconds
+        self._poll_timer.setInterval(5000)
         self._poll_timer.timeout.connect(self._poll_check)
         self._poll_timer.start()
 
     def _poll_check(self):
-        """Check if project file mtime has changed (polling fallback)."""
         if self._saving:
             return
         project_path = self._service.project_path
@@ -370,13 +335,11 @@ class ProjectViewModel(QObject):
             pass
 
     def _on_file_changed(self, path: str):
-        """Handle file change notification (debounced)."""
         if self._saving:
-            return  # Ignore changes we caused
+            return
         self._debounce_timer.start()
 
     def _on_file_change_debounced(self):
-        """Process debounced file change — use sync_json() for smart merge."""
         if self._saving:
             return
 
@@ -384,26 +347,13 @@ class ProjectViewModel(QObject):
         if project_path is None or not project_path.exists():
             return
 
-        # Use sync_json() for smart merge instead of full reload
         report = self._service.sync_json()
         if report:
-            # Determine changed paths from merge report
-            changed_paths = []
-            for conflict in report.get("conflicts", []):
-                fp = conflict.get("file_path", "")
-                if fp:
-                    changed_paths.append(fp)
-
-            # If new files were added or accepted, just refresh everything
-            if report.get("new", 0) > 0 or report.get("accepted", 0) > 0:
+            if report.get("new", 0) > 0 or report.get("updated", 0) > 0:
                 self.metadata_changed.emit()
-
-            if changed_paths:
-                self.external_update.emit(changed_paths)
-
             self.merge_report.emit(report)
 
-        # Re-add file to watcher (Qt removes it after change on some platforms)
+        # Re-add file to watcher
         if self._watcher and project_path.exists():
             watched = self._watcher.files()
             if str(project_path) not in watched:
@@ -413,7 +363,7 @@ class ProjectViewModel(QObject):
         """Force reload the project from disk."""
         project_path = self._service.project_path
         if project_path and project_path.exists():
-            self._saving = True  # Suppress watcher during reload
+            self._saving = True
             try:
                 self._service.load_project(project_path)
                 self.metadata_changed.emit()

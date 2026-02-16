@@ -1477,7 +1477,14 @@ class ProjectBuilderManager:
         conflict_rows = set()
         for i, task in enumerate(self.mw._master_file_list):
             warnings = task.get('scan_warnings', {})
-            if warnings.get('conflicts'):
+            if isinstance(warnings, str):
+                # scan_warnings may be stored as a string repr in JSON
+                try:
+                    import ast
+                    warnings = ast.literal_eval(warnings)
+                except (ValueError, SyntaxError):
+                    warnings = {}
+            if isinstance(warnings, dict) and warnings.get('conflicts'):
                 conflict_rows.add(i)
         self.mw._file_table_model.set_conflict_rows(conflict_rows)
 
@@ -1864,7 +1871,14 @@ class ProjectBuilderManager:
         if row < self.mw._file_table_model.rowCount():
             self.mw._file_table_model.update_row(row, task)
             # Mark conflict rows for highlighting
-            if task.get('scan_warnings', {}).get('conflicts'):
+            sw = task.get('scan_warnings', {})
+            if isinstance(sw, str):
+                try:
+                    import ast
+                    sw = ast.literal_eval(sw)
+                except (ValueError, SyntaxError):
+                    sw = {}
+            if isinstance(sw, dict) and sw.get('conflicts'):
                 self.mw._file_table_model.add_conflict_row(row)
 
     def on_analyze_row(self, row):

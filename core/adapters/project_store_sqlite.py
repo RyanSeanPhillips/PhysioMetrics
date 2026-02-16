@@ -841,7 +841,7 @@ class ProjectStoreSQLite:
             # Rename group back
             if 'group' in entry and 'group_name' not in entry:
                 pass  # Already correct from _file_row_to_dict
-            # Include subrows inline
+            # Flatten subrows into separate file entries (app expects flat format)
             file_id = f.get('file_id')
             if file_id:
                 subrows = self.get_subrows(file_id)
@@ -849,7 +849,22 @@ class ProjectStoreSQLite:
                     for sr in subrows:
                         sr.pop('subrow_id', None)
                         sr.pop('file_id', None)
+                    # Keep nested subrows for round-trip
                     entry['subrows'] = subrows
+                    # Also emit flat entries for the app table
+                    for sr in subrows:
+                        flat = dict(entry)
+                        flat.pop('subrows', None)
+                        flat.pop('subrow_count', None)
+                        # Override with subrow-specific fields
+                        for sk in ('channel', 'animal_id', 'sex', 'group',
+                                   'protocol', 'stim_type', 'power',
+                                   'experiment', 'strain'):
+                            if sk in sr and sr[sk]:
+                                flat[sk] = sr[sk]
+                        flat['is_sub_row'] = True
+                        flat['parent_file'] = entry.get('file_path', '')
+                        files_json.append(flat)
             files_json.append(entry)
 
         # Custom columns
@@ -895,6 +910,10 @@ class ProjectStoreSQLite:
         unchanged = 0
 
         for f_data in files_data:
+            # Skip flat subrow entries (they're reconstructed from nested subrows)
+            if f_data.get("is_sub_row"):
+                continue
+
             # Normalize file_path to relative
             file_path = str(f_data.get("file_path", ""))
             if not file_path:

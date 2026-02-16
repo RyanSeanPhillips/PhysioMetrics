@@ -289,6 +289,19 @@ class MainWindow(QMainWindow):
                 self.digh_combo.setCurrentText("XGBoost")
         QTimer.singleShot(200, _deferred_ml_load)
 
+        # Start MCP app bridge (allows Claude Code tools to connect)
+        def _start_bridge():
+            try:
+                from core.services.app_bridge_service import AppBridgeService
+                self._app_bridge = AppBridgeService(
+                    get_state_fn=lambda: getattr(self, 'state', None)
+                )
+                self._app_bridge.start()
+                print(f"[app-bridge] Listening on port {self._app_bridge.port}")
+            except Exception as e:
+                print(f"[app-bridge] Failed to start: {e}")
+        QTimer.singleShot(500, _start_bridge)
+
         # --- Wire filter controls ---
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -977,6 +990,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Save window geometry on close."""
         self.settings.setValue("geometry", self.saveGeometry())
+
+        # Stop MCP app bridge
+        if hasattr(self, '_app_bridge') and self._app_bridge:
+            self._app_bridge.stop()
 
         # Log telemetry session end
         telemetry.log_session_end()
