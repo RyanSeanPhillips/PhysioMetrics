@@ -619,8 +619,8 @@ class PeakNavigatorDialog(ExportMixin, QDialog):
         if new_window_start + window_dur > t_max:
             new_window_start = max(0.0, t_max - window_dur)
 
-        # Set the window using NavigationManager's _set_window() method
-        if hasattr(self.main_window, 'navigation_manager'):
-            self.main_window.navigation_manager._set_window(new_window_start, window_dur)
+        # Set the window using NavigationViewModel
+        if hasattr(self.main_window, '_nav_vm'):
+            self.main_window._nav_vm.set_window(new_window_start, window_dur)
 
         print(f"[peak-navigator] Jumped to peak at {peak_time:.2f}s in sweep {sweep_idx} (window: {window_dur}s)")

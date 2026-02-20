@@ -150,6 +150,15 @@ DEFAULT_COLUMNS: List[ColumnDef] = [
         tooltip="Mouse strain"
     ),
     ColumnDef(
+        key='state',
+        header='State',
+        width=45,
+        min_width=35,
+        column_type=ColumnType.TEXT,
+        editable=True,
+        tooltip="Animal state (awake, iso, urethane, etc.)"
+    ),
+    ColumnDef(
         key='stim_type',
         header='Stim Type',
         width=62,
@@ -240,6 +249,23 @@ class FileTableModel(QAbstractTableModel):
     ColumnKeyRole = Qt.ItemDataRole.UserRole + 3
     ConflictRole = Qt.ItemDataRole.UserRole + 4  # For conflict highlighting
 
+    # Verification status constants
+    VERIFIED = "verified"           # source_link exists, confidence >= 0.8
+    LOW_CONFIDENCE = "low"          # source_link exists, confidence < 0.8
+    DISAGREEMENT = "disagreement"   # multiple source_links with different values
+
+    # Background colors for verification status
+    _VERIFIED_COLOR = QColor(60, 140, 100, 50)      # subtle green
+    _LOW_CONF_COLOR = QColor(180, 160, 60, 45)      # subtle yellow
+    _DISAGREE_COLOR = QColor(200, 120, 50, 55)       # subtle orange
+
+    # Quality coloring for missing/unverified fields
+    _MISSING_COLOR = QColor(200, 80, 80, 45)         # subtle red — empty required field
+    _UNVERIFIED_COLOR = QColor(140, 140, 140, 30)    # subtle gray — has value, no source_link
+
+    # Metadata fields that can be verified via source links
+    VERIFIABLE_FIELDS = {'strain', 'sex', 'animal_id', 'stim_type', 'power', 'experiment', 'state'}
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -257,6 +283,12 @@ class FileTableModel(QAbstractTableModel):
 
         # Conflict tracking (row indices with conflicts)
         self._conflict_rows: set = set()
+
+        # Verification cache: {(animal_id, field): status}
+        self._verification_cache: Dict[tuple, str] = {}
+
+        # Quality coloring toggle (red=missing, green=verified, etc.)
+        self._quality_coloring: bool = True
 
         # Load saved column configuration
         self._load_column_config()
@@ -345,14 +377,43 @@ class FileTableModel(QAbstractTableModel):
                             stems_str += f" +{len(fuzzy_stems) - 5} more"
                         return f"⚠ Fuzzy match: Notes reference nearby file(s): {stems_str}"
                     return "⚠ Fuzzy match: No exact match found, showing notes for nearby files"
+            # Verification tooltip for metadata fields
+            if col_def.key in self.VERIFIABLE_FIELDS:
+                animal_id = row_data.get('animal_id', '')
+                if animal_id:
+                    status = self._verification_cache.get((animal_id, col_def.key))
+                    if status == self.VERIFIED:
+                        return f"{col_def.header}: verified from source document"
+                    elif status == self.LOW_CONFIDENCE:
+                        return f"{col_def.header}: extracted (low confidence)"
+                    elif status == self.DISAGREEMENT:
+                        return f"{col_def.header}: conflicting values in sources"
             if value and len(str(value)) > 20:
                 return str(value)
             return None
 
         elif role == Qt.ItemDataRole.BackgroundRole:
-            # Highlight conflicts
+            # Highlight conflicts (whole row)
             if row in self._conflict_rows:
                 return QBrush(QColor(100, 80, 50))  # Brownish highlight
+            # Per-cell quality coloring for metadata fields
+            if self._quality_coloring and col_def.key in self.VERIFIABLE_FIELDS:
+                value = row_data.get(col_def.key, '')
+                # Empty required field → red
+                if not value or (isinstance(value, str) and not value.strip()):
+                    return QBrush(self._MISSING_COLOR)
+                # Has value — check verification status
+                animal_id = row_data.get('animal_id', '')
+                if animal_id:
+                    status = self._verification_cache.get((animal_id, col_def.key))
+                    if status == self.VERIFIED:
+                        return QBrush(self._VERIFIED_COLOR)
+                    elif status == self.LOW_CONFIDENCE:
+                        return QBrush(self._LOW_CONF_COLOR)
+                    elif status == self.DISAGREEMENT:
+                        return QBrush(self._DISAGREE_COLOR)
+                # Has value but no source_link → subtle gray
+                return QBrush(self._UNVERIFIED_COLOR)
             return None
 
         elif role == Qt.ItemDataRole.ForegroundRole:
@@ -660,6 +721,67 @@ class FileTableModel(QAbstractTableModel):
             left = self.index(row, 0)
             right = self.index(row, self.columnCount() - 1)
             self.dataChanged.emit(left, right, [Qt.ItemDataRole.BackgroundRole])
+
+    # -------------------------------------------------------------------------
+    # Verification status (source link color coding)
+    # -------------------------------------------------------------------------
+
+    def refresh_verification_cache(self, source_links: List[Dict[str, Any]]):
+        """Rebuild the verification cache from source links.
+
+        Call this after project load or source link updates.
+
+        Args:
+            source_links: All source links (from ProjectService.get_source_links()).
+        """
+        self._verification_cache.clear()
+
+        # Group links by (animal_id, field)
+        grouped: Dict[tuple, List[Dict]] = {}
+        for link in source_links:
+            key = (link.get("animal_id", ""), link.get("field", ""))
+            if key[0] and key[1]:
+                grouped.setdefault(key, []).append(link)
+
+        for (animal_id, field), links in grouped.items():
+            if field not in self.VERIFIABLE_FIELDS:
+                continue
+
+            # Check for disagreements
+            values = set(str(l.get("value", "")).strip().lower() for l in links)
+            if len(values) > 1:
+                self._verification_cache[(animal_id, field)] = self.DISAGREEMENT
+            else:
+                # Check confidence
+                max_conf = max((l.get("confidence", 0) or 0) for l in links)
+                if max_conf >= 0.8:
+                    self._verification_cache[(animal_id, field)] = self.VERIFIED
+                else:
+                    self._verification_cache[(animal_id, field)] = self.LOW_CONFIDENCE
+
+        # Notify view to repaint
+        if self._rows:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(len(self._rows) - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.BackgroundRole])
+
+    def clear_verification_cache(self):
+        """Clear all verification status (e.g. when project changes)."""
+        self._verification_cache.clear()
+        if self._rows:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(len(self._rows) - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.BackgroundRole])
+
+    def set_quality_coloring(self, enabled: bool):
+        """Toggle metadata quality coloring (red=missing, green=verified, etc.)."""
+        if self._quality_coloring == enabled:
+            return
+        self._quality_coloring = enabled
+        if self._rows:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(len(self._rows) - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.BackgroundRole])
 
     # -------------------------------------------------------------------------
     # Column management

@@ -194,6 +194,24 @@ class ProjectViewModel(QObject):
     def get_project_files(self) -> List[Dict[str, Any]]:
         return self._service.get_project_files()
 
+    def get_all_experiments(self, snapshot_id: Optional[int] = None,
+                            limit: int = 50000) -> tuple:
+        """Get experiments from DB, optionally filtered by snapshot.
+
+        Returns (list_of_dicts, total_count).
+        """
+        store = self._service.store
+        if snapshot_id is not None:
+            snap = store.get_snapshot(snapshot_id)
+            if snap and snap.get('filter_query'):
+                fq = snap['filter_query']
+                return store.get_experiments(limit=limit, **fq)
+        return store.get_experiments(limit=limit)
+
+    def get_snapshots(self) -> List[Dict[str, Any]]:
+        """List all saved snapshots (named filter bookmarks)."""
+        return self._service.store.list_snapshots()
+
     def get_metadata_completeness(self) -> Dict[str, Any]:
         return self._service.get_metadata_completeness()
 
@@ -229,6 +247,25 @@ class ProjectViewModel(QObject):
     def get_experiments_for_animal(self, animal_id: str) -> List[Dict]:
         """Get all experiments for an animal across all files."""
         return self._service.get_experiments_for_animal(animal_id)
+
+    def split_multi_animal(self, file_path: str, mappings: List[Dict]) -> List[int]:
+        """Split a multi-animal recording into separate experiment rows."""
+        result = self._service.split_multi_animal(file_path, mappings)
+        if result:
+            self.metadata_changed.emit()
+        return result
+
+    def bulk_link_source(self, source_id: int, links: List[Dict]) -> int:
+        """Batch-create source_links from a single document."""
+        return self._service.bulk_link_source(source_id, links)
+
+    def detect_disagreements(self, animal_id: Optional[str] = None) -> List[Dict]:
+        """Find fields where multiple sources disagree on value."""
+        return self._service.detect_disagreements(animal_id)
+
+    def get_sources(self) -> List[Dict]:
+        """List registered source documents."""
+        return self._service.get_sources()
 
     # ------------------------------------------------------------------
     # Provenance (via source_links)

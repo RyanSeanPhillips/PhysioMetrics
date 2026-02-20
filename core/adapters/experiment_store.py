@@ -136,7 +136,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS experiments_fts USING fts5(
 # Standard experiment columns that map directly to DB columns
 STANDARD_COLUMNS = {
     'file_path', 'file_name', 'file_type', 'animal_id', 'channel',
-    'experiment_name', 'strain', 'stim_type', 'power', 'sex',
+    'experiment_name', 'strain', 'stim_type', 'power', 'sex', 'state',
     'group_name', 'status', 'protocol', 'channel_count', 'sweep_count',
     'keywords_display', 'stim_channel', 'events_channel', 'tags',
     'notes', 'weight', 'age', 'date_recorded',
@@ -618,6 +618,67 @@ class ExperimentStore:
     def get_links_for_animal(self, animal_id: str) -> List[Dict[str, Any]]:
         """Get all source links for an animal."""
         return self.get_links(animal_id=animal_id)
+
+    def bulk_add_links(self, source_id: int, links: List[Dict[str, Any]]) -> int:
+        """Batch-create source_links from a single source document. Returns count added."""
+        now = _now()
+        count = 0
+        for link in links:
+            self._conn.execute(
+                """INSERT INTO source_links
+                   (source_id, animal_id, experiment_id, field, value, location, confidence, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    source_id,
+                    link.get("animal_id", ""),
+                    link.get("experiment_id"),
+                    link.get("field", ""),
+                    link.get("value", ""),
+                    link.get("location", ""),
+                    link.get("confidence", 0.9),
+                    now,
+                ),
+            )
+            count += 1
+        return count
+
+    def get_disagreements(self, animal_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Find fields where multiple sources disagree on value for an animal.
+
+        Returns list of {animal_id, field, values: [{value, source_id, source_name, confidence}]}.
+        """
+        where = "WHERE sl.animal_id = ?" if animal_id else ""
+        params = [animal_id] if animal_id else []
+
+        rows = self._conn.execute(
+            f"""SELECT sl.animal_id, sl.field, COUNT(DISTINCT sl.value) as value_count
+                FROM source_links sl
+                {where}
+                GROUP BY sl.animal_id, sl.field
+                HAVING COUNT(DISTINCT sl.value) > 1""",
+            params,
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            aid, field = row[0], row[1]
+            detail_rows = self._conn.execute(
+                """SELECT sl.value, sl.source_id, s.file_name as source_name,
+                          sl.confidence, sl.location
+                   FROM source_links sl
+                   JOIN sources s ON s.source_id = sl.source_id
+                   WHERE sl.animal_id = ? AND sl.field = ?
+                   ORDER BY sl.confidence DESC""",
+                (aid, field),
+            ).fetchall()
+            results.append({
+                "animal_id": aid,
+                "field": field,
+                "value_count": row[2],
+                "values": [dict(r) for r in detail_rows],
+            })
+
+        return results
 
     # ------------------------------------------------------------------
     # Snapshots CRUD

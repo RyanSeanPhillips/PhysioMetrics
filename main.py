@@ -57,7 +57,9 @@ from core import peaks as peakdet              # Standard (original)
 # from core import peaks_downsampled as peakdet    # Downsampled (BROKEN - messes up peaks)
 
 from core import metrics  # calculation of breath metrics
-from core.navigation_manager import NavigationManager
+from core.file_list_manager import FileListManager
+from core.services.navigation_service import NavigationService
+from viewmodels.navigation_viewmodel import NavigationViewModel
 from core import telemetry  # Anonymous usage tracking
 from plotting import PlotManager
 # ExportManager lazy-imported in _get_export_manager() to speed up startup
@@ -73,8 +75,6 @@ from core.scan_manager import ScanManager
 from core.recovery_manager import RecoveryManager
 from core.classifier_manager import ClassifierManager
 from core.gmm_manager import GMMManager
-from core.notes_preview_manager import NotesPreviewManager
-
 # Import new event marker system
 from viewmodels.event_marker_viewmodel import EventMarkerViewModel
 from views.events.plot_integration import EventMarkerPlotIntegration
@@ -94,8 +94,6 @@ class MainWindow(QMainWindow):
         self.consolidation_manager = ConsolidationManager(self)
         from core.project_manager import ProjectManager
         self.project_manager = ProjectManager()
-        self._ai_notebook = None  # Initialized after UI load
-        self._code_notebook = None  # Initialized after UI load
         self._project_builder = None  # Initialized after UI load
 
         ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_05_horizontal.ui"
@@ -115,8 +113,33 @@ class MainWindow(QMainWindow):
         # Enable dark title bar on Windows 11
         self._enable_dark_title_bar()
 
-        # Tab order is now set in the UI file:
-        # 0: Notes Files, 1: Project Files, 2: Consolidation, 3: Code Notebook
+        # Remove dead tabs from UI (Notes and Code Notebook)
+        # Tab order in .ui: 0=Notes, 1=Data Files, 2=Consolidate, 3=Code Notebook
+        for tab_name in ('notebookContainer', 'notesContainer'):
+            for i in range(self.leftColumnTabs.count()):
+                if self.leftColumnTabs.widget(i) and self.leftColumnTabs.widget(i).objectName() == tab_name:
+                    self.leftColumnTabs.removeTab(i)
+                    break
+
+        # Hide scan toolbar (browse, scan buttons, file-type checkboxes)
+        # and bottom filter bar (replaced by search bar above table)
+        for widget_name in (
+            'browseDirectoryButton', 'recursiveCheckBox', 'directoryPathEdit',
+            'scanFilesButton', 'scanSavedDataButton', 'resolveConflictsButton',
+            'fileTypesLabel',
+            'scanAbfCheckbox', 'scanSep1', 'scanSmrxCheckbox', 'scanSep2',
+            'scanEdfCheckbox', 'scanSep3', 'scanPhotometryCheckbox', 'scanSep4',
+            'scanNotesCheckbox', 'scanSep5', 'tableFullContentCheckbox',
+            # Bottom filter bar
+            'filterLabel', 'tableFilterEdit', 'filterColumnCombo',
+            'filterCountLabel', 'clearFilesButton',
+        ):
+            w = getattr(self, widget_name, None)
+            if w is not None:
+                w.hide()
+
+        # Set Data Files as default tab
+        self.leftColumnTabs.setCurrentIndex(0)
 
         # Style status bar to match dark theme (true black)
         self.statusBar().setStyleSheet("""
@@ -268,9 +291,6 @@ class MainWindow(QMainWindow):
         # === Initialize GMM Manager ===
         self._gmm_manager = GMMManager(self)
 
-        # === Initialize Notes Preview Manager ===
-        self._notes_preview_manager = NotesPreviewManager(self)
-
         # Connect classifier signals and set safe defaults (no ML models needed)
         self.peak_detec_combo.currentTextChanged.connect(self._classifier_manager.on_classifier_changed)
         self.eup_sniff_combo.currentTextChanged.connect(self._classifier_manager.on_eupnea_sniff_classifier_changed)
@@ -294,7 +314,8 @@ class MainWindow(QMainWindow):
             try:
                 from core.services.app_bridge_service import AppBridgeService
                 self._app_bridge = AppBridgeService(
-                    get_state_fn=lambda: getattr(self, 'state', None)
+                    get_state_fn=lambda: getattr(self, 'state', None),
+                    main_window=self,
                 )
                 self._app_bridge.start()
                 print(f"[app-bridge] Listening on port {self._app_bridge.port}")
@@ -338,15 +359,39 @@ class MainWindow(QMainWindow):
         # Connect the manual update button
         self.UpdateEupneaSniffingButton.clicked.connect(self.on_update_eupnea_sniffing_clicked)
 
-        # --- Initialize Navigation Manager ---
-        self.navigation_manager = NavigationManager(self)
+        # --- Initialize Navigation (MVVM) ---
+        self._nav_service = NavigationService()
+        self._nav_vm = NavigationViewModel(self._nav_service)
+        self._nav_vm.set_state_provider(self._nav_state_provider)
+        self._nav_vm.set_xlim_provider(self._nav_xlim_provider)
+        self._nav_vm.set_window_seconds_provider(lambda: self.WindowRangeValue.text())
+
+        # Connect ViewModel signals to MainWindow handlers
+        self._nav_vm.sweep_changed.connect(self._on_nav_sweep_changed)
+        self._nav_vm.needs_stim_recompute.connect(self._compute_stim_for_current_sweep)
+        self._nav_vm.needs_redraw.connect(self.redraw_main_plot)
+        self._nav_vm.snap_to_sweep_requested.connect(self._on_snap_to_sweep)
+        self._nav_vm.window_changed.connect(self._on_nav_window_changed)
+        self._nav_vm.mode_changed.connect(self._on_nav_mode_changed)
+
+        # Connect navigation buttons to ViewModel
+        self.PrevButton.clicked.connect(self._nav_vm.navigate_prev)
+        self.NextButton.clicked.connect(self._nav_vm.navigate_next)
+        self.ViewModeToggleButton.clicked.connect(self._nav_vm.toggle_mode)
+
         self.WindowRangeValue.setText("10")  # Default window length
+
+        # --- Initialize File List Manager (curation tab) ---
+        self.file_list_manager = FileListManager(self)
 
         # --- Initialize Plot Manager (BEFORE signal connections that may trigger plotting) ---
         self.plot_manager = PlotManager(self)
 
         # Export manager created lazily on first use (speeds up startup)
         self._export_manager = None
+
+        # --- Initialize File Load ViewModel (MVVM) ---
+        self._setup_file_load_viewmodel()
 
         # --- Initialize Telemetry Heartbeat Timer ---
         # Send periodic user_engagement events to help GA4 recognize active users
@@ -513,6 +558,9 @@ class MainWindow(QMainWindow):
         # Wire Help button (from UI file)
         self.helpbutton.clicked.connect(self.on_help_clicked)
 
+        # Add Claude Code launch button next to Help
+        self._setup_claude_button()
+
         # Set pointer cursor for update notification label (defined in UI file)
         from PyQt6.QtGui import QCursor
         from PyQt6.QtCore import Qt
@@ -546,7 +594,7 @@ class MainWindow(QMainWindow):
         # Enable multiple selection for both list widgets
         self.FileList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.FilestoConsolidateList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        # Note: Move buttons and search filter are connected in NavigationManager
+        # Note: Move buttons and search filter are connected in FileListManager
         self.FileListSearchBox.setPlaceholderText("Filter by keywords (e.g., 'gfp 2.5mW' or 'gfp, chr2')...")
         # Wire consolidate button
         self.ConsolidateSaveDataButton.clicked.connect(self.on_consolidate_save_data_clicked)
@@ -606,6 +654,10 @@ class MainWindow(QMainWindow):
         # === Initialize Project Builder Manager ===
         self._project_builder = ProjectBuilderManager(self)
 
+        # === Initialize Project ViewModel (SQLite-direct) ===
+        from viewmodels.project_viewmodel import ProjectViewModel
+        self._project_viewmodel = ProjectViewModel(self)
+
         # === Initialize Scan Manager ===
         self._scan_manager = ScanManager(self)
 
@@ -625,34 +677,12 @@ class MainWindow(QMainWindow):
         # Set up the new unified project name combo (replaces loadProjectCombo + projectNameEdit)
         self._setup_project_name_combo()
 
-        # Notes Files tab connections
-        if hasattr(self, 'searchNotesButton'):
-            self.searchNotesButton.clicked.connect(self._project_builder.on_notes_search)
-        if hasattr(self, 'browseNotesButton'):
-            self.browseNotesButton.clicked.connect(self._project_builder.on_notes_browse)
-        if hasattr(self, 'openNoteButton'):
-            self.openNoteButton.clicked.connect(self._project_builder.on_notes_open)
-        if hasattr(self, 'previewNoteButton'):
-            self.previewNoteButton.clicked.connect(self._project_builder.on_notes_preview)
-        if hasattr(self, 'linkNoteButton'):
-            self.linkNoteButton.clicked.connect(self._project_builder.on_notes_link)
-        if hasattr(self, 'notesFilterEdit'):
-            self.notesFilterEdit.textChanged.connect(self._on_notes_filter_changed)
-
-        # Initialize notes files model
-        self._project_builder.init_notes_files_model()
-
-        # Add extra notes action buttons (programmatically added)
-        self._project_builder.add_notes_action_buttons()
-
         # Connect Project Builder buttons (defined in .ui file)
         self._connect_project_builder_buttons()
 
         # Project Builder state
         self._project_directory = None
-        self._notes_directory = None  # Separate folder for notes files
         self._discovered_files_data = []  # Store file metadata from scan
-        self._notes_files_data = []  # Store notes file metadata
 
         # === Master File List Setup ===
         # Hide the Project Organization section (right column) - we're using a flat master list instead
@@ -661,12 +691,20 @@ class MainWindow(QMainWindow):
         # Store file list data (each row = one analysis task: file + channel + animal)
         self._master_file_list = []  # List of task dicts
         self._active_master_list_row = None  # Track which row is being analyzed
+        self._active_snapshot_id = None  # Currently selected snapshot filter
 
         # optional: keep a handle to the chosen dir
         self._curation_dir = None
 
         # Set up right-click export context menu for main window
         self._setup_export_context_menu()
+
+        # Load all experiments from central SQLite DB on startup
+        from PyQt6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(0, self._load_experiments_from_db)
+
+        # === Live DB Watcher — auto-refresh when Claude updates DB via MCP ===
+        self._setup_db_watcher()
 
     # --- Lazy-loaded properties for startup performance ---
 
@@ -2657,7 +2695,7 @@ class MainWindow(QMainWindow):
             return  # Don't navigate while typing
         # Analysis tab is at index 1 (Project Builder=0, Analysis=1, Curation=2)
         if self.Tabs.currentIndex() == 1:
-            self.navigation_manager.on_unified_prev()
+            self._nav_vm.navigate_prev()
 
     def _on_x_pressed(self):
         """Handle X key - navigate to next sweep/window."""
@@ -2665,7 +2703,70 @@ class MainWindow(QMainWindow):
             return  # Don't navigate while typing
         # Analysis tab is at index 1 (Project Builder=0, Analysis=1, Curation=2)
         if self.Tabs.currentIndex() == 1:
-            self.navigation_manager.on_unified_next()
+            self._nav_vm.navigate_next()
+
+    # ------------------------------------------------------------------
+    # Navigation ViewModel providers & signal handlers
+    # ------------------------------------------------------------------
+
+    def _nav_state_provider(self):
+        """Provide navigation state tuple for the ViewModel."""
+        st = self.state
+        return (st.sweep_idx, st.sweeps, st.t, st.stim_chan, st.stim_spans_by_sweep)
+
+    def _nav_xlim_provider(self) -> float:
+        """Return current left x-axis limit from the plot."""
+        if self.state.plotting_backend == 'pyqtgraph':
+            ph = self.plot_host
+            if hasattr(ph, '_subplots') and ph._subplots:
+                vr = ph._subplots[0].viewRange()
+                return float(vr[0][0])
+            elif hasattr(ph, 'plot_widget') and ph.plot_widget is not None:
+                vr = ph.plot_widget.viewRange()
+                return float(vr[0][0])
+        else:
+            ax = self.plot_host.fig.axes[0] if self.plot_host.fig.axes else None
+            if ax:
+                return float(ax.get_xlim()[0])
+        return 0.0
+
+    def _on_nav_sweep_changed(self, new_idx: int):
+        """Handle sweep index change from navigation ViewModel."""
+        self.state.sweep_idx = new_idx
+        self._refresh_omit_button_label()
+
+    def _on_nav_window_changed(self, left: float, right: float):
+        """Apply window bounds to the plot axes."""
+        if self.state.plotting_backend == 'pyqtgraph':
+            ph = self.plot_host
+            if hasattr(ph, 'plot_widget') and ph.plot_widget is not None:
+                ph.plot_widget.setXRange(left, right, padding=0)
+            elif hasattr(ph, '_subplots') and ph._subplots:
+                ph._subplots[0].setXRange(left, right, padding=0)
+        else:
+            ax = self.plot_host.fig.axes[0] if self.plot_host.fig.axes else None
+            if ax is None:
+                return
+            ax.set_xlim(left, right)
+            self.plot_host.fig.tight_layout()
+            self.plot_host.canvas.draw_idle()
+
+    def _on_nav_mode_changed(self, mode: str):
+        """Update UI labels when navigation mode changes."""
+        if mode == "window":
+            self.ViewModeToggleButton.setText("Mode: Window View")
+            self.PrevButton.setToolTip("Move to the previous time window")
+            self.NextButton.setToolTip("Move to the next time window")
+        else:
+            self.ViewModeToggleButton.setText("Mode: Sweep View")
+            self.PrevButton.setToolTip("Navigate to the previous sweep")
+            self.NextButton.setToolTip("Navigate to the next sweep")
+
+    def _on_snap_to_sweep(self):
+        """Handle snap-to-sweep: clear saved view and redraw."""
+        self.plot_host.clear_saved_view("single" if self.single_panel_mode else "grid")
+        self._refresh_omit_button_label()
+        self.redraw_main_plot()
 
     def _on_hot_reload(self):
         """Hot reload development modules (Ctrl+R).
@@ -2724,6 +2825,9 @@ class MainWindow(QMainWindow):
             'core.domain.events.store',
             'core.domain.events.registry',
             'core.services.event_marker_service',
+
+            # Source review
+            'dialogs.source_review_dialog',
 
             # CTA system
             'core.domain.cta.models',
@@ -2832,39 +2936,13 @@ class MainWindow(QMainWindow):
             self._load_photometry_data(result_data)
 
     def _load_photometry_npz_async(self, npz_path: Path, exp_idx: int):
-        """Load a photometry experiment from NPZ in a background thread."""
-        from PyQt6.QtWidgets import QProgressDialog
-        from PyQt6.QtCore import Qt
-        from core.file_load_worker import FileLoadWorker
+        """Load a photometry experiment from NPZ. Delegates to ViewModel."""
+        self._file_load_vm.load_photometry_npz(npz_path, exp_idx)
 
-        progress = QProgressDialog(f"Loading photometry experiment...\n{npz_path.name}", None, 0, 0, self)
-        progress.setWindowTitle("Loading Photometry Data")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setCancelButton(None)
-        progress.show()
-
-        self._loading_progress = progress
-
-        self._load_worker = FileLoadWorker(
-            photometry.load_experiment_from_npz, npz_path, exp_idx
-        )
-        self._load_worker.finished.connect(self._on_photometry_npz_loaded)
-        self._load_worker.error.connect(lambda msg: (
-            progress.close(),
-            self._show_error("Load Error", f"Failed to load photometry experiment:\n\n{msg.split(chr(10))[0]}")
-        ))
-        self._load_worker.start()
-
-    def _on_photometry_npz_loaded(self, result_data):
-        """Completion handler for photometry NPZ loading."""
-        progress = self._loading_progress
-        progress.close()
-
+    def _on_photometry_npz_loaded_ui(self, result_data):
+        """Thin UI handler for photometry NPZ load completion."""
         if result_data:
             self._load_photometry_data(result_data)
-        else:
-            self._show_error("Load Error", "Failed to load experiment from NPZ file.")
 
     def _load_photometry_data(self, data: dict):
         """
@@ -2939,7 +3017,7 @@ class MainWindow(QMainWindow):
 
         # Reset sweep index
         st.sweep_idx = 0
-        self.navigation_manager.reset_window_state()
+        self._nav_vm.reset_window_state()
 
         # Clear any existing analysis data
         st.peaks_by_sweep.clear()
@@ -3189,248 +3267,60 @@ class MainWindow(QMainWindow):
         self._npz_save_worker.start()
 
     def load_file(self, path: Path):
-        import time
-        from PyQt6.QtWidgets import QProgressDialog
-        from PyQt6.QtCore import Qt
-        from core.file_load_worker import FileLoadWorker
+        """Load a single data file. Delegates to FileLoadViewModel."""
+        self._file_load_vm.load_file(path)
 
-        # Determine file type for progress dialog title
-        file_type = path.suffix.upper()[1:]  # .abf -> ABF, .smrx -> SMRX
+    def _on_file_loaded_ui(self, result):
+        """
+        Thin UI handler for single file load completion.
 
-        # Create progress dialog
-        progress = QProgressDialog(f"Loading file...\n{path.name}", None, 0, 100, self)
-        progress.setWindowTitle(f"Opening {file_type} File")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)  # Show immediately
-        progress.setCancelButton(None)  # No cancel button
-        progress.setValue(0)
-        progress.show()
-
-        # Store context for completion handler
-        self._loading_path = path
-        self._loading_t_start = time.time()
-        self._loading_progress = progress
-
-        # Create worker with existing loader function
-        self._load_worker = FileLoadWorker(abf_io.load_data_file, path)
-        self._load_worker.progress.connect(lambda c, t, m: (
-            progress.setValue(c),
-            progress.setLabelText(f"{m}\n{path.name}")
-        ))
-        self._load_worker.finished.connect(self._on_single_file_loaded)
-        self._load_worker.error.connect(lambda msg: (
-            progress.close(),
-            self._show_error("Load error", msg.split('\n\n')[0])
-        ))
-        self._load_worker.start()
-
-    def _on_single_file_loaded(self, result):
-        """Completion handler for single file loading (runs on main thread)."""
-        import time
-
-        path = self._loading_path
-        t_start = self._loading_t_start
-        progress = self._loading_progress
-        progress.close()
-
-        sr, sweeps_by_ch, ch_names, t, file_metadata = result
-
+        State is already updated by FileLoadViewModel. This method handles only:
+        - Telemetry logging
+        - UI widget updates (combos, channel manager, plot)
+        - Auto-detection of channels
+        """
+        from core.domain.file_loading.models import FileLoadResult
         st = self.state
-        st.in_path = path
-        # Set file_info for single file (for consistency with multi-file loading)
-        n_sweeps = next(iter(sweeps_by_ch.values())).shape[1]
-        st.file_info = [{
-            'path': path,
-            'sweep_start': 0,
-            'sweep_end': n_sweeps - 1,
-            **file_metadata  # Include protocol, n_channels, file_type, etc.
-        }]
-        st.sr_hz = sr
-        st.sweeps = sweeps_by_ch
-        st.channel_names = ch_names
-        st.t = t
-        st.sweep_idx = 0
-        self.navigation_manager.reset_window_state()
+        ch_names = result.channel_names
+        path = result.source_path
 
-        # Update filename display with metadata
+        self._nav_vm.reset_window_state()
         self._update_filename_display()
 
-        # Log telemetry: file loaded with enhanced metrics
-        file_ext = path.suffix.lower()[1:]  # .abf -> abf
-        load_duration = time.time() - t_start
+        # Log telemetry
+        n_sweeps = next(iter(result.sweeps_by_ch.values())).shape[1]
+        file_ext = path.suffix.lower()[1:]
         file_size_mb = path.stat().st_size / (1024 * 1024)
-        duration_minutes = (t[-1] - t[0]) / 60 if len(t) > 1 else 0
+        duration_minutes = (result.time_array[-1] - result.time_array[0]) / 60 if len(result.time_array) > 1 else 0
 
         telemetry.log_file_loaded(
-            file_type=file_ext,
-            num_sweeps=n_sweeps,
-            num_breaths=None,  # Not detected yet
-            file_size_mb=round(file_size_mb, 2),
-            sampling_rate_hz=int(sr),
-            duration_minutes=round(duration_minutes, 1),
-            num_channels=len(ch_names)
+            file_type=file_ext, num_sweeps=n_sweeps, num_breaths=None,
+            file_size_mb=round(file_size_mb, 2), sampling_rate_hz=int(result.sr_hz),
+            duration_minutes=round(duration_minutes, 1), num_channels=len(ch_names),
         )
+        telemetry.log_timing('file_load', result.load_duration_seconds,
+                            file_size_mb=round(file_size_mb, 2), num_sweeps=n_sweeps)
 
-        # Log file loading timing
-        telemetry.log_timing('file_load', load_duration,
-                            file_size_mb=round(file_size_mb, 2),
-                            num_sweeps=n_sweeps)
+        # Reset UI caches and widgets
+        self._file_load_service.reset_caches(self)
+        self._refresh_omit_button_label()
 
-        # Reset peak results and trace cache
-        if not hasattr(st, "peaks_by_sweep"):
-            st.peaks_by_sweep = {}
-            st.breath_by_sweep = {}
-        else:
-            st.peaks_by_sweep.clear()
-            self.state.sigh_by_sweep.clear()
-            st.breath_by_sweep.clear()
-            self.state.omitted_sweeps.clear()
-            self.state.omitted_ranges.clear()
-            self._refresh_omit_button_label()
-
-        # Clear cross-sweep outlier detection data
-        self.metrics_by_sweep.clear()
-        self.onsets_by_sweep.clear()
-        self.global_outlier_stats = None
-
-        # Clear export metric cache when loading new file
-        self._export_metric_cache = {}
-
-        # Clear z-score global statistics cache
-        self.zscore_global_mean = None
-        self.zscore_global_std = None
-
-        # Reset adaptive downsampling for fresh file (let system re-evaluate)
+        # Reset adaptive downsampling for fresh file
         self.plot_manager._auto_downsample_active = False
         self.plot_manager._consecutive_slow_redraws = 0
 
-        # Clear event markers (bout annotations)
-        if hasattr(st, 'bout_annotations'):
-            st.bout_annotations.clear()
-
-        # Reset Apply button
         self.ApplyPeakFindPushButton.setEnabled(False)
 
-        # Fill combos safely (no signal during population)
-        self.AnalyzeChanSelect.blockSignals(True)
-        self.AnalyzeChanSelect.clear()
-        self.AnalyzeChanSelect.addItem("All Channels")  # First option for grid view
-        self.AnalyzeChanSelect.addItems(ch_names)
-        self.AnalyzeChanSelect.setCurrentIndex(0)  # default = "All Channels" (grid mode)
-        self.AnalyzeChanSelect.blockSignals(False)
-
-        self.StimChanSelect.blockSignals(True)
-        self.StimChanSelect.clear()
-        self.StimChanSelect.addItem("None")        # default
-        self.StimChanSelect.addItems(ch_names)
-        self.StimChanSelect.setCurrentIndex(0)     # select "None"
-        self.StimChanSelect.blockSignals(False)
-
-        # Populate Events Channel dropdown
-        self.EventsChanSelect.blockSignals(True)
-        self.EventsChanSelect.clear()
-        self.EventsChanSelect.addItem("None")      # default - no event channel
-        self.EventsChanSelect.addItems(ch_names)
-        # Restore previous selection if it exists
-        if st.event_channel and st.event_channel in ch_names:
-            idx = ch_names.index(st.event_channel) + 1  # +1 because "None" is at index 0
-            self.EventsChanSelect.setCurrentIndex(idx)
-        else:
-            self.EventsChanSelect.setCurrentIndex(0)  # select "None"
-        self.EventsChanSelect.blockSignals(False)
-
-        # Update event markers source channel combo
-        self._update_event_source_channel_combo()
-
-        # Populate Channel Manager widget
+        # Populate channel combos and channel manager
+        self._populate_channel_combos(ch_names)
         self._populate_channel_manager(ch_names)
 
-        #Clear peaks
-        self.state.peaks_by_sweep.clear()
-        self.state.sigh_by_sweep.clear()
-        self.state.breath_by_sweep.clear()
-
-        #Clear omitted sweeps and regions
-        self.state.omitted_sweeps.clear()
-        self.state.omitted_ranges.clear()
-        self._refresh_omit_button_label()
-
-        # Auto-detect stimulus and analysis channels
-        # Note: auto_analysis is only returned if there's exactly one non-stim channel
-        auto_stim, auto_analysis = abf_io.auto_select_channels(st.sweeps, ch_names)
-
-        if auto_stim:
-            # Found a stimulus channel - select it
-            stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
-            self.StimChanSelect.setCurrentIndex(stim_idx)
-            # NOTE: Don't set st.stim_chan here - let on_stim_channel_changed do it
-            # Otherwise the handler's "if new_stim != st.stim_chan" check fails and
-            # stim detection is skipped!
-
-            # Update channel manager to show this as Opto Stim
-            self.channel_manager.set_channel_type(auto_stim, "Opto Stim")
-
-            # Trigger stim detection (this sets st.stim_chan and computes stim spans)
-            self.on_stim_channel_changed(stim_idx)
-
-            if auto_analysis:
-                # Only one analysis channel available - auto-select it
-                analysis_idx = ch_names.index(auto_analysis) + 1  # +1 because "All Channels" is at index 0
-                self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
-                # Reset analyze_chan so on_analyze_channel_changed recognizes this as a change
-                # (otherwise the new_chan != st.analyze_chan guard skips the entire redraw)
-                st.analyze_chan = None
-                self.single_panel_mode = False
-
-                # Trigger analysis channel change
-                self.on_analyze_channel_changed(analysis_idx)
-
-                # Show completion message with auto-detection info
-                t_elapsed = time.time() - t_start
-                self._log_status_message(
-                    f"File loaded ({t_elapsed:.1f}s) - Auto-detected: stim={auto_stim}, analysis={auto_analysis}",
-                    4000
-                )
-            else:
-                # Multiple analysis channels available - start in grid mode, let user choose
-                st.analyze_chan = None
-                self.single_panel_mode = False
-                self.plot_host.clear_saved_view("grid")
-                self.plot_host.clear_saved_view("single")
-                self.plot_all_channels()
-
-                t_elapsed = time.time() - t_start
-                self._log_status_message(
-                    f"File loaded ({t_elapsed:.1f}s) - Auto-detected stim: {auto_stim}",
-                    4000
-                )
-        else:
-            # No stimulus channel detected - start in grid mode
-            st.analyze_chan = None
-            self.single_panel_mode = False
-
-            st.stim_chan = None
-            st.stim_onsets_by_sweep.clear()
-            st.stim_offsets_by_sweep.clear()
-            st.stim_spans_by_sweep.clear()
-            st.stim_metrics_by_sweep.clear()
-
-            self.plot_host.clear_saved_view("grid")
-            self.plot_host.clear_saved_view("single")
-            self.plot_all_channels()
-
-            # Show completion message
-            t_elapsed = time.time() - t_start
-            self._log_status_message(f"File loaded ({t_elapsed:.1f}s)", 3000)
+        # Auto-detect channels and apply
+        auto = self._file_load_service.auto_detect_channels(st.sweeps, ch_names)
+        self._apply_auto_detection(auto, ch_names, result.load_duration_seconds)
 
         # Apply pending channel selections from Project Builder (if any)
         self._apply_pending_channel_selections(ch_names)
-
-        # Refresh Analysis Options dialog tabs if open (file data now available)
-        if hasattr(self, '_analysis_options_dialog') and self._analysis_options_dialog is not None and self._analysis_options_dialog.isVisible():
-            # Note: Don't refresh Peak Detection tab here since no channel selected yet (in grid mode)
-            # Peak Detection tab will update when user selects a channel
-            pass
 
     def _apply_pending_channel_selections(self, ch_names):
         """
@@ -3486,225 +3376,282 @@ class MainWindow(QMainWindow):
         self._pending_analysis_channel = ''
         self._pending_stim_channels = []
 
-    def load_multiple_files(self, file_paths: List[Path]):
-        """Load and concatenate multiple ABF files."""
-        from PyQt6.QtWidgets import QProgressDialog, QMessageBox
+    # ------------------------------------------------------------------
+    # File Loading — MVVM helpers (extracted from monolithic handlers)
+    # ------------------------------------------------------------------
+
+    def _setup_file_load_viewmodel(self):
+        """Initialize the FileLoadViewModel and connect its signals."""
+        from core.services.file_load_service import FileLoadService
+        from viewmodels.file_load_viewmodel import FileLoadViewModel
+        from PyQt6.QtWidgets import QProgressDialog
         from PyQt6.QtCore import Qt
-        from core.file_load_worker import FileLoadWorker
 
-        # Validate files first
-        valid, messages = abf_io.validate_files_for_concatenation(file_paths)
+        self._file_load_service = FileLoadService()
+        self._file_load_vm = FileLoadViewModel(self._file_load_service, self.state, self)
 
-        if not valid:
-            # Show error dialog
-            self._show_error("File Validation Failed", "\n".join(messages))
-            return
-        elif messages:  # Warnings
-            # Show warning dialog with option to proceed
-            reply = QMessageBox.question(
-                self,
-                "File Validation Warnings",
-                "The following warnings were detected:\n\n" + "\n".join(messages) + "\n\nDo you want to proceed anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.No:
-                return
+        # Progress dialog lifecycle
+        self._loading_progress = None
 
-        # Create progress dialog
-        progress = QProgressDialog(f"Loading {len(file_paths)} files...", None, 0, 100, self)
-        progress.setWindowTitle("Loading Multiple Files")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)  # Show immediately
-        progress.setCancelButton(None)  # No cancel button
-        progress.setValue(0)
-        progress.show()
+        def _on_loading_started(title):
+            progress = QProgressDialog(f"Loading...", None, 0, 100, self)
+            progress.setWindowTitle(title)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setCancelButton(None)
+            progress.setValue(0)
+            progress.show()
+            self._loading_progress = progress
 
-        # Store context for completion handler
-        self._loading_multi_paths = file_paths
-        self._loading_progress = progress
+        def _on_loading_finished():
+            if self._loading_progress:
+                self._loading_progress.close()
+                self._loading_progress = None
 
-        # Create worker with existing loader function
-        self._load_worker = FileLoadWorker(abf_io.load_and_concatenate_abf_files, file_paths)
-        self._load_worker.progress.connect(lambda c, t, m: (
-            progress.setValue(c),
-            progress.setLabelText(m)
-        ))
-        self._load_worker.finished.connect(self._on_multi_file_loaded)
-        self._load_worker.error.connect(lambda msg: (
-            progress.close(),
-            self._show_error("Load error", msg.split('\n\n')[0])
-        ))
-        self._load_worker.start()
+        def _on_progress_updated(percent, message):
+            try:
+                p = self._loading_progress
+                if p is not None:
+                    p.setValue(percent)
+                    p.setLabelText(message)
+            except RuntimeError:
+                pass  # Dialog already deleted (stale queued signal from worker thread)
 
-    def _on_multi_file_loaded(self, result):
-        """Completion handler for multi-file loading (runs on main thread)."""
-        file_paths = self._loading_multi_paths
-        progress = self._loading_progress
-        progress.close()
+        self._file_load_vm.loading_started.connect(_on_loading_started)
+        self._file_load_vm.loading_finished.connect(_on_loading_finished)
+        self._file_load_vm.progress_updated.connect(_on_progress_updated)
 
-        sr, sweeps_by_ch, ch_names, t, file_info = result
+        # Connect load completion signals to UI handlers
+        self._file_load_vm.file_loaded.connect(self._on_file_loaded_ui)
+        self._file_load_vm.multi_file_loaded.connect(self._on_multi_file_loaded_ui)
+        self._file_load_vm.npz_loaded.connect(self._on_npz_loaded_ui)
+        self._file_load_vm.npz_load_error.connect(self._on_npz_load_error_ui)
+        self._file_load_vm.photometry_loaded.connect(self._on_photometry_npz_loaded_ui)
 
-        # Update state (similar to load_file, but with file_info)
+        # Error signals
+        self._file_load_vm.load_error.connect(self._show_error)
+        self._file_load_vm.photometry_load_error.connect(
+            lambda msg: self._show_error("Load Error", msg)
+        )
+
+    def _populate_channel_combos(self, ch_names: list):
+        """
+        Populate all three channel dropdown combos with fresh channel names.
+
+        Used after loading new data files (single or multi). Resets to defaults:
+        - AnalyzeChanSelect → "All Channels" (grid mode)
+        - StimChanSelect → "None"
+        - EventsChanSelect → "None" (or restores previous if matching)
+        """
         st = self.state
-        st.in_path = file_paths[0]  # Store first file path for display
-        st.file_info = file_info  # Store multi-file metadata
-        st.sr_hz = sr
-        st.sweeps = sweeps_by_ch
-        st.channel_names = ch_names
-        st.t = t
-        st.sweep_idx = 0
-        self.navigation_manager.reset_window_state()
 
-        # Reset peak results and trace cache
-        if not hasattr(st, "peaks_by_sweep"):
-            st.peaks_by_sweep = {}
-            st.breath_by_sweep = {}
-        else:
-            st.peaks_by_sweep.clear()
-            self.state.sigh_by_sweep.clear()
-            st.breath_by_sweep.clear()
-            self.state.omitted_sweeps.clear()
-            self.state.omitted_ranges.clear()
-            self._refresh_omit_button_label()
-
-        # Clear cross-sweep outlier detection data
-        self.metrics_by_sweep.clear()
-        self.onsets_by_sweep.clear()
-        self.global_outlier_stats = None
-
-        # Clear export metric cache when loading new file
-        self._export_metric_cache = {}
-
-        # Reset Apply button
-        self.ApplyPeakFindPushButton.setEnabled(False)
-
-        # Fill combos safely (no signal during population)
         self.AnalyzeChanSelect.blockSignals(True)
         self.AnalyzeChanSelect.clear()
-        self.AnalyzeChanSelect.addItem("All Channels")  # First option for grid view
+        self.AnalyzeChanSelect.addItem("All Channels")
         self.AnalyzeChanSelect.addItems(ch_names)
-        self.AnalyzeChanSelect.setCurrentIndex(0)  # default = "All Channels" (grid mode)
+        self.AnalyzeChanSelect.setCurrentIndex(0)
         self.AnalyzeChanSelect.blockSignals(False)
 
         self.StimChanSelect.blockSignals(True)
         self.StimChanSelect.clear()
-        self.StimChanSelect.addItem("None")        # default
+        self.StimChanSelect.addItem("None")
         self.StimChanSelect.addItems(ch_names)
-        self.StimChanSelect.setCurrentIndex(0)     # select "None"
+        self.StimChanSelect.setCurrentIndex(0)
         self.StimChanSelect.blockSignals(False)
 
-        # Populate Events Channel dropdown
         self.EventsChanSelect.blockSignals(True)
         self.EventsChanSelect.clear()
-        self.EventsChanSelect.addItem("None")      # default - no event channel
+        self.EventsChanSelect.addItem("None")
         self.EventsChanSelect.addItems(ch_names)
-        # Restore previous selection if it exists
         if st.event_channel and st.event_channel in ch_names:
-            idx = ch_names.index(st.event_channel) + 1  # +1 because "None" is at index 0
+            idx = ch_names.index(st.event_channel) + 1
             self.EventsChanSelect.setCurrentIndex(idx)
         else:
-            self.EventsChanSelect.setCurrentIndex(0)  # select "None"
+            self.EventsChanSelect.setCurrentIndex(0)
         self.EventsChanSelect.blockSignals(False)
 
-        # Update event markers source channel combo
         self._update_event_source_channel_combo()
 
-        # Populate Channel Manager widget
-        self._populate_channel_manager(ch_names)
+    def _populate_channel_combos_npz(self, st):
+        """
+        Populate channel combos from NPZ session state (restores saved selections).
 
-        #Clear peaks
-        self.state.peaks_by_sweep.clear()
-        self.state.sigh_by_sweep.clear()
-        self.state.breath_by_sweep.clear()
+        Unlike _populate_channel_combos, this restores the previously saved
+        analyze_chan, stim_chan, and event_channel selections.
+        """
+        ch_names = st.channel_names
 
-        #Clear omitted sweeps and regions
-        self.state.omitted_sweeps.clear()
-        self.state.omitted_ranges.clear()
-        self._refresh_omit_button_label()
+        self.AnalyzeChanSelect.blockSignals(True)
+        self.AnalyzeChanSelect.clear()
+        self.AnalyzeChanSelect.addItem("All Channels")
+        self.AnalyzeChanSelect.addItems(ch_names)
+        if st.analyze_chan and st.analyze_chan in ch_names:
+            idx = ch_names.index(st.analyze_chan) + 1
+            self.AnalyzeChanSelect.setCurrentIndex(idx)
+            self.single_panel_mode = True
+        else:
+            self.AnalyzeChanSelect.setCurrentIndex(0)
+            self.single_panel_mode = False
+        self.AnalyzeChanSelect.blockSignals(False)
 
-        # Clear z-score global statistics cache
-        self.zscore_global_mean = None
-        self.zscore_global_std = None
+        self.StimChanSelect.blockSignals(True)
+        self.StimChanSelect.clear()
+        self.StimChanSelect.addItem("None")
+        self.StimChanSelect.addItems(ch_names)
+        if st.stim_chan and st.stim_chan in ch_names:
+            idx = ch_names.index(st.stim_chan) + 1
+            self.StimChanSelect.setCurrentIndex(idx)
+        else:
+            self.StimChanSelect.setCurrentIndex(0)
+        self.StimChanSelect.blockSignals(False)
 
-        # Auto-detect stimulus and analysis channels
-        # Note: auto_analysis is only returned if there's exactly one non-stim channel
-        auto_stim, auto_analysis = abf_io.auto_select_channels(st.sweeps, ch_names)
+        self.EventsChanSelect.blockSignals(True)
+        self.EventsChanSelect.clear()
+        self.EventsChanSelect.addItem("None")
+        self.EventsChanSelect.addItems(ch_names)
+        if st.event_channel and st.event_channel in ch_names:
+            idx = ch_names.index(st.event_channel) + 1
+            self.EventsChanSelect.setCurrentIndex(idx)
+        else:
+            self.EventsChanSelect.setCurrentIndex(0)
+        self.EventsChanSelect.blockSignals(False)
 
-        if auto_stim:
-            # Found a stimulus channel - select it
-            stim_idx = ch_names.index(auto_stim) + 1  # +1 because "None" is at index 0
+        self._update_event_source_channel_combo()
+
+    def _apply_auto_detection(self, auto, ch_names: list, load_duration: float = 0.0):
+        """
+        Apply auto-detected stim/analysis channels to UI.
+
+        Handles three cases:
+        1. Stim + analysis detected → select both, trigger handlers
+        2. Stim only → select stim, start grid mode
+        3. No stim → clear stim state, start grid mode
+        """
+        st = self.state
+
+        if auto.stim_channel:
+            stim_idx = ch_names.index(auto.stim_channel) + 1
             self.StimChanSelect.setCurrentIndex(stim_idx)
-            # NOTE: Don't set st.stim_chan here - let on_stim_channel_changed do it
-            # Otherwise the handler's "if new_stim != st.stim_chan" check fails and
-            # stim detection is skipped!
-
-            # Update channel manager to show this as Opto Stim
-            self.channel_manager.set_channel_type(auto_stim, "Opto Stim")
-
-            # Trigger stim detection (this sets st.stim_chan and computes stim spans)
+            self.channel_manager.set_channel_type(auto.stim_channel, "Opto Stim")
             self.on_stim_channel_changed(stim_idx)
 
-            if auto_analysis:
-                # Only one analysis channel available - auto-select it
-                analysis_idx = ch_names.index(auto_analysis) + 1  # +1 because "All Channels" is at index 0
+            if auto.analysis_channel:
+                analysis_idx = ch_names.index(auto.analysis_channel) + 1
                 self.AnalyzeChanSelect.setCurrentIndex(analysis_idx)
-                # Reset analyze_chan so on_analyze_channel_changed recognizes this as a change
                 st.analyze_chan = None
                 self.single_panel_mode = False
-
-                # Trigger analysis channel change
                 self.on_analyze_channel_changed(analysis_idx)
+
+                self._log_status_message(
+                    f"File loaded ({load_duration:.1f}s) - Auto-detected: stim={auto.stim_channel}, analysis={auto.analysis_channel}",
+                    4000,
+                )
             else:
-                # Multiple analysis channels available - start in grid mode, let user choose
                 st.analyze_chan = None
                 self.single_panel_mode = False
                 self.plot_host.clear_saved_view("grid")
                 self.plot_host.clear_saved_view("single")
                 self.plot_all_channels()
+
+                self._log_status_message(
+                    f"File loaded ({load_duration:.1f}s) - Auto-detected stim: {auto.stim_channel}",
+                    4000,
+                )
         else:
-            # No stimulus channel detected - start in grid mode
             st.analyze_chan = None
             self.single_panel_mode = False
-
-            st.stim_chan = None
-            st.stim_onsets_by_sweep.clear()
-            st.stim_offsets_by_sweep.clear()
-            st.stim_spans_by_sweep.clear()
-            st.stim_metrics_by_sweep.clear()
-
+            self._file_load_service.clear_stim_state(st)
             self.plot_host.clear_saved_view("grid")
             self.plot_host.clear_saved_view("single")
             self.plot_all_channels()
 
+            if load_duration > 0:
+                self._log_status_message(f"File loaded ({load_duration:.1f}s)", 3000)
+
+    def _restore_app_settings(self, app_settings: dict):
+        """Restore app-level settings from NPZ session data."""
+        self.filter_order = app_settings.get('filter_order', 4)
+        self.use_zscore_normalization = app_settings.get('use_zscore_normalization', True)
+        self.notch_filter_lower = app_settings.get('notch_filter_lower')
+        self.notch_filter_upper = app_settings.get('notch_filter_upper')
+        apnea_thresh = app_settings.get('apnea_threshold', 0.5)
+
+        if hasattr(self, 'FilterOrderSpin'):
+            self.FilterOrderSpin.setValue(self.filter_order)
+        if hasattr(self, 'ApneaThresh'):
+            self.ApneaThresh.setText(str(apnea_thresh))
+
+        saved_classifier = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
+        self.state.active_eupnea_sniff_classifier = saved_classifier
+
+        classifier_to_dropdown = {
+            'gmm': 'GMM', 'xgboost': 'XGBoost', 'rf': 'Random Forest',
+            'mlp': 'MLP', 'all_eupnea': 'All Eupnea', 'none': 'None (Clear)',
+        }
+        dropdown_text = classifier_to_dropdown.get(saved_classifier, 'GMM')
+        self.eup_sniff_combo.blockSignals(True)
+        self.eup_sniff_combo.setCurrentText(dropdown_text)
+        self.eup_sniff_combo.blockSignals(False)
+
+        print(f"[npz-load] Restored app settings: filter_order={self.filter_order}, "
+              f"zscore={self.use_zscore_normalization}, notch={self.notch_filter_lower}-{self.notch_filter_upper}, "
+              f"apnea_thresh={apnea_thresh}, eupnea_sniff_classifier={saved_classifier}")
+
+    def load_multiple_files(self, file_paths: List[Path]):
+        """Load and concatenate multiple ABF files. Validates then delegates to ViewModel."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Validate files first (UI concern — needs QMessageBox)
+        valid, messages = self._file_load_service.validate_files_for_concatenation(file_paths)
+
+        if not valid:
+            self._show_error("File Validation Failed", "\n".join(messages))
+            return
+        elif messages:  # Warnings
+            reply = QMessageBox.question(
+                self, "File Validation Warnings",
+                "The following warnings were detected:\n\n" + "\n".join(messages) + "\n\nDo you want to proceed anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
+        self._file_load_vm.load_multiple_files(file_paths)
+
+    def _on_multi_file_loaded_ui(self, result):
+        """
+        Thin UI handler for multi-file load completion.
+
+        State is already updated by FileLoadViewModel. This method handles only:
+        - UI widget updates (combos, channel manager, plot)
+        - Auto-detection of channels
+        - Summary info dialog
+        """
+        from core.domain.file_loading.models import MultiFileLoadResult
+        st = self.state
+        ch_names = result.channel_names
+
+        self._nav_vm.reset_window_state()
+
+        # Reset UI caches and widgets
+        self._file_load_service.reset_caches(self)
+        self._refresh_omit_button_label()
+
+        self.ApplyPeakFindPushButton.setEnabled(False)
+
+        # Populate channel combos and channel manager
+        self._populate_channel_combos(ch_names)
+        self._populate_channel_manager(ch_names)
+
+        # Auto-detect channels and apply
+        auto = self._file_load_service.auto_detect_channels(st.sweeps, ch_names)
+        self._apply_auto_detection(auto, ch_names)
+
         # Show success message with file info
-        total_sweeps = next(iter(sweeps_by_ch.values())).shape[1]
-
-        # Build file summary with padding information
-        file_lines = []
-        for i, info in enumerate(file_info):
-            line = f"  {i+1}. {info['path'].name}: sweeps {info['sweep_start']}-{info['sweep_end']}"
-            if info.get('padded', False):
-                orig_dur = info['original_samples'] / sr
-                padded_dur = info['padded_samples'] / sr
-                line += f" (padded: {orig_dur:.2f}s → {padded_dur:.2f}s)"
-            file_lines.append(line)
-
-        file_summary = "\n".join(file_lines)
-
-        # Check if any files were padded
-        padded_count = sum(1 for info in file_info if info.get('padded', False))
-
-        message = f"Loaded {len(file_paths)} files with {total_sweeps} total sweeps:\n\n{file_summary}"
-        if padded_count > 0:
-            message += f"\n\nNote: {padded_count} file(s) had different sweep lengths and were padded with NaN values."
-
-        # Add auto-detection info to message
-        if auto_stim:
-            message += f"\n\nAuto-detected stimulus channel: {auto_stim}"
-            if auto_analysis:
-                message += f"\nAuto-selected analysis channel: {auto_analysis}"
-
+        message = self._file_load_service.build_multi_file_summary(
+            result.file_info, result.sr_hz, result.sweeps_by_ch, auto,
+        )
         self._show_info("Files Loaded Successfully", message)
 
     # ---------- Session Save/Load ----------
@@ -3878,113 +3825,29 @@ class MainWindow(QMainWindow):
             )
 
     def load_npz_state(self, npz_path: Path, alternative_data_path: Path = None):
-        """Load complete analysis state from .pleth.npz file."""
-        from core.npz_io import load_state_from_npz, get_npz_metadata
-        from PyQt6.QtWidgets import QProgressDialog
-        from PyQt6.QtCore import Qt
-        from core.file_load_worker import FileLoadWorker
-        import time
-
-        t_start = time.time()
-
-        # Get metadata for display (fast - reads only header)
-        metadata = get_npz_metadata(npz_path)
-
-        if 'error' in metadata:
-            self._show_error("Load Error",
-                f"Failed to read NPZ file:\n\n{metadata['error']}"
-            )
-            return
-
-        # If no alternative path provided, check if stored path exists - if not, try project file list
-        if alternative_data_path is None and hasattr(self, '_master_file_list') and self._master_file_list:
-            # Get the original filename from metadata
-            original_path_str = metadata.get('original_file', '')
-            if original_path_str:
-                stored_path = Path(original_path_str)
-
-                # Only search project file list if the stored path doesn't exist
-                if not stored_path.exists():
-                    original_filename = stored_path.name
-                    print(f"\n[Path Resolution] NPZ stored path not found: {stored_path}")
-                    print(f"  Searching project file list for: {original_filename}")
-
-                    # Search project's master file list for a matching filename
-                    for task in self._master_file_list:
-                        task_path = task.get('file_path', '')
-                        if task_path and Path(task_path).name == original_filename:
-                            candidate = Path(task_path)
-                            if candidate.exists():
-                                # Show detailed comparison of paths
-                                print(f"  Found in project: {candidate}")
-
-                                # Analyze the difference
-                                stored_parts = stored_path.parts
-                                project_parts = candidate.parts
-                                if stored_parts != project_parts:
-                                    # Find where they diverge
-                                    for i, (s, p) in enumerate(zip(stored_parts, project_parts)):
-                                        if s != p:
-                                            print(f"  Path diverges at part {i}: '{s}' vs '{p}'")
-                                            break
-                                    if len(stored_parts) != len(project_parts):
-                                        print(f"  Path depth differs: {len(stored_parts)} vs {len(project_parts)} parts")
-
-                                alternative_data_path = candidate
-                                break
-                    else:
-                        print(f"  Not found in project file list")
-
-        # Show loading dialog
-        progress = QProgressDialog(f"Loading session...\n{npz_path.name}", None, 0, 100, self)
-        progress.setWindowTitle("Loading PhysioMetrics Session")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setCancelButton(None)
-        progress.setValue(10)
-        progress.show()
-
-        progress.setLabelText(f"Reading session file...\n{npz_path.name}")
-        progress.setValue(30)
-
-        # Store context for completion handler
-        self._loading_npz_path = npz_path
-        self._loading_npz_metadata = metadata
-        self._loading_npz_t_start = t_start
-        self._loading_progress = progress
-
-        # Create worker — load_state_from_npz doesn't accept progress_callback
-        self._load_worker = FileLoadWorker(
-            load_state_from_npz, npz_path,
-            reload_raw_data=True, alternative_data_path=alternative_data_path
+        """Load complete analysis state from .pleth.npz file. Delegates to ViewModel."""
+        master_file_list = getattr(self, '_master_file_list', None)
+        self._file_load_vm.load_npz_state(
+            npz_path,
+            alternative_data_path=alternative_data_path,
+            master_file_list=master_file_list,
         )
-        self._load_worker.finished.connect(self._on_npz_loaded)
-        self._load_worker.error_exc.connect(self._on_npz_load_error)
-        self._load_worker.start()
 
-    def _on_npz_load_error(self, exc):
-        """Handle errors from NPZ loading worker."""
+    def _on_npz_load_error_ui(self, exc):
+        """Handle errors from NPZ loading — UI only (file dialogs, error messages)."""
         from core.npz_io import OriginalFileNotFoundError
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
-        progress = self._loading_progress
-        npz_path = self._loading_npz_path
-        progress.close()
-
         if isinstance(exc, OriginalFileNotFoundError):
-            # Prompt user to locate the file
             reply = QMessageBox.question(
-                self,
-                "Original File Not Found",
+                self, "Original File Not Found",
                 f"The original data file could not be found:\n\n"
                 f"{exc.original_path}\n\n"
                 f"Would you like to locate the file manually?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
+                QMessageBox.StandardButton.Yes,
             )
-
             if reply == QMessageBox.StandardButton.Yes:
-                # Get file extension from original path
                 orig_ext = exc.original_path.suffix.lower()
                 filter_map = {
                     '.abf': "ABF Files (*.abf)",
@@ -3992,17 +3855,15 @@ class MainWindow(QMainWindow):
                     '.edf': "EDF Files (*.edf)",
                 }
                 file_filter = filter_map.get(orig_ext, "All Data Files (*.abf *.smrx *.edf)")
-
                 new_path, _ = QFileDialog.getOpenFileName(
-                    self,
-                    f"Locate {exc.original_path.name}",
-                    str(Path.home()),
-                    file_filter
+                    self, f"Locate {exc.original_path.name}",
+                    str(Path.home()), file_filter,
                 )
-
                 if new_path:
-                    # Retry with the new path
-                    self.load_npz_state(npz_path, alternative_data_path=Path(new_path))
+                    self.load_npz_state(
+                        self._file_load_vm._loading_npz_path,
+                        alternative_data_path=Path(new_path),
+                    )
                     return
         else:
             import traceback
@@ -4010,20 +3871,22 @@ class MainWindow(QMainWindow):
                 f"Failed to load session state:\n\n{str(exc)}\n\n{traceback.format_exc()}"
             )
 
-    def _on_npz_loaded(self, result):
-        """Completion handler for NPZ session loading (runs on main thread)."""
+    def _on_npz_loaded_ui(self, npz_result):
+        """
+        Thin UI handler for NPZ session load completion.
+
+        Replaces the old monolithic _on_npz_loaded. Handles state replacement,
+        UI restoration, and plotting.
+        """
         import time
+        from core.domain.file_loading.models import NpzLoadResult
 
-        npz_path = self._loading_npz_path
-        metadata = self._loading_npz_metadata
-        t_start = self._loading_npz_t_start
-        progress = self._loading_progress
-
-        new_state, raw_data_loaded, gmm_cache, app_settings, event_markers = result
+        new_state = npz_result.new_state
+        npz_path = npz_result.npz_path
+        metadata = npz_result.metadata
 
         try:
-            if not raw_data_loaded:
-                progress.close()
+            if not npz_result.raw_data_loaded:
                 self._show_error("Load Error",
                     "Could not load raw data from original file or NPZ.\n\n"
                     f"Original file: {new_state.in_path}\n\n"
@@ -4031,186 +3894,82 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            progress.setLabelText("Restoring analysis state...")
-            progress.setValue(50)
-
             # Replace current state
             self.state = new_state
             st = self.state
 
             # Update manager references to new state
             self.plot_manager.state = new_state
-            self.navigation_manager.state = new_state
             self.editing_modes.state = new_state
             self.export_manager.state = new_state
+            self._file_load_vm.state = new_state
 
-            # ===== RESTORE UI ELEMENTS =====
-
-            # Update filename display in status bar (with metadata if available)
+            # Update filename display
             self._update_filename_display()
 
-            progress.setValue(60)
-
-            # Restore channel combos
-            self.AnalyzeChanSelect.blockSignals(True)
-            self.AnalyzeChanSelect.clear()
-            self.AnalyzeChanSelect.addItem("All Channels")
-            self.AnalyzeChanSelect.addItems(st.channel_names)
-
-            if st.analyze_chan and st.analyze_chan in st.channel_names:
-                idx = st.channel_names.index(st.analyze_chan) + 1  # +1 for "All Channels"
-                self.AnalyzeChanSelect.setCurrentIndex(idx)
-                self.single_panel_mode = True
-            else:
-                self.AnalyzeChanSelect.setCurrentIndex(0)  # "All Channels"
-                self.single_panel_mode = False
-
-            self.AnalyzeChanSelect.blockSignals(False)
-
-            self.StimChanSelect.blockSignals(True)
-            self.StimChanSelect.clear()
-            self.StimChanSelect.addItem("None")
-            self.StimChanSelect.addItems(st.channel_names)
-
-            if st.stim_chan and st.stim_chan in st.channel_names:
-                idx = st.channel_names.index(st.stim_chan) + 1
-                self.StimChanSelect.setCurrentIndex(idx)
-            else:
-                self.StimChanSelect.setCurrentIndex(0)
-
-            self.StimChanSelect.blockSignals(False)
-
-            self.EventsChanSelect.blockSignals(True)
-            self.EventsChanSelect.clear()
-            self.EventsChanSelect.addItem("None")
-            self.EventsChanSelect.addItems(st.channel_names)
-
-            if st.event_channel and st.event_channel in st.channel_names:
-                idx = st.channel_names.index(st.event_channel) + 1
-                self.EventsChanSelect.setCurrentIndex(idx)
-            else:
-                self.EventsChanSelect.setCurrentIndex(0)
-
-            self.EventsChanSelect.blockSignals(False)
-
-            # Update event markers source channel combo
-            self._update_event_source_channel_combo()
-
-            progress.setValue(70)
+            # Restore channel combos (NPZ restores saved selections, not defaults)
+            self._populate_channel_combos_npz(st)
 
             # Restore filter settings
             self.LowPass_checkBox.setChecked(st.use_low)
             self.HighPass_checkBox.setChecked(st.use_high)
             self.InvertSignal_checkBox.setChecked(st.use_invert)
-            # Note: use_mean_sub is stored but not restored (no UI checkbox)
 
             if st.low_hz:
                 self.LowPassVal.setText(str(st.low_hz))
             if st.high_hz:
                 self.HighPassVal.setText(str(st.high_hz))
 
-            # Restore app-level settings (filter order, zscore, notch, apnea threshold)
-            if app_settings is not None:
-                self.filter_order = app_settings.get('filter_order', 4)
-                self.use_zscore_normalization = app_settings.get('use_zscore_normalization', True)
-                self.notch_filter_lower = app_settings.get('notch_filter_lower')
-                self.notch_filter_upper = app_settings.get('notch_filter_upper')
-                apnea_thresh = app_settings.get('apnea_threshold', 0.5)
+            # Restore app-level settings
+            if npz_result.app_settings is not None:
+                self._restore_app_settings(npz_result.app_settings)
 
-                # Update UI elements
-                if hasattr(self, 'FilterOrderSpin'):
-                    self.FilterOrderSpin.setValue(self.filter_order)
-                if hasattr(self, 'ApneaThresh'):
-                    self.ApneaThresh.setText(str(apnea_thresh))
-
-                # Restore eupnea/sniff classifier
-                saved_classifier = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
-                self.state.active_eupnea_sniff_classifier = saved_classifier
-
-                # Update dropdown to match saved classifier
-                classifier_to_dropdown = {
-                    'gmm': 'GMM',
-                    'xgboost': 'XGBoost',
-                    'rf': 'Random Forest',
-                    'mlp': 'MLP',
-                    'all_eupnea': 'All Eupnea',
-                    'none': 'None (Clear)'
-                }
-                dropdown_text = classifier_to_dropdown.get(saved_classifier, 'GMM')
-                self.eup_sniff_combo.blockSignals(True)
-                self.eup_sniff_combo.setCurrentText(dropdown_text)
-                self.eup_sniff_combo.blockSignals(False)
-
-                print(f"[npz-load] Restored app settings: filter_order={self.filter_order}, "
-                      f"zscore={self.use_zscore_normalization}, notch={self.notch_filter_lower}-{self.notch_filter_upper}, "
-                      f"apnea_thresh={apnea_thresh}, eupnea_sniff_classifier={saved_classifier}")
-
-            progress.setValue(80)
-
-            # Clear caches (same as new file load)
-            self.metrics_by_sweep.clear()
-            self.onsets_by_sweep.clear()
-            self.global_outlier_stats = None
-            self._export_metric_cache = {}
-            self.zscore_global_mean = None
-            self.zscore_global_std = None
-
-            # Update omit button label
+            # Clear caches
+            self._file_load_service.reset_caches(self)
             self._refresh_omit_button_label()
 
-            # Disable peak apply button after session load to prevent accidental re-run
-            # User already has peaks loaded from session, shouldn't re-detect
+            # Disable peak apply button (peaks already loaded from session)
             self.ApplyPeakFindPushButton.setEnabled(False)
-            self.ApplyPeakFindPushButton.setToolTip("Peak detection already complete (loaded from session). Modify parameters and click to re-detect.")
-
-            progress.setValue(90)
+            self.ApplyPeakFindPushButton.setToolTip(
+                "Peak detection already complete (loaded from session). Modify parameters and click to re-detect."
+            )
 
             # Restore navigation and plot
-            self.navigation_manager.reset_window_state()
+            self._nav_vm.reset_window_state()
 
             # Restore event markers from NPZ if present
-            if event_markers and hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
+            if npz_result.event_markers and hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
                 try:
-                    count = self._event_marker_viewmodel.load_from_npz(event_markers)
+                    count = self._event_marker_viewmodel.load_from_npz(npz_result.event_markers)
                     print(f"[npz-load] Restored {count} event markers from session file")
                 except Exception as e:
                     print(f"[npz-load] Warning: Failed to restore event markers: {e}")
 
-            # Redraw plot (will use single_panel_mode to determine layout)
+            # Redraw plot
             self.redraw_main_plot()
 
-            # Restore navigation position (after plotting)
-            # Note: Window position is restored in redraw_main_plot via state.window_start_s
-
-            # Restore GMM cache if it was saved (preserves user's cluster assignments)
-            if gmm_cache is not None:
+            # Restore GMM cache
+            if npz_result.gmm_cache is not None:
                 print("[npz-load] Restoring GMM cache from session file...")
-                self._cached_gmm_results = gmm_cache
+                self._cached_gmm_results = npz_result.gmm_cache
             elif st.gmm_sniff_probabilities:
-                # Fallback: rebuild GMM cache if probabilities exist but no cache was saved
-                # (for backwards compatibility with old session files)
-                # Always rebuild regardless of auto_gmm_enabled setting
                 print("[npz-load] Rebuilding GMM cache from loaded probabilities (legacy fallback)...")
                 self._run_automatic_gmm_clustering()
 
-            progress.setValue(100)
-            progress.close()
-
             # Show success message
-            t_elapsed = time.time() - t_start
+            t_elapsed = time.time() - self._file_load_vm._loading_t_start
             file_size_mb = npz_path.stat().st_size / (1024 * 1024)
 
             self._log_status_message(
                 f"Session loaded: {npz_path.name} ({file_size_mb:.1f} MB, {t_elapsed:.1f}s) - "
-                f"Channel: {st.analyze_chan}, {metadata['n_peaks']} peaks",
-                timeout=8000
+                f"Channel: {st.analyze_chan}, {metadata.get('n_peaks', '?')} peaks",
+                timeout=8000,
             )
 
             # Update last directory
             self.settings.setValue("last_dir", str(npz_path.parent))
 
         except Exception as e:
-            progress.close()
             import traceback
             self._show_error("Load Error",
                 f"Failed to load session state:\n\n{str(e)}\n\n{traceback.format_exc()}"
@@ -6730,6 +6489,42 @@ class MainWindow(QMainWindow):
         """Clear help dialog reference when closed so it can be reopened."""
         self.help_dialog = None
 
+    def _setup_claude_button(self):
+        """Add a Claude Code launch button next to the Help button."""
+        from core.services.claude_launcher_service import ClaudeLauncherService
+        from PyQt6.QtWidgets import QPushButton
+
+        self._claude_launcher = ClaudeLauncherService()
+
+        btn = QPushButton("Claude Code")
+        btn.setFixedHeight(self.helpbutton.height())
+        btn.setStyleSheet("QPushButton { padding: 2px 8px; }")
+
+        if not self._claude_launcher.is_available():
+            btn.setEnabled(False)
+            btn.setToolTip("Claude Code CLI not found on PATH")
+        else:
+            btn.setToolTip("Launch Claude Code in a new terminal")
+            btn.clicked.connect(self._on_claude_launch)
+
+        # Insert next to Help button in the same layout
+        parent_layout = self.helpbutton.parent().layout()
+        if parent_layout:
+            idx = parent_layout.indexOf(self.helpbutton)
+            if idx >= 0:
+                parent_layout.insertWidget(idx, btn)
+            else:
+                parent_layout.addWidget(btn)
+        self._claude_button = btn
+
+    def _on_claude_launch(self):
+        """Launch Claude Code CLI."""
+        ok = self._claude_launcher.launch()
+        if ok:
+            self._log_status_message("Claude Code launched in new terminal", 3000)
+        else:
+            self._log_status_message("Failed to launch Claude Code", 3000)
+
     def _check_for_updates_on_startup(self):
         """Check for updates in background and update UI if available."""
         from PyQt6.QtCore import QThread, pyqtSignal
@@ -6811,7 +6606,7 @@ class MainWindow(QMainWindow):
             return
 
         # Get stimulation spans for current sweep if available
-        s = max(0, min(st.sweep_idx, self.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
         stim_spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
 
         # Open dialog
@@ -6905,7 +6700,7 @@ class MainWindow(QMainWindow):
     def on_omit_sweep_clicked(self):
         """Handle Omit Sweep button - simple toggle to enter/exit omit region mode."""
         st = self.state
-        if self.navigation_manager._sweep_count() == 0:
+        if self._nav_vm.sweep_count() == 0:
             return
 
         # Simple toggle: button checked state determines mode
@@ -7343,6 +7138,7 @@ class MainWindow(QMainWindow):
             if not self._consolidation_custom_folder:
                 self._populate_consolidation_source_list()
 
+
     def _filter_consolidation_source_list(self, text: str):
         """Filter the consolidation source list based on search text.
         Searches the root name, directory path, and display text.
@@ -7580,7 +7376,7 @@ class MainWindow(QMainWindow):
 
         # Connect signals
         table.doubleClicked.connect(self._on_table_double_clicked)
-        table.clicked.connect(self._on_table_clicked)  # Single click for Notes column
+        table.clicked.connect(self._on_table_clicked)
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._on_master_list_context_menu)
 
@@ -7598,7 +7394,109 @@ class MainWindow(QMainWindow):
         table.viewport().installEventFilter(self)
         self._table_resize_timer = None
 
+        # === Search bar above table ===
+        self._setup_search_bar()
+
         print("[project-builder] Master file list configured with Model/View architecture")
+
+    def _setup_search_bar(self):
+        """Add a search bar above the data files table."""
+        from PyQt6.QtWidgets import QLineEdit, QLabel, QHBoxLayout, QWidget
+        from PyQt6.QtCore import QTimer
+
+        # Find the table's parent layout (tableContainerLayout)
+        table = self.discoveredFilesTable
+        parent_layout = table.parent().layout()
+        if parent_layout is None:
+            return
+
+        # Find the table's index in the layout
+        table_idx = -1
+        for i in range(parent_layout.count()):
+            item = parent_layout.itemAt(i)
+            if item and item.widget() == table:
+                table_idx = i
+                break
+
+        if table_idx < 0:
+            return
+
+        # Create search bar container
+        search_container = QWidget()
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(0, 2, 0, 2)
+        search_layout.setSpacing(6)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search experiments...")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 9pt;
+            }
+            QLineEdit:focus {
+                border: 1px solid #4682b4;
+            }
+        """)
+        search_layout.addWidget(self._search_edit, stretch=1)
+
+        self._search_count_label = QLabel("")
+        self._search_count_label.setStyleSheet("color: #888; font-size: 9pt; padding-right: 4px;")
+        search_layout.addWidget(self._search_count_label)
+
+        # Insert before the table
+        parent_layout.insertWidget(table_idx, search_container)
+
+        # Debounced search (300ms)
+        self._search_timer = QTimer()
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._on_search_execute)
+        self._search_edit.textChanged.connect(lambda: self._search_timer.start())
+
+    def _on_search_execute(self):
+        """Execute search and filter table rows."""
+        query = self._search_edit.text().strip()
+        table = self.discoveredFilesTable
+
+        if not query:
+            # Show all rows
+            for row in range(self._file_table_model.rowCount()):
+                table.setRowHidden(row, False)
+            self._search_count_label.setText("")
+            return
+
+        # Search across row data fields
+        query_lower = query.lower()
+        visible_count = 0
+        total = self._file_table_model.rowCount()
+
+        for row in range(total):
+            row_data = self._file_table_model.get_row_data(row)
+            if row_data is None:
+                table.setRowHidden(row, True)
+                continue
+
+            # Search across key metadata fields
+            match = False
+            for key in ('file_name', 'experiment', 'strain', 'stim_type',
+                        'power', 'sex', 'animal_id', 'protocol',
+                        'keywords_display', 'channel'):
+                val = str(row_data.get(key, '')).lower()
+                if query_lower in val:
+                    match = True
+                    break
+
+            table.setRowHidden(row, not match)
+            if match:
+                visible_count += 1
+
+        self._search_count_label.setText(f"{visible_count} of {total}")
 
     def _setup_table_delegates(self, table: QTableView):
         """Set up item delegates for special column types."""
@@ -7643,54 +7541,8 @@ class MainWindow(QMainWindow):
         self._analyze_file_at_row(row)
 
     def _on_table_clicked(self, index):
-        """Handle single click on table - check for Notes column click."""
-        if not index.isValid():
-            return
-
-        col_key = self._file_table_model.get_column_key(index.column())
-        if col_key == 'linked_notes':
-            row = index.row()
-            row_data = self._file_table_model.get_row_data(row)
-            if row_data:
-                file_name = row_data.get('file_name', '')
-                if file_name:
-                    self._show_linked_notes_for_file(file_name)
-
-    def _show_linked_notes_for_file(self, file_name: str):
-        """Show notes for file. Delegates to NotesPreviewManager."""
-        self._notes_preview_manager.show_linked_notes_for_file(file_name)
-
-    def _show_notes_preview_dialog(self, files: list, title: str, info_text: str = None, highlight_stem: str = None):
-        """Show notes preview dialog. Delegates to NotesPreviewManager."""
-        self._notes_preview_manager.show_notes_preview_dialog(files, title, info_text, highlight_stem)
-
-    def _create_note_preview_widget(self, note_info: dict, abf_stem: str, search_term: str = None):
-        """Create note preview widget. Delegates to NotesPreviewManager."""
-        return self._notes_preview_manager.create_note_preview_widget(note_info, abf_stem, search_term)
-
-    def _create_highlighted_table(self, df, abf_stem: str, search_term: str = None):
-        """Create highlighted table. Delegates to NotesPreviewManager."""
-        return self._notes_preview_manager.create_highlighted_table(df, abf_stem, search_term)
-
-    def _create_highlighted_text(self, content: str, abf_stem: str, search_term: str = None):
-        """Create highlighted text. Delegates to NotesPreviewManager."""
-        return self._notes_preview_manager.create_highlighted_text(content, abf_stem, search_term)
-
-    def _df_contains_stem(self, df, abf_stem: str) -> bool:
-        """Check if DataFrame contains stem. Delegates to NotesPreviewManager."""
-        return self._notes_preview_manager.df_contains_stem(df, abf_stem)
-
-    def _get_notes_for_abf(self, abf_stem: str) -> list:
-        """Get notes for ABF file. Delegates to NotesPreviewManager."""
-        return self._notes_preview_manager.get_notes_for_abf(abf_stem)
-
-    def _get_fuzzy_notes_for_abf(self, abf_stem: str, search_range: int = 5) -> tuple:
-        """Get fuzzy matched notes. Delegates to NotesPreviewManager."""
-        return self._notes_preview_manager.get_fuzzy_notes_for_abf(abf_stem, search_range)
-
-    def _update_linked_notes_column(self):
-        """Update linked notes column. Delegates to NotesPreviewManager."""
-        self._notes_preview_manager.update_linked_notes_column()
+        """Handle single click on table."""
+        pass
 
     def _on_model_cell_edited(self, row: int, column_key: str, value):
         """Handle cell edits from the model."""
@@ -7704,8 +7556,15 @@ class MainWindow(QMainWindow):
             elif column_key == 'strain' and value:
                 self._update_autocomplete_history('strain_history', str(value))
 
-            # Autosave project
-            self._project_builder.project_autosave()
+            # Write directly to SQLite DB
+            eid = self._master_file_list[row].get('experiment_id')
+            if eid is not None:
+                try:
+                    self._project_viewmodel.service.store.update_experiment(
+                        eid, {column_key: value}
+                    )
+                except Exception as e:
+                    print(f"[db-edit] Error updating experiment {eid}: {e}")
 
     def _on_analyze_row(self, row: int):
         """Handle analyze button click."""
@@ -7714,25 +7573,92 @@ class MainWindow(QMainWindow):
     def _on_delete_row(self, row: int):
         """Handle delete button click - remove row from table."""
         if row < len(self._master_file_list):
+            eid = self._master_file_list[row].get('experiment_id')
             del self._master_file_list[row]
             self._file_table_model.remove_row(row)
-            self._project_builder.project_autosave()
+            # Delete from SQLite DB
+            if eid is not None:
+                try:
+                    self._project_viewmodel.service.store.delete_experiment(eid)
+                except Exception as e:
+                    print(f"[db-delete] Error deleting experiment {eid}: {e}")
 
     def _on_info_row(self, row: int):
-        """Handle info button click - show file details."""
-        if row < len(self._master_file_list):
-            task = self._master_file_list[row]
-            file_path = task.get('file_path', 'Unknown')
-            protocol = task.get('protocol', 'Unknown')
-            channels = task.get('channel_count', 0)
-            sweeps = task.get('sweep_count', 0)
+        """Handle info button click - open source review popup."""
+        self._open_source_review(row)
 
-            info_text = f"""File: {file_path}
-Protocol: {protocol}
-Channels: {channels}
-Sweeps: {sweeps}"""
+    def _open_source_review(self, row: int):
+        """Open the Source Review popup for a table row."""
+        if row >= len(self._master_file_list):
+            return
 
-            QMessageBox.information(self, "File Information", info_text)
+        task = self._master_file_list[row]
+        animal_id = task.get('animal_id', '')
+        file_name = task.get('file_name', 'Unknown')
+
+        # Get source links and sources from project service
+        from core.services.project_service import ProjectService
+        service = ProjectService()
+        all_links = service.get_source_links(animal_id=animal_id) if animal_id else []
+        sources = service.get_sources()
+
+        # Filter links to only this file's row:
+        # - Animal-level fields (animal_id, strain, sex) → always keep
+        # - File-level fields (file_name, stim_type, power) → only keep if
+        #   on the same sheet row as the file_name link matching this file
+        import json as _json
+        ANIMAL_FIELDS = {'animal_id', 'strain', 'sex'}
+        file_stem = file_name.replace('.abf', '').replace('.smrx', '').replace('.edf', '')
+
+        # Find which (sheet, row) this file's name lives on
+        # Only match file_name links that include the extension (the authoritative
+        # "File Name" column). Notes files have a second column with bare stems that
+        # reference the PREVIOUS file — matching those would highlight the wrong row.
+        file_rows = set()  # (source_id, sheet, row)
+        for link in all_links:
+            if link.get('field') == 'file_name':
+                link_val = str(link.get('value', '')).strip()
+                # Must match the full file name (with extension)
+                if link_val != file_name:
+                    continue
+                loc = link.get('location', '')
+                if isinstance(loc, str):
+                    try:
+                        loc = _json.loads(loc)
+                    except (ValueError, TypeError):
+                        loc = {}
+                if isinstance(loc, dict) and loc.get('row') is not None:
+                    file_rows.add((link.get('source_id'), loc.get('sheet', ''), loc['row']))
+
+        source_links = []
+        for link in all_links:
+            field = link.get('field', '')
+            if field in ANIMAL_FIELDS:
+                source_links.append(link)
+                continue
+            # File-level field — only keep if on the same row as our file
+            loc = link.get('location', '')
+            if isinstance(loc, str):
+                try:
+                    loc = _json.loads(loc)
+                except (ValueError, TypeError):
+                    loc = {}
+            if isinstance(loc, dict) and loc.get('row') is not None:
+                key = (link.get('source_id'), loc.get('sheet', ''), loc['row'])
+                if key in file_rows:
+                    source_links.append(link)
+
+        from dialogs.source_review_dialog import SourceReviewDialog, load_source_sheets
+        dlg = SourceReviewDialog(
+            file_name=file_name,
+            animal_id=animal_id,
+            metadata=task,
+            sources=sources,
+            source_links=source_links,
+            load_sheets_fn=load_source_sheets,
+            parent=self,
+        )
+        dlg.exec()
 
     def _on_header_context_menu(self, pos):
         """Show context menu for column visibility and custom columns."""
@@ -8254,45 +8180,6 @@ Sweeps: {sweeps}"""
         self._project_builder.combine_selected_files(rows)
 
 
-    # =========================================================================
-    # Notes Files Tab Methods
-    # =========================================================================
-
-    def _on_notes_filter_changed(self):
-        """Filter notes table rows based on search text."""
-        if not hasattr(self, 'notesFilterEdit') or not hasattr(self, 'notesFilesTable'):
-            return
-
-        filter_text = self.notesFilterEdit.text().strip().lower()
-        table = self.notesFilesTable
-        total_count = self._notes_model.rowCount()
-        visible_count = 0
-
-        # If no filter, show all rows
-        if not filter_text:
-            for row in range(total_count):
-                table.setRowHidden(row, False)
-            visible_count = total_count
-        else:
-            # Filter rows - search across name, type, and location columns
-            for row in range(total_count):
-                match = False
-                for col in range(self._notes_model.columnCount()):
-                    item = self._notes_model.item(row, col)
-                    if item and filter_text in item.text().lower():
-                        match = True
-                        break
-                table.setRowHidden(row, not match)
-                if match:
-                    visible_count += 1
-
-        # Update filter count label
-        if hasattr(self, 'notesFilterCountLabel'):
-            if filter_text:
-                self.notesFilterCountLabel.setText(f"{visible_count} of {total_count}")
-            else:
-                self.notesFilterCountLabel.setText(f"{total_count} files")
-
     def _setup_project_name_combo(self):
         """Set up the unified project name combo (shows name, loads recent, editable for rename)."""
         if not hasattr(self, 'projectNameCombo'):
@@ -8357,7 +8244,7 @@ Sweeps: {sweeps}"""
         print("[project-builder] Set up projectNameCombo with None + recent projects")
 
     def _populate_project_name_combo(self, current_name: str = None):
-        """Populate the project name combo with None + recent projects."""
+        """Populate the project name combo with "All Experiments" + snapshots + recent projects."""
         if not hasattr(self, 'projectNameCombo'):
             return
 
@@ -8366,25 +8253,39 @@ Sweeps: {sweeps}"""
         combo.blockSignals(True)
         combo.clear()
 
-        # Add "None" option (index 0)
-        combo.addItem("No Project", None)
+        # Item 0: "All Experiments" (no filter)
+        combo.addItem("All Experiments", None)
 
-        # Add recent projects
+        # Items 1+: DB snapshots (named filter bookmarks)
+        try:
+            snapshots = self._project_viewmodel.get_snapshots()
+            for snap in snapshots:
+                combo.addItem(
+                    f"\u2606 {snap['name']}",  # star prefix for snapshots
+                    ('snapshot', snap['snapshot_id'])
+                )
+        except Exception as e:
+            print(f"[project-combo] Error loading snapshots: {e}")
+
+        # Add separator, then legacy recent projects
         recent_projects = self.project_manager.get_recent_projects()
-        for project_info in recent_projects:
-            combo.addItem(project_info['name'], project_info['path'])
+        if recent_projects:
+            combo.insertSeparator(combo.count())
+            for project_info in recent_projects:
+                combo.addItem(
+                    f"\u25CB {project_info['name']}",  # circle prefix for legacy
+                    ('legacy', project_info['path'])
+                )
 
         # Set current selection
         if current_name:
-            # Find and select the current project
             idx = combo.findText(current_name)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
             else:
-                # Project name not in list - set as editable text
                 combo.setCurrentText(current_name)
         else:
-            combo.setCurrentIndex(0)  # "No Project"
+            combo.setCurrentIndex(0)  # "All Experiments"
 
         combo.blockSignals(False)
         self._project_combo_updating = False
@@ -8395,33 +8296,37 @@ Sweeps: {sweeps}"""
             return
 
         combo = self.projectNameCombo
+        item_data = combo.itemData(index)
 
-        if index == 0:
-            # "None" selected - clear current project
-            self._clear_current_project()
+        if index == 0 or item_data is None:
+            # "All Experiments" — load everything from DB
+            self._load_experiments_from_db()
+            self._log_status_message("Showing all experiments", 2000)
             return
 
-        # Get project path from item data
-        project_path = combo.itemData(index)
-        if not project_path:
+        if isinstance(item_data, tuple) and item_data[0] == 'snapshot':
+            # Snapshot selected — load filtered from DB
+            snapshot_id = item_data[1]
+            self._load_experiments_from_db(snapshot_id=snapshot_id)
+            self._log_status_message(f"Loaded snapshot filter", 2000)
             return
 
-        project_path = Path(project_path)
-        if not project_path.exists():
-            self._log_status_message(f"Project file not found: {project_path.name}", 3000)
-            self._populate_project_name_combo()  # Refresh list
-            return
+        if isinstance(item_data, tuple) and item_data[0] == 'legacy':
+            # Legacy project — import JSON then load from DB
+            project_path = Path(item_data[1])
+            if not project_path.exists():
+                self._log_status_message(f"Project file not found: {project_path.name}", 3000)
+                self._populate_project_name_combo()
+                return
 
-        # IMPORTANT: Cancel any pending autosave before loading new project
-        self._project_builder.cancel_pending_autosave()
-
-        try:
-            project_data = self.project_manager.load_project(project_path)
-            self._populate_ui_from_project(project_data)
-            self._log_status_message(f"Loaded project: {project_data['project_name']}", 2000)
-        except Exception as e:
-            self._show_error("Load Failed", f"Failed to load project:\n{e}")
-            self._populate_project_name_combo()  # Reset
+            self._project_builder.cancel_pending_autosave()
+            try:
+                project_data = self.project_manager.load_project(project_path)
+                self._populate_ui_from_project(project_data)
+                self._log_status_message(f"Loaded project: {project_data['project_name']}", 2000)
+            except Exception as e:
+                self._show_error("Load Failed", f"Failed to load project:\n{e}")
+                self._populate_project_name_combo()
 
     def _on_project_name_edited(self):
         """Handle project name editing (rename)."""
@@ -8498,19 +8403,106 @@ Sweeps: {sweeps}"""
         self._project_directory = None
         self._master_file_list = []
         self._discovered_files_data = []
-        self._notes_files_data = []
 
         # Clear UI
         if hasattr(self, 'directoryPathEdit'):
             self.directoryPathEdit.clear()
         if hasattr(self, '_file_table_model'):
             self._file_table_model.clear_all()
-        if hasattr(self, '_notes_model'):
-            self._notes_model.removeRows(0, self._notes_model.rowCount())
         if hasattr(self, 'summaryLabel'):
             self.summaryLabel.setText("Summary: No project loaded")
 
         self._log_status_message("Project closed", 2000)
+
+    def _load_experiments_from_db(self, snapshot_id=None):
+        """Load experiments from central SQLite DB into the master file list.
+
+        Args:
+            snapshot_id: If set, apply that snapshot's filter_query.
+                         If None, load all experiments.
+        """
+        try:
+            experiments, total = self._project_viewmodel.get_all_experiments(
+                snapshot_id=snapshot_id
+            )
+        except Exception as e:
+            print(f"[db-load] Error loading experiments: {e}")
+            return
+
+        if not experiments:
+            print("[db-load] No experiments in DB")
+            return
+
+        # Ensure all rows have required fields for the table model
+        for row in experiments:
+            row.setdefault('channel', '')
+            row.setdefault('stim_channel', '')
+            row.setdefault('events_channel', '')
+            row.setdefault('stim_channels', [])
+            row.setdefault('stim_frequency', '')
+            row.setdefault('strain', '')
+            row.setdefault('state', '')
+            row.setdefault('stim_type', '')
+            row.setdefault('power', '')
+            row.setdefault('sex', '')
+            row.setdefault('animal_id', '')
+            row.setdefault('status', 'pending')
+            row.setdefault('export_path', '')
+            row.setdefault('export_date', '')
+            row.setdefault('export_version', '')
+            row.setdefault('exports', {})
+            row.setdefault('keywords_display', '')
+
+        self._master_file_list = experiments
+        self._active_snapshot_id = snapshot_id
+        self._rebuild_table_from_master_list()
+        self._auto_fit_table_columns()
+
+        # Update summary
+        label = f"Summary: {total} experiments"
+        if snapshot_id is not None:
+            # Include snapshot name if available
+            try:
+                snap = self._project_viewmodel.service.store.get_snapshot(snapshot_id)
+                if snap:
+                    label += f" (snapshot: {snap.get('name', '?')})"
+            except Exception:
+                pass
+        if hasattr(self, 'summaryLabel'):
+            self.summaryLabel.setText(label)
+
+        print(f"[db-load] Loaded {len(experiments)} experiments (total={total}, snapshot={snapshot_id})")
+
+    # -------------------------------------------------------------------------
+    # Live DB file watcher
+    # -------------------------------------------------------------------------
+
+    def _setup_db_watcher(self):
+        """Watch the central SQLite DB file for external changes (e.g. MCP updates)."""
+        from PyQt6.QtCore import QFileSystemWatcher, QTimer
+        from core.adapters.experiment_store import _db_path
+
+        db_file = str(_db_path())
+        self._db_watcher = QFileSystemWatcher(self)
+        self._db_watcher.addPath(db_file)
+        self._db_watcher.fileChanged.connect(self._on_db_file_changed)
+
+        self._db_refresh_timer = QTimer(self)
+        self._db_refresh_timer.setSingleShot(True)
+        self._db_refresh_timer.setInterval(2000)  # 2s debounce
+        self._db_refresh_timer.timeout.connect(self._do_db_refresh)
+
+    def _on_db_file_changed(self, path):
+        """DB file changed on disk — debounce and reload."""
+        self._db_refresh_timer.start()  # restart 2s timer
+        # Re-add path (QFileSystemWatcher removes it after change on some platforms)
+        if path not in self._db_watcher.files():
+            self._db_watcher.addPath(path)
+
+    def _do_db_refresh(self):
+        """Reload experiments from DB after debounce period."""
+        print("[db-watcher] DB changed externally, refreshing table...")
+        self._load_experiments_from_db(snapshot_id=self._active_snapshot_id)
 
     def _connect_project_builder_buttons(self):
         """Connect signals for Project Builder buttons defined in .ui file."""
@@ -8526,44 +8518,17 @@ Sweeps: {sweeps}"""
         if hasattr(self, 'tableFullContentCheckbox'):
             self.tableFullContentCheckbox.stateChanged.connect(self._on_table_column_mode_changed)
 
-        # Initialize AI Notebook Manager and connect chatbot panel widgets
-        from core.ai_notebook_manager import AINotebookManager
-        self._ai_notebook = AINotebookManager(self)
-        if hasattr(self, 'chatSendButton'):
-            self.chatSendButton.clicked.connect(self._ai_notebook.on_chat_send)
-        if hasattr(self, 'chatInputEdit'):
-            self.chatInputEdit.returnPressed.connect(self._ai_notebook.on_chat_send)
-        if hasattr(self, 'chatSettingsButton'):
-            self.chatSettingsButton.clicked.connect(self._ai_notebook.open_ai_settings)
-        if hasattr(self, 'chatClearButton'):
-            self.chatClearButton.clicked.connect(self._ai_notebook.clear_chat_history)
-        if hasattr(self, 'chatStopButton'):
-            self.chatStopButton.clicked.connect(self._ai_notebook.on_chat_stop)
-
-        # Initialize model selection combo
-        if hasattr(self, 'modelSelectCombo'):
-            self._ai_notebook.init_model_selector()
-
-        # Initialize Code Notebook Manager and connect widgets
-        from core.code_notebook_manager import CodeNotebookManager
-        self._code_notebook = CodeNotebookManager(self)
-        if hasattr(self, 'runCodeButton'):
-            self.runCodeButton.clicked.connect(self._code_notebook.on_run_code)
-        if hasattr(self, 'clearOutputButton'):
-            self.clearOutputButton.clicked.connect(self._code_notebook.on_clear_code_output)
-
-        # Add Pop Out and Save Figure buttons to notebook header
-        self._code_notebook.add_notebook_extra_buttons()
-
         # Connect table filter widgets
         if hasattr(self, 'tableFilterEdit'):
             self.tableFilterEdit.textChanged.connect(self._on_table_filter_changed)
         if hasattr(self, 'filterColumnCombo'):
             self.filterColumnCombo.currentIndexChanged.connect(self._on_table_filter_changed)
 
-        # Set up main horizontal splitter (left column vs AI assistant, 75%/25%)
+        # Hide AI chatbot panel — replaced by Claude Code CLI (launched externally)
+        if hasattr(self, 'chatbotPanel'):
+            self.chatbotPanel.setVisible(False)
         if hasattr(self, 'mainContentSplitter'):
-            self.mainContentSplitter.setSizes([750, 250])
+            self.mainContentSplitter.setSizes([1000, 0])
 
     def _on_table_column_mode_changed(self, state):
         """Handle toggle of the 'Show Full Content' checkbox."""
@@ -8836,44 +8801,31 @@ Sweeps: {sweeps}"""
                 self.projectProgressBar.setFormat(f"Loading files: {i + 1}/{total_files} ({progress_pct}%)")
                 QApplication.processEvents()
 
-        # Sync master file list with discovered files
-        self._master_file_list = [dict(f) for f in self._discovered_files_data]
+        # Import files into SQLite DB (upsert so existing metadata is preserved)
+        try:
+            store = self._project_viewmodel.service.store
+            for file_data in self._discovered_files_data:
+                db_data = {}
+                for k, v in file_data.items():
+                    if k in ('path_keywords', 'stim_channels', 'exports'):
+                        continue  # Skip non-DB fields
+                    if isinstance(v, Path):
+                        v = str(v)
+                    db_data[k] = v
+                store.upsert_experiment(db_data)
+            print(f"[project-import] Imported {len(self._discovered_files_data)} files to DB")
+        except Exception as e:
+            print(f"[project-import] DB import error: {e}")
 
-        # Rebuild the table using the model
-        self._rebuild_table_from_master_list()
-
-        # Auto-fit columns
-        self._auto_fit_table_columns()
+        # Load from DB to get experiment_ids and canonical data
+        self._load_experiments_from_db()
 
         # Hide progress bar
         self.projectProgressBar.setVisible(False)
         self.projectProgressBar.setValue(0)
 
-        # Update summary
-        summary_text = f"Summary: {len(self._discovered_files_data)} ABF files | {len(protocols)} protocols"
-        self.summaryLabel.setText(summary_text)
-
-        # Restore notes data if available
-        if project_data.get('notes_directory'):
-            self._notes_directory = project_data['notes_directory']
-            if hasattr(self, 'notesFolderEdit'):
-                self.notesFolderEdit.setText(self._notes_directory)
-        if project_data.get('notes_files'):
-            self._notes_files_data = project_data['notes_files']
-            # Populate notes table
-            self._populate_notes_table_from_data()
-
         # Populate consolidation source list with analyzed files from project
         self._populate_consolidation_source_list()
-
-        # Note: Old experiment structure is ignored - we now use the flat master file list
-        # If old project had experiments, their task data could be migrated here if needed
-
-    def _populate_notes_table_from_data(self):
-        """Populate notes table. Delegates to NotesPreviewManager."""
-        self._notes_preview_manager.populate_notes_table_from_data()
-
-    # NOTE: _load_experiments_from_project method removed - no longer using experiment tree
 
     def _ask_locate_project(self, project_name, expected_path):
         """

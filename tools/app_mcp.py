@@ -91,10 +91,88 @@ def app_list_commands(args):
 
 @server.tool(
     name="app_refresh_project",
-    description="Force the app to reload the project file from disk. Useful after MCP tools modify the .physiometrics file on a network drive.",
+    description="Force the app to reload the experiment table from the SQLite DB. Use after MCP tools modify experiment metadata so the table reflects latest data without a restart.",
 )
 def app_refresh_project(args):
     return _call("refresh_project")
+
+
+@server.tool(
+    name="app_reload",
+    description="Trigger hot reload (Ctrl+R equivalent). Reloads dialog modules, plotting, and core processing code without restarting the app. Use after modifying non-main.py files.",
+)
+def app_reload(args):
+    return _call("reload")
+
+
+@server.tool(
+    name="app_switch_tab",
+    description="Switch to a named tab in the app. Use 'data_files' or 'consolidate' for sub-tabs, 'project'/'analysis'/'curation' for top-level pages.",
+    params={
+        "tab": {"type": "string", "description": "Tab name: 'project', 'analysis', 'curation', 'data_files', 'consolidate'"},
+    },
+    required=["tab"],
+)
+def app_switch_tab(args):
+    return _call("switch_tab", args)
+
+
+@server.tool(
+    name="app_click_button",
+    description="Click a named button in the app UI. Use the button's Qt object name (e.g. 'scanFilesButton', 'saveProjectButton').",
+    params={
+        "button": {"type": "string", "description": "Button object name"},
+    },
+    required=["button"],
+)
+def app_click_button(args):
+    return _call("click_button", args)
+
+
+@server.tool(
+    name="app_open_dialog",
+    description="Open a dialog by name. Available: 'peak_detection', 'analysis_options', 'help'.",
+    params={
+        "dialog": {"type": "string", "description": "Dialog name"},
+    },
+    required=["dialog"],
+)
+def app_open_dialog(args):
+    return _call("open_dialog", args)
+
+
+@server.tool(
+    name="app_close_dialog",
+    description="Close the active modal dialog.",
+)
+def app_close_dialog(args):
+    return _call("close_dialog")
+
+
+@server.tool(
+    name="app_get_ui_state",
+    description="Get current UI state: active tab, open dialogs, selected table rows.",
+)
+def app_get_ui_state(args):
+    return _call("get_ui_state")
+
+
+@server.tool(
+    name="app_screenshot",
+    description="Capture a screenshot of the app window. Returns a PNG path that Claude can view with the Read tool. Use this to see the current UI state for layout adjustments.",
+    params={
+        "target": {
+            "type": "string",
+            "description": "What to capture: 'main' (full window, default), 'project' (project builder tab), 'plot' (plot area)",
+        },
+    },
+)
+def app_screenshot(args):
+    result = _call("screenshot", {
+        "target": args.get("target", "main"),
+        "output_path": args.get("output_path", ""),
+    })
+    return result
 
 
 # ============================================================

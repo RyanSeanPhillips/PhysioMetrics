@@ -27,6 +27,25 @@ DEFAULT_PORT = 19847
 _ENV_PORT_KEY = "PHYSIOMETRICS_BRIDGE_PORT"
 
 
+class _MainThreadDispatcher:
+    """Helper to dispatch callables to the main Qt thread via signal."""
+    _instance = None
+
+    @classmethod
+    def get(cls, parent=None):
+        if cls._instance is None and parent is not None:
+            from PyQt6.QtCore import QObject, pyqtSignal
+            class _Dispatcher(QObject):
+                run_on_main = pyqtSignal(object)
+                def __init__(self, p):
+                    super().__init__(p)
+                    self.run_on_main.connect(self._execute)
+                def _execute(self, fn):
+                    fn()
+            cls._instance = _Dispatcher(parent)
+        return cls._instance
+
+
 class AppBridgeService:
     """
     TCP server that runs inside the PhysioMetrics app, exposing state to MCP tools.
@@ -35,14 +54,17 @@ class AppBridgeService:
     bridge.register("command_name", callable).
     """
 
-    def __init__(self, get_state_fn: Optional[Callable] = None, port: int = 0):
+    def __init__(self, get_state_fn: Optional[Callable] = None, port: int = 0,
+                 main_window=None):
         """
         Args:
             get_state_fn: Callable that returns the current AppState object.
             port: TCP port (0 = use DEFAULT_PORT or env var).
+            main_window: Reference to the MainWindow for screenshot capture.
         """
         import os
         self._get_state = get_state_fn
+        self._main_window = main_window
         self._port = port or int(os.environ.get(_ENV_PORT_KEY, DEFAULT_PORT))
         self._handlers: Dict[str, Callable] = {}
         self._server_socket: Optional[socket.socket] = None
@@ -67,6 +89,10 @@ class AppBridgeService:
         """Start the TCP listener on a background thread."""
         if self._running:
             return
+
+        # Initialize the main-thread dispatcher (must happen on main thread)
+        if self._main_window is not None:
+            _MainThreadDispatcher.get(self._main_window)
 
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -248,6 +274,474 @@ class AppBridgeService:
         @self.handler("list_commands")
         def list_commands(args):
             return {"commands": sorted(self._handlers.keys())}
+
+        @self.handler("switch_tab")
+        def switch_tab(args):
+            """Switch to a named tab in the main window.
+
+            Args:
+                tab: "project"|"analysis"|"curation"|"data_files"|"consolidate"
+            """
+            tab_name = args.get("tab", "")
+            if not self._main_window:
+                return {"error": "No main window"}
+
+            result_holder = {}
+            event = threading.Event()
+
+            def _switch():
+                try:
+                    mw = self._main_window
+                    # Main tabs (leftColumnTabs)
+                    TAB_MAP = {
+                        "data_files": "tableContainer",
+                        "consolidate": "consolidationContainer",
+                    }
+                    # Top-level tool box pages
+                    TOP_TAB_MAP = {
+                        "project": "projectPage",
+                        "analysis": "analysisPage",
+                        "curation": "curationPage",
+                    }
+
+                    widget_name = TAB_MAP.get(tab_name)
+                    if widget_name and hasattr(mw, 'leftColumnTabs'):
+                        tabs = mw.leftColumnTabs
+                        for i in range(tabs.count()):
+                            w = tabs.widget(i)
+                            if w and w.objectName() == widget_name:
+                                tabs.setCurrentIndex(i)
+                                result_holder["switched"] = tab_name
+                                return
+
+                    top_name = TOP_TAB_MAP.get(tab_name)
+                    if top_name and hasattr(mw, 'mainToolBox'):
+                        tb = mw.mainToolBox
+                        for i in range(tb.count()):
+                            w = tb.widget(i)
+                            if w and w.objectName() == top_name:
+                                tb.setCurrentIndex(i)
+                                result_holder["switched"] = tab_name
+                                return
+
+                    result_holder["error"] = f"Unknown tab: {tab_name}"
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            if dispatcher is None:
+                raise RuntimeError("No main thread dispatcher")
+            dispatcher.run_on_main.emit(_switch)
+            event.wait(timeout=5)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("click_button")
+        def click_button(args):
+            """Click a named button in the UI.
+
+            Args:
+                button: Button object name (e.g. "scanFilesButton", "saveProjectButton")
+            """
+            button_name = args.get("button", "")
+            if not self._main_window:
+                return {"error": "No main window"}
+
+            result_holder = {}
+            event = threading.Event()
+
+            def _click():
+                try:
+                    mw = self._main_window
+                    btn = getattr(mw, button_name, None)
+                    if btn is None:
+                        result_holder["error"] = f"Button not found: {button_name}"
+                        return
+                    btn.click()
+                    result_holder["clicked"] = button_name
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            dispatcher.run_on_main.emit(_click)
+            event.wait(timeout=5)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("open_dialog")
+        def open_dialog(args):
+            """Open a dialog by name.
+
+            Args:
+                dialog: "peak_detection"|"export"|"analysis_options"|"spectral"|"advanced_peak_editor"|"help"
+            """
+            dialog_name = args.get("dialog", "")
+            if not self._main_window:
+                return {"error": "No main window"}
+
+            DIALOG_MAP = {
+                "peak_detection": "_show_peak_detection_dialog",
+                "analysis_options": "_show_analysis_options_dialog",
+                "help": "_show_help_dialog",
+            }
+
+            method_name = DIALOG_MAP.get(dialog_name)
+            if not method_name:
+                return {"error": f"Unknown dialog: {dialog_name}. Available: {list(DIALOG_MAP.keys())}"}
+
+            result_holder = {}
+            event = threading.Event()
+
+            def _open():
+                try:
+                    mw = self._main_window
+                    method = getattr(mw, method_name, None)
+                    if method:
+                        method()
+                        result_holder["opened"] = dialog_name
+                    else:
+                        result_holder["error"] = f"Method not found: {method_name}"
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            dispatcher.run_on_main.emit(_open)
+            event.wait(timeout=5)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("close_dialog")
+        def close_dialog(args):
+            """Close the active modal dialog."""
+            if not self._main_window:
+                return {"error": "No main window"}
+
+            result_holder = {}
+            event = threading.Event()
+
+            def _close():
+                try:
+                    from PyQt6.QtWidgets import QApplication
+                    active = QApplication.activeModalWidget()
+                    if active:
+                        active.close()
+                        result_holder["closed"] = True
+                    else:
+                        result_holder["closed"] = False
+                        result_holder["note"] = "No modal dialog open"
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            dispatcher.run_on_main.emit(_close)
+            event.wait(timeout=5)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("get_ui_state")
+        def get_ui_state(args):
+            """Get current UI state: active tab, open dialogs, selected rows."""
+            if not self._main_window:
+                return {"error": "No main window"}
+
+            result_holder = {}
+            event = threading.Event()
+
+            def _get():
+                try:
+                    from PyQt6.QtWidgets import QApplication
+                    mw = self._main_window
+
+                    # Active tab
+                    active_tab = ""
+                    if hasattr(mw, 'leftColumnTabs'):
+                        idx = mw.leftColumnTabs.currentIndex()
+                        w = mw.leftColumnTabs.widget(idx)
+                        if w:
+                            active_tab = w.objectName()
+
+                    # Open dialogs
+                    dialogs = []
+                    for tlw in QApplication.topLevelWidgets():
+                        if tlw is not mw and tlw.isVisible():
+                            dialogs.append({
+                                "title": tlw.windowTitle(),
+                                "class": type(tlw).__name__,
+                            })
+
+                    # Selected rows in file table
+                    selected_rows = []
+                    if hasattr(mw, 'discoveredFilesTable'):
+                        sel_model = mw.discoveredFilesTable.selectionModel()
+                        if sel_model:
+                            for idx in sel_model.selectedRows():
+                                selected_rows.append(idx.row())
+
+                    result_holder.update({
+                        "active_tab": active_tab,
+                        "open_dialogs": dialogs,
+                        "selected_rows": selected_rows,
+                    })
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            dispatcher.run_on_main.emit(_get)
+            event.wait(timeout=5)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("open_source_review")
+        def open_source_review(args):
+            """Open the source review dialog for a table row.
+
+            Args:
+                row: Row index in the data files table.
+            """
+            row = args.get("row", 0)
+            result_holder = {}
+            event = threading.Event()
+
+            def _do():
+                try:
+                    mw = self._main_window
+                    if hasattr(mw, '_open_source_review'):
+                        mw._open_source_review(row)
+                        result_holder["opened"] = True
+                    else:
+                        result_holder["error"] = "Method not available"
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            if dispatcher is None:
+                raise RuntimeError("No main thread dispatcher")
+            dispatcher.run_on_main.emit(_do)
+            event.wait(timeout=10)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("load_project")
+        def load_project(args):
+            """Load a project by selecting it in the project combo.
+
+            Args:
+                index: Combo index to select (1 = most recent project).
+                       If not provided, selects index 1 (most recent).
+            """
+            idx = args.get("index", 1)
+            result_holder = {}
+            event = threading.Event()
+
+            def _do_load():
+                try:
+                    mw = self._main_window
+                    combo = getattr(mw, 'projectNameCombo', None)
+                    if combo is None:
+                        result_holder["error"] = "projectNameCombo not found"
+                        return
+                    if idx >= combo.count():
+                        result_holder["error"] = f"Index {idx} out of range (max {combo.count() - 1})"
+                        return
+                    combo.setCurrentIndex(idx)
+                    result_holder["loaded"] = combo.currentText()
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            if dispatcher is None:
+                raise RuntimeError("No main thread dispatcher")
+            dispatcher.run_on_main.emit(_do_load)
+            event.wait(timeout=10)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("reload")
+        def reload(args):
+            """Trigger hot reload (same as Ctrl+R) from MCP."""
+            result_holder = {}
+            event = threading.Event()
+
+            def _do_reload():
+                try:
+                    mw = self._main_window
+                    if hasattr(mw, '_on_hot_reload'):
+                        mw._on_hot_reload()
+                        result_holder["reloaded"] = True
+                    else:
+                        result_holder["error"] = "Hot reload not available"
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            if dispatcher is None:
+                raise RuntimeError("No main thread dispatcher")
+            dispatcher.run_on_main.emit(_do_reload)
+            event.wait(timeout=10)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("refresh_project")
+        def refresh_project(args):
+            """Reload the experiment table from the SQLite DB.
+
+            Use after MCP tools modify experiment metadata so the app
+            table reflects the latest data without a full restart.
+            """
+            result_holder = {}
+            event = threading.Event()
+
+            def _do_refresh():
+                try:
+                    mw = self._main_window
+                    if hasattr(mw, '_load_experiments_from_db'):
+                        mw._load_experiments_from_db()
+                        result_holder["refreshed"] = True
+                        # Get new count
+                        if hasattr(mw, '_master_file_list'):
+                            result_holder["experiment_count"] = len(mw._master_file_list)
+                    else:
+                        result_holder["error"] = "_load_experiments_from_db not found"
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            if dispatcher is None:
+                raise RuntimeError("No main thread dispatcher")
+            dispatcher.run_on_main.emit(_do_refresh)
+            event.wait(timeout=15)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+            return result_holder
+
+        @self.handler("screenshot")
+        def screenshot(args):
+            """Capture a screenshot of the app window or a specific widget.
+
+            Args:
+                target: "main" (default), "project", "plot", or "full" (entire window)
+                output_path: Optional path to save PNG (auto-generates if omitted)
+            """
+            if self._main_window is None:
+                return {"error": "No main window reference available"}
+
+            target = args.get("target", "main")
+            output_path = args.get("output_path", "")
+
+            # Must run on the main Qt thread — use a thread-safe result holder
+            result_holder = {}
+            event = threading.Event()
+
+            def _capture():
+                try:
+                    from PyQt6.QtWidgets import QApplication
+                    import tempfile, os
+
+                    mw = self._main_window
+                    widget = None
+
+                    if target == "dialog":
+                        # Capture the active modal/modeless dialog
+                        active = QApplication.activeModalWidget() or QApplication.activeWindow()
+                        if active and active is not mw:
+                            widget = active
+                        else:
+                            # Check for any visible top-level dialog
+                            for tlw in QApplication.topLevelWidgets():
+                                if tlw is not mw and tlw.isVisible():
+                                    widget = tlw
+                                    break
+                        if widget is None:
+                            result_holder["error"] = "No dialog is currently open"
+                            return
+                    elif target == "project":
+                        # Try to find the project builder tab/widget
+                        for attr in ('project_builder_manager', '_project_builder'):
+                            mgr = getattr(mw, attr, None)
+                            if mgr:
+                                tab_widget = getattr(mgr, 'tab_widget', None) or getattr(mgr, '_tab', None)
+                                if tab_widget:
+                                    widget = tab_widget
+                                    break
+                        if widget is None:
+                            widget = mw
+                    elif target == "plot":
+                        # Try to find the plot area
+                        for attr in ('plot_widget', 'graphics_view', '_plot_manager'):
+                            w = getattr(mw, attr, None)
+                            if w:
+                                widget = getattr(w, 'widget', w) if hasattr(w, 'widget') else w
+                                break
+                        if widget is None:
+                            widget = mw
+                    else:
+                        widget = mw
+
+                    # Capture
+                    pixmap = widget.grab()
+
+                    # Save
+                    if not output_path:
+                        tmp_dir = os.path.join(tempfile.gettempdir(), "physiometrics_screenshots")
+                        os.makedirs(tmp_dir, exist_ok=True)
+                        from datetime import datetime
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        save_path = os.path.join(tmp_dir, f"screenshot_{target}_{ts}.png")
+                    else:
+                        save_path = output_path
+
+                    pixmap.save(save_path, "PNG")
+                    result_holder["path"] = save_path
+                    result_holder["width"] = pixmap.width()
+                    result_holder["height"] = pixmap.height()
+                except Exception as e:
+                    result_holder["error"] = str(e)
+                finally:
+                    event.set()
+
+            # Dispatch to main Qt thread via signal (thread-safe)
+            dispatcher = _MainThreadDispatcher.get(self._main_window)
+            if dispatcher is None:
+                raise RuntimeError("No main thread dispatcher available")
+            dispatcher.run_on_main.emit(_capture)
+
+            # Wait for result from main thread
+            event.wait(timeout=10)
+            if "error" in result_holder:
+                raise RuntimeError(result_holder["error"])
+
+            return {
+                "screenshot_path": result_holder.get("path", ""),
+                "width": result_holder.get("width", 0),
+                "height": result_holder.get("height", 0),
+                "target": target,
+            }
 
 
 # === Client helper (used by app_mcp.py) ===

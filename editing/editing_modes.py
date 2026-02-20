@@ -530,7 +530,7 @@ class EditingModes:
             return
 
         # Current sweep + processed trace (what user sees)
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -745,7 +745,7 @@ class EditingModes:
             return
 
         # Current sweep & processed trace
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -930,7 +930,7 @@ class EditingModes:
             return
 
         # Current sweep + processed trace (what you're seeing)
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -1113,7 +1113,7 @@ class EditingModes:
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         t, y = self.window._current_trace()
         if t is None or y is None:
             return
@@ -1437,7 +1437,7 @@ class EditingModes:
             if st.t is None or st.analyze_chan not in st.sweeps:
                 return
 
-            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
             t, y = self.window._current_trace()
             if t is None or y is None:
                 return
@@ -1713,7 +1713,7 @@ class EditingModes:
 
         # Check if click is near an existing region edge
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         regions = self.window.state.sniff_regions_by_sweep.get(s, [])
 
         # Convert to plot time for comparison
@@ -1831,7 +1831,7 @@ class EditingModes:
 
         # Convert from normalized time back to actual time if needed
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
 
         if st.stim_chan and spans:
@@ -2175,7 +2175,7 @@ class EditingModes:
 
         # Get current sweep
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
 
         # Check if full sweep is already omitted (unless doing Ctrl+Shift to toggle)
         if s in st.omitted_sweeps and not (ctrl_held and shift_held):
@@ -2189,7 +2189,7 @@ class EditingModes:
             print(f"[omit-region] Ctrl+Shift detected in click handler - toggling full sweep")
             # Get current sweep
             st = self.window.state
-            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
 
             # Toggle sweep omission directly (keep mode active)
             if s in st.omitted_sweeps:
@@ -2214,7 +2214,7 @@ class EditingModes:
 
         # Get current sweep
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
 
         # Get omitted regions for this sweep
         regions = st.omitted_ranges.get(s, [])
@@ -2349,7 +2349,7 @@ class EditingModes:
 
         # Get current sweep and convert plot time to sample indices
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         sr_hz = st.sr_hz if st.sr_hz else 1000.0
 
         # Adjust for stim normalization
@@ -2488,7 +2488,7 @@ class EditingModes:
             # Ctrl+Shift+Click: Toggle full sweep omission
             if ctrl_held and shift_held:
                 st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
                 if s in st.omitted_sweeps:
                     st.omitted_sweeps.discard(s)
                     # Clear any omitted regions for this sweep as well
@@ -2522,7 +2522,7 @@ class EditingModes:
             # Ctrl+Click: Delete region under cursor
             if ctrl_held and not shift_held:
                 st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
                 sr_hz = st.sr_hz if st.sr_hz else 1000.0
                 spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
                 t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
@@ -2550,7 +2550,7 @@ class EditingModes:
 
             # Normal click - check for edge grab or start new region
             st = self.window.state
-            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
             sr_hz = st.sr_hz if st.sr_hz else 1000.0
             spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
             t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
@@ -2615,7 +2615,7 @@ class EditingModes:
 
             # Get current sweep and convert to sample indices
             st = self.window.state
-            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
             sr_hz = st.sr_hz if st.sr_hz else 1000.0
 
             spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
@@ -2680,7 +2680,7 @@ class EditingModes:
     def _snap_all_omit_regions_to_breaths(self):
         """Snap all omitted regions on current sweep to breath onsets (onset to onset)."""
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
 
         if s not in st.omitted_ranges:
             try: self.window._log_status_message("No omitted regions to snap on this sweep", 2000)
@@ -2933,7 +2933,7 @@ class EditingModes:
             # If 2 peaks are already selected, check for click on selected peaks to merge
             if len(self._selected_peaks) == 2:
                 st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
                 t, y = self.window._current_trace()
                 if t is not None:
                     spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
@@ -2993,7 +2993,7 @@ class EditingModes:
             if st.t is None or st.analyze_chan not in st.sweeps:
                 return
 
-            s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
             pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
             if pks.size == 0:
                 print("[merge-peaks] No peaks in this sweep")
@@ -3103,7 +3103,7 @@ class EditingModes:
             # Single click - check if near one of the selected peaks to merge
             if not event.dblclick:  # Ignore double-clicks (they're for matplotlib zoom)
                 st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
                 t, y = self.window._current_trace()
                 if t is None:
                     return
@@ -3198,7 +3198,7 @@ class EditingModes:
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
         if pks.size == 0:
             print("[merge-peaks] No peaks in this sweep")
@@ -3274,7 +3274,7 @@ class EditingModes:
             return
 
         st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window.navigation_manager._sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
         pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
 
         if pks.size == 0:

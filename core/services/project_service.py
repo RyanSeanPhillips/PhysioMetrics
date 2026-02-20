@@ -680,6 +680,58 @@ class ProjectService:
         """List registered source documents."""
         return self.store.get_sources()
 
+    def bulk_link_source(self, source_id: int, links: List[Dict[str, Any]]) -> int:
+        """Batch-create source_links from a single document. Returns count added."""
+        return self.store.bulk_add_links(source_id, links)
+
+    def detect_disagreements(self, animal_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Find fields where multiple sources disagree on value for an animal."""
+        return self.store.get_disagreements(animal_id)
+
+    def split_multi_animal(self, file_path: str, mappings: List[Dict[str, Any]]) -> List[int]:
+        """Split a multi-animal recording into separate experiment rows.
+
+        Uses existing experiment as metadata template. Creates one row per
+        animal+channel mapping. Deletes the original blank-animal row if present.
+
+        Args:
+            file_path: Path to the multi-animal recording file.
+            mappings: List of dicts with keys: animal_id, channel, and optional
+                      sex, strain, experiment_name, etc.
+
+        Returns:
+            List of created experiment_ids.
+        """
+        abs_path = self._to_absolute(file_path)
+
+        # Find existing experiment(s) for this file as template
+        existing = self.store.get_experiments_by_file(abs_path)
+        if not existing:
+            existing = self.store.get_experiments_by_file(file_path)
+
+        template = dict(existing[0]) if existing else {"file_path": abs_path}
+        # Clean template of row-specific fields
+        for key in ('experiment_id', 'created_at', 'updated_at', 'animal_id', 'channel'):
+            template.pop(key, None)
+        template['file_path'] = abs_path
+
+        created_ids = []
+        for mapping in mappings:
+            entry = dict(template)
+            entry.update(mapping)
+            entry['file_path'] = abs_path
+            eid = self.store.upsert_experiment(entry)
+            created_ids.append(eid)
+
+        # Delete original blank-animal row if it exists
+        for exp in existing:
+            if not exp.get('animal_id', '').strip():
+                self.store.delete_experiment(exp['experiment_id'])
+
+        self._refresh_files_from_db()
+        self._dirty = True
+        return created_ids
+
     # ------------------------------------------------------------------
     # Cross-experiment queries
     # ------------------------------------------------------------------

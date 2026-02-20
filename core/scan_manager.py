@@ -356,6 +356,26 @@ class ScanManager:
                 else:
                     print(f"[scan-manager] Failed to extract metadata from {fp_path}")
 
+            # Upsert new files into SQLite DB
+            if new_files_data:
+                try:
+                    store = self.mw._project_viewmodel.service.store
+                    for fi in new_files_data:
+                        # Convert Path to string for DB storage
+                        db_data = {k: (str(v) if isinstance(v, Path) else v)
+                                   for k, v in fi.items()
+                                   if k not in ('path_keywords', 'stim_channels',
+                                                'exports', 'signal_columns',
+                                                'led_states', 'led_info',
+                                                'has_ai_data', 'ai_data_path',
+                                                'has_npz', 'npz_path',
+                                                'duration_sec', 'sample_rate')}
+                        eid = store.upsert_experiment(db_data)
+                        fi['experiment_id'] = eid
+                    print(f"[scan-manager] Upserted {len(new_files_data)} experiments to DB")
+                except Exception as e:
+                    print(f"[scan-manager] DB upsert error: {e}")
+
             # Rebuild table
             self.mw._rebuild_table_from_master_list()
             self.mw._auto_fit_table_columns()

@@ -134,11 +134,12 @@ def project_get_files(args):
         "sweep_count", "file_type", "keywords_display", "group_name",
         "tags", "notes", "weight", "age", "date_recorded",
     }
+    # Strip empty values and internal-only fields to reduce token count
+    EXCLUDE = {'experiment_id', 'created_at', 'updated_at'}
     simplified = []
     for f in files:
-        entry = {k: v for k, v in f.items() if (k in KEEP_KEYS or k not in (
-            'experiment_id', 'created_at', 'updated_at',
-        )) and v}
+        entry = {k: v for k, v in f.items()
+                 if k not in EXCLUDE and v not in (None, '', 0, '0', 'False', '[]')}
         simplified.append(entry)
 
     return {"total": total, "offset": offset, "limit": limit, "files": simplified}
@@ -390,6 +391,82 @@ def get_source_links(args):
         field=args.get("field"),
     )
     return {"links": links, "count": len(links)}
+
+
+# ============================================================
+# NEW TOOLS: Multi-Animal Split & Bulk Source Linking
+# ============================================================
+
+
+@server.tool(
+    name="project_split_multi_animal",
+    description="Split a multi-animal recording into separate experiment rows. "
+                "Provide channel-to-animal mappings from notes files. "
+                "Uses existing experiment metadata as template.",
+    params={
+        "file_path": {"type": "string", "description": "Path to multi-animal recording"},
+        "mappings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "animal_id": {"type": "string"},
+                    "channel": {"type": "string", "description": "e.g. 'IN 0'"},
+                    "sex": {"type": "string"},
+                    "strain": {"type": "string"},
+                },
+            },
+            "description": "One entry per animal in the file",
+        },
+    },
+    required=["file_path", "mappings"],
+)
+def project_split_multi_animal(args):
+    created = svc().split_multi_animal(
+        _resolve(args["file_path"]),
+        args["mappings"],
+    )
+    return {"created_experiment_ids": created, "count": len(created)}
+
+
+@server.tool(
+    name="project_bulk_link_source",
+    description="Create multiple source_links at once from a single document. "
+                "Much faster than calling link_source repeatedly.",
+    params={
+        "source_id": {"type": "integer", "description": "Source document ID (from add_source)"},
+        "links": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "animal_id": {"type": "string"},
+                    "field": {"type": "string"},
+                    "value": {"type": "string"},
+                    "location": {"type": "string", "description": "JSON: {sheet, row, col, cell_ref, snippet}"},
+                    "confidence": {"type": "number", "default": 0.9},
+                },
+            },
+        },
+    },
+    required=["source_id", "links"],
+)
+def project_bulk_link_source(args):
+    count = svc().bulk_link_source(args["source_id"], args["links"])
+    return {"links_created": count}
+
+
+@server.tool(
+    name="project_detect_disagreements",
+    description="Find fields where multiple sources disagree on value for an animal. "
+                "Use this to identify conflicting metadata that needs resolution.",
+    params={
+        "animal_id": {"type": "string", "description": "Optional: filter by animal ID"},
+    },
+)
+def project_detect_disagreements(args):
+    disagreements = svc().detect_disagreements(animal_id=args.get("animal_id"))
+    return {"disagreements": disagreements, "count": len(disagreements)}
 
 
 # ============================================================

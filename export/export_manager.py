@@ -1678,7 +1678,7 @@ class ExportManager:
         if not preview_only:
             # --- Build an auto stim string from current sweep metrics, if available ---
             def _auto_stim_from_metrics() -> str:
-                s = max(0, min(getattr(st, "sweep_idx", 0), self.window.navigation_manager._sweep_count()-1))
+                s = max(0, min(getattr(st, "sweep_idx", 0), self.window._nav_vm.sweep_count()-1))
                 m = st.stim_metrics_by_sweep.get(s, {}) if getattr(st, "stim_metrics_by_sweep", None) else {}
                 if not m:
                     return ""

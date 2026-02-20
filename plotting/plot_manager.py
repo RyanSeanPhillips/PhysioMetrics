@@ -261,7 +261,9 @@ class PlotManager:
         st = self.state
 
         # Check backend and route to appropriate implementation
-        if st.plotting_backend == 'pyqtgraph':
+        # Use plot_host type as authoritative check (state field can become stale)
+        is_pyqtgraph = st.plotting_backend == 'pyqtgraph' or hasattr(self.plot_host, 'graphics_layout')
+        if is_pyqtgraph:
             import time as _time
             t0 = _time.perf_counter()
             self._draw_channels_pyqtgraph(channel_configs, grid_mode)
