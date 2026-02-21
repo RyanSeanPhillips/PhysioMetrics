@@ -2792,6 +2792,9 @@ class PlotManager:
 
     def _restore_editing_mode_connections(self):
         """Restore matplotlib event connections for active editing modes after redraw."""
+        # PyQtGraph uses eventFilter — no mpl_connect needed
+        if not hasattr(self.window.plot_host, 'canvas') or not hasattr(self.window.plot_host.canvas, 'mpl_connect'):
+            return
         editing = self.window.editing_modes
 
         # DON'T reconnect _cid_button - it survives fig.clear() and reconnecting creates duplicates!

@@ -16,14 +16,55 @@ from PyQt6.QtWidgets import QApplication
 class EditingModes:
     """Manages all editing mode states and operations for the main window."""
 
-    def __init__(self, parent_window):
+    def __init__(self, parent_window, *, state=None, plot_host=None, nav_vm=None,
+                 buttons=None, callbacks=None):
         """
         Initialize editing modes manager.
 
         Args:
-            parent_window: Reference to MainWindow instance
+            parent_window: Reference to MainWindow (kept for backward compat during migration)
+            state: AppState instance (defaults to parent_window.state)
+            plot_host: PlotHost widget (defaults to parent_window.plot_host)
+            nav_vm: Navigation ViewModel (defaults to parent_window._nav_vm)
+            buttons: Dict of button name -> QPushButton widget
+            callbacks: Dict of callback name -> callable:
+                get_current_trace, redraw, log_status, show_instructions,
+                clear_instructions, restore_instructions, compute_y2,
+                run_gmm, refresh_eupnea, refresh_omit_label,
+                update_breath_markers, update_peaks,
+                set_eupnea_out_of_date
         """
-        self.window = parent_window
+        self.window = parent_window  # Kept for PlotManager editing reconnection
+        self.state = state or parent_window.state
+        self.plot_host = plot_host or parent_window.plot_host
+        self._nav_vm = nav_vm or getattr(parent_window, '_nav_vm', None)
+
+        # Callbacks for MainWindow methods
+        cb = callbacks or {}
+        self._get_current_trace = cb.get('get_current_trace', getattr(parent_window, '_current_trace', None))
+        self._redraw = cb.get('redraw', getattr(parent_window, 'redraw_main_plot', None))
+        self._log_status = cb.get('log_status', getattr(parent_window, '_log_status_message', None))
+        self._show_instructions = cb.get('show_instructions', getattr(parent_window, '_show_editing_instructions', None))
+        self._clear_instructions = cb.get('clear_instructions', getattr(parent_window, '_clear_editing_instructions', None))
+        self._restore_instructions = cb.get('restore_instructions', getattr(parent_window, '_restore_editing_instructions', None))
+        self._compute_y2 = cb.get('compute_y2', getattr(parent_window, '_compute_y2_all_sweeps', None))
+        self._run_gmm = cb.get('run_gmm', getattr(parent_window, '_run_automatic_gmm_clustering', None))
+        self._refresh_eupnea = cb.get('refresh_eupnea', getattr(parent_window, '_refresh_eupnea_overlays_only', None))
+        self._refresh_omit_label = cb.get('refresh_omit_label', getattr(parent_window, '_refresh_omit_button_label', None))
+        self._update_breath_markers = cb.get('update_breath_markers', getattr(parent_window, 'update_breath_markers', None))
+        self._update_peaks = cb.get('update_peaks', getattr(parent_window, 'update_peaks', None))
+        self._is_auto_gmm_enabled = cb.get('is_auto_gmm_enabled', lambda: getattr(parent_window, 'auto_gmm_enabled', False))
+
+        # Buttons dict
+        btn = buttons or {}
+        self._btn_add_peaks = btn.get('addPeaks', getattr(parent_window, 'addPeaksButton', None))
+        self._btn_merge = btn.get('merge', getattr(parent_window, 'MergeBreathsButton', None))
+        self._btn_move_point = btn.get('movePoint', getattr(parent_window, 'movePointButton', None))
+        self._btn_mark_sniff = btn.get('markSniff', getattr(parent_window, 'markSniffButton', None))
+        self._btn_omit = btn.get('omit', getattr(parent_window, 'OmitSweepButton', None))
+
+        # Persistent status message tracking (shared with MainWindow during migration)
+        self._eupnea_out_of_date = False
 
         # Mode flags
         self._add_peaks_mode = False
@@ -72,34 +113,94 @@ class EditingModes:
 
     def _connect_buttons(self):
         """Connect all editing mode button signals."""
-        # Set buttons as checkable
-        self.window.addPeaksButton.setCheckable(True)
-        if hasattr(self.window, 'MergeBreathsButton'):
-            self.window.MergeBreathsButton.setCheckable(True)
-        self.window.movePointButton.setCheckable(True)
-        self.window.markSniffButton.setCheckable(True)
+        if self._btn_add_peaks:
+            self._btn_add_peaks.setCheckable(True)
+            self._btn_add_peaks.toggled.connect(self.on_add_peaks_toggled)
+        if self._btn_merge:
+            self._btn_merge.setCheckable(True)
+            self._btn_merge.toggled.connect(self.on_merge_peaks_toggled)
+        if self._btn_move_point:
+            self._btn_move_point.setCheckable(True)
+            self._btn_move_point.toggled.connect(self.on_move_point_toggled)
+        if self._btn_mark_sniff:
+            self._btn_mark_sniff.setCheckable(True)
+            self._btn_mark_sniff.toggled.connect(self.on_mark_sniff_toggled)
+            # HIDDEN: Mark Sniff button is disabled until we implement proper per-peak
+            # eupnea/sniffing editing that syncs with breath_type_class for ML export.
+            self._btn_mark_sniff.setVisible(False)
 
-        # HIDDEN: Mark Sniff button is disabled until we implement proper per-peak
-        # eupnea/sniffing editing that syncs with breath_type_class for ML export.
-        # Currently, manual region edits only update sniff_regions_by_sweep (display)
-        # but NOT breath_type_class (used for ML training export).
-        # TODO: Implement proper breath type editing in a future version.
-        self.window.markSniffButton.setVisible(False)
+    def _set_persistent_status(self, msg):
+        """Set a persistent status message (survives redraws)."""
+        self._log_status(msg, 0)
+        if hasattr(self.window, '_persistent_status_message'):
+            self.window._persistent_status_message = msg
 
-        # Connect signals
-        self.window.addPeaksButton.toggled.connect(self.on_add_peaks_toggled)
-        if hasattr(self.window, 'MergeBreathsButton'):
-            self.window.MergeBreathsButton.toggled.connect(self.on_merge_peaks_toggled)
-        self.window.movePointButton.toggled.connect(self.on_move_point_toggled)
-        self.window.markSniffButton.toggled.connect(self.on_mark_sniff_toggled)
+    def _clear_persistent_status(self):
+        """Clear persistent status message."""
+        self._log_status("", 0)
+        if hasattr(self.window, '_persistent_status_message'):
+            self.window._persistent_status_message = None
+
+    def _set_eupnea_out_of_date(self, value: bool):
+        """Set eupnea out-of-date flag, syncing to MainWindow."""
+        self._eupnea_out_of_date = value
+        if hasattr(self.window, 'eupnea_sniffing_out_of_date'):
+            self.window.eupnea_sniffing_out_of_date = value
 
     def _is_pyqtgraph_backend(self) -> bool:
         """Check if the current plotting backend is PyQtGraph."""
-        return getattr(self.window.state, 'plotting_backend', 'matplotlib') == 'pyqtgraph'
+        return getattr(self.state, 'plotting_backend', 'matplotlib') == 'pyqtgraph'
 
     def _has_matplotlib_canvas(self) -> bool:
-        """Check if the plot host has a matplotlib canvas (for event connections)."""
-        return hasattr(self.window.plot_host, 'canvas') and self.window.plot_host.canvas is not None
+        """Check if the plot host has a real matplotlib canvas (not PyQtGraph self-ref)."""
+        canvas = getattr(self.plot_host, 'canvas', None)
+        return canvas is not None and hasattr(canvas, 'mpl_connect')
+
+    def _clear_render_scatter_items(self):
+        """Remove anonymous scatter items from the main plot (left by PlotManager render).
+
+        During drag, update_breath_markers/update_peaks create tracked scatter items
+        (self._peak_scatter etc.), but the original render creates anonymous ones that
+        remain visible underneath. This removes those anonymous items at drag start.
+        """
+        try:
+            import pyqtgraph as pg
+            main_plot = self.plot_host._get_main_plot()
+            if main_plot is None:
+                return
+            # Tracked scatter refs from the backend
+            backend = self.plot_host
+            tracked = {getattr(backend, attr, None) for attr in
+                       ('_peak_scatter', '_onset_scatter', '_offset_scatter',
+                        '_expmin_scatter', '_expoff_scatter')}
+            tracked.discard(None)
+            # Remove anonymous ScatterPlotItems
+            for item in list(main_plot.items):
+                if isinstance(item, pg.ScatterPlotItem) and item not in tracked:
+                    main_plot.removeItem(item)
+        except Exception:
+            pass
+
+    def _deactivate_merge_mode(self):
+        """Fully deactivate merge mode: flag, button, and callbacks."""
+        self._merge_peaks_mode = False
+        if self._btn_merge is not None:
+            self._btn_merge.blockSignals(True)
+            self._btn_merge.setChecked(False)
+            self._btn_merge.blockSignals(False)
+            self._btn_merge.setText("Merge Breaths")
+        # Clear drag/key callbacks that merge mode registered
+        if self._is_pyqtgraph_backend():
+            if hasattr(self.plot_host, 'clear_drag_callback'):
+                self.plot_host.clear_drag_callback()
+            if hasattr(self.plot_host, 'clear_key_callback'):
+                self.plot_host.clear_key_callback()
+        elif self._has_matplotlib_canvas():
+            for attr in ('_merge_motion_cid', '_merge_release_cid', '_merge_key_cid'):
+                cid = getattr(self, attr, None)
+                if cid is not None:
+                    self.plot_host.canvas.mpl_disconnect(cid)
+                    setattr(self, attr, None)
 
     # ========================================================================
     # Helper Functions for Label-Based Editing
@@ -115,7 +216,7 @@ class EditingModes:
         Args:
             sweep_idx: Sweep index to update
         """
-        st = self.window.state
+        st = self.state
         all_peaks = st.all_peaks_by_sweep.get(sweep_idx)
 
         if all_peaks is None or 'indices' not in all_peaks or 'labels' not in all_peaks:
@@ -137,7 +238,7 @@ class EditingModes:
             peak_sample_idx: Sample index of the peak (position in signal)
             new_label: New label value (0=noise, 1=breath)
         """
-        st = self.window.state
+        st = self.state
         all_peaks = st.all_peaks_by_sweep.get(sweep_idx)
 
         if all_peaks is None or 'indices' not in all_peaks:
@@ -253,9 +354,9 @@ class EditingModes:
         if event.button != 1 or event.xdata is None or event.inaxes is None:
             return
 
-        st = self.window.state
+        st = self.state
         s = self._selected_point['sweep']
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -300,10 +401,10 @@ class EditingModes:
         # Turn off Add Peaks mode
         if getattr(self, "_add_peaks_mode", False):
             self._add_peaks_mode = False
-            self.window.addPeaksButton.blockSignals(True)
-            self.window.addPeaksButton.setChecked(False)
-            self.window.addPeaksButton.blockSignals(False)
-            self.window.addPeaksButton.setText("Add Peaks")
+            self._btn_add_peaks.blockSignals(True)
+            self._btn_add_peaks.setChecked(False)
+            self._btn_add_peaks.blockSignals(False)
+            self._btn_add_peaks.setText("Add Peaks")
 
         # Note: Delete Peaks and Add Sigh modes are now integrated into Add Peaks button
         # Reset their internal state flags if they exist
@@ -315,10 +416,10 @@ class EditingModes:
         # Turn off Move Point mode
         if getattr(self, "_move_point_mode", False):
             self._move_point_mode = False
-            self.window.movePointButton.blockSignals(True)
-            self.window.movePointButton.setChecked(False)
-            self.window.movePointButton.blockSignals(False)
-            self.window.movePointButton.setText("Move Point")
+            self._btn_move_point.blockSignals(True)
+            self._btn_move_point.setChecked(False)
+            self._btn_move_point.blockSignals(False)
+            self._btn_move_point.setText("Move Point")
             # Clean up any selected point visualization
             if self._move_point_artist:
                 self._move_point_artist.remove()
@@ -328,16 +429,16 @@ class EditingModes:
         # Turn off Mark Sniff mode
         if getattr(self, "_mark_sniff_mode", False):
             self._mark_sniff_mode = False
-            self.window.markSniffButton.blockSignals(True)
-            self.window.markSniffButton.setChecked(False)
-            self.window.markSniffButton.blockSignals(False)
-            self.window.markSniffButton.setText("Mark Sniff")
+            self._btn_mark_sniff.blockSignals(True)
+            self._btn_mark_sniff.setChecked(False)
+            self._btn_mark_sniff.blockSignals(False)
+            self._btn_mark_sniff.setText("Mark Sniff")
             # Disconnect matplotlib events if connected
             if self._motion_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self.plot_host.canvas.mpl_disconnect(self._motion_cid)
                 self._motion_cid = None
             if self._release_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self.plot_host.canvas.mpl_disconnect(self._release_cid)
                 self._release_cid = None
             # Clear drag state
             if self._sniff_drag_artist:
@@ -350,20 +451,20 @@ class EditingModes:
         # Turn off Merge Breaths mode
         if getattr(self, "_merge_peaks_mode", False):
             self._merge_peaks_mode = False
-            if hasattr(self.window, 'MergeBreathsButton'):
-                self.window.MergeBreathsButton.blockSignals(True)
-                self.window.MergeBreathsButton.setChecked(False)
-                self.window.MergeBreathsButton.blockSignals(False)
-                self.window.MergeBreathsButton.setText("Merge Breaths")
+            if self._btn_merge is not None:
+                self._btn_merge.blockSignals(True)
+                self._btn_merge.setChecked(False)
+                self._btn_merge.blockSignals(False)
+                self._btn_merge.setText("Merge Breaths")
             # Disconnect matplotlib events
             if getattr(self, '_merge_motion_cid', None) is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
+                self.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
                 self._merge_motion_cid = None
             if getattr(self, '_merge_release_cid', None) is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
+                self.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
                 self._merge_release_cid = None
             if getattr(self, '_merge_key_cid', None) is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
+                self.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
                 self._merge_key_cid = None
             # Clear selection
             self._cancel_merge_selection()
@@ -373,12 +474,12 @@ class EditingModes:
             self._exit_omit_region_mode()
 
         # Clear click callback and reset cursor
-        self.window.plot_host.clear_click_callback()
-        self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+        self.plot_host.clear_click_callback()
+        self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
 
         # Clear editing instructions from status bar
         try:
-            self.window._clear_editing_instructions()
+            self._clear_instructions()
         except Exception:
             pass
 
@@ -393,7 +494,7 @@ class EditingModes:
 
         if checked:
             # Turn off matplotlib toolbar modes (zoom, pan)
-            self.window.plot_host.turn_off_toolbar_modes()
+            self.plot_host.turn_off_toolbar_modes()
 
             # turn OFF delete mode
             if getattr(self, "_delete_peaks_mode", False):
@@ -406,35 +507,30 @@ class EditingModes:
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
-                self.window.movePointButton.blockSignals(True)
-                self.window.movePointButton.setChecked(False)
-                self.window.movePointButton.blockSignals(False)
-                self.window.movePointButton.setText("Move Point")
+                self._btn_move_point.blockSignals(True)
+                self._btn_move_point.setChecked(False)
+                self._btn_move_point.blockSignals(False)
+                self._btn_move_point.setText("Move Point")
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False
-                self.window.markSniffButton.blockSignals(True)
-                self.window.markSniffButton.setChecked(False)
-                self.window.markSniffButton.blockSignals(False)
-                self.window.markSniffButton.setText("Mark Sniff")
+                self._btn_mark_sniff.blockSignals(True)
+                self._btn_mark_sniff.setChecked(False)
+                self._btn_mark_sniff.blockSignals(False)
+                self._btn_mark_sniff.setText("Mark Sniff")
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
-                self._merge_peaks_mode = False
-                if hasattr(self.window, 'MergeBreathsButton'):
-                    self.window.MergeBreathsButton.blockSignals(True)
-                    self.window.MergeBreathsButton.setChecked(False)
-                    self.window.MergeBreathsButton.blockSignals(False)
-                    self.window.MergeBreathsButton.setText("Merge Breaths")
+                self._deactivate_merge_mode()
 
             # turn OFF omit region mode
             if getattr(self, "_omit_region_mode", False):
                 self._exit_omit_region_mode()
 
-            self.window.addPeaksButton.setText("Toggle Breath (ON)")
-            self.window.plot_host.set_click_callback(self._on_plot_click_add_peak)
-            self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            self._btn_add_peaks.setText("Toggle Breath (ON)")
+            self.plot_host.set_click_callback(self._on_plot_click_add_peak)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
             # Show rich text instructions in status bar
             html = ('<b>LEFT CLICK:</b> '
                     '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
@@ -443,13 +539,13 @@ class EditingModes:
                     '<b>RIGHT CLICK:</b> '
                     '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
                     'Sigh <span style="color:#FFD700">★</span>')
-            self.window._show_editing_instructions(html)
+            self._show_instructions(html)
         else:
-            self.window.addPeaksButton.setText("Toggle Breath")
+            self._btn_add_peaks.setText("Toggle Breath")
             if not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
-                self.window.plot_host.clear_click_callback()
-                self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self._clear_instructions()
 
     def _compute_single_breath_events(self, y, peak_idx, prev_peak_idx, next_peak_idx, sr_hz):
         """
@@ -525,13 +621,13 @@ class EditingModes:
                 self._on_plot_click_add_sigh(xdata, ydata, event, _force_mode='sigh')
                 return
 
-        st = self.window.state
+        st = self.state
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
         # Current sweep + processed trace (what user sees)
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-        t, y = self.window._current_trace()
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -554,7 +650,7 @@ class EditingModes:
         all_peaks = st.all_peaks_by_sweep.get(s)
         if all_peaks is None or 'indices' not in all_peaks or len(all_peaks['indices']) == 0:
             print("[add-peak] No peaks detected in this sweep - run peak detection first")
-            self.window._log_status_message("✗ No peaks detected - run detection first", 2000)
+            self._log_status("✗ No peaks detected - run detection first", 2000)
             return
 
         # Find the nearest peak to the click position
@@ -569,11 +665,11 @@ class EditingModes:
 
         if closest_distance > half_win_n:
             print(f"[add-peak] Click too far from nearest peak ({closest_distance} samples > {half_win_n} samples)")
-            self.window._log_status_message(f"✗ No peak within {half_win_s:.2f}s of click", 2000)
+            self._log_status(f"✗ No peak within {half_win_s:.2f}s of click", 2000)
             # Restore out-of-date warning after temporary message expires
-            if getattr(self.window, 'eupnea_sniffing_out_of_date', False):
+            if self._eupnea_out_of_date:
                 from PyQt6.QtCore import QTimer
-                QTimer.singleShot(2100, lambda: self.window._log_status_message("⚠️ Eupnea/sniffing detection out of date"))
+                QTimer.singleShot(2100, lambda: self._log_status("⚠️ Eupnea/sniffing detection out of date"))
             return
 
         # Check current label and toggle it
@@ -633,28 +729,28 @@ class EditingModes:
                           sweep_index=s)
 
         # Show success message
-        self.window._log_status_message(f"✓ Peak {action}", 1500)
+        self._log_status(f"✓ Peak {action}", 1500)
 
         # Recompute Y2 metric if selected
         if getattr(st, "y2_metric_key", None):
-            self.window._compute_y2_all_sweeps()
+            self._compute_y2()
 
         # Refresh plot FIRST to show updated peaks
-        self.window.redraw_main_plot()
+        self._redraw()
 
         # Re-run GMM clustering to update sniffing regions (if auto-update enabled)
-        if getattr(self.window, 'auto_gmm_enabled', False):
-            self.window._run_automatic_gmm_clustering()
+        if self._is_auto_gmm_enabled():
+            self._run_gmm()
             # LIGHTWEIGHT UPDATE: Just refresh eupnea/sniffing overlays (no full redraw)
-            self.window._refresh_eupnea_overlays_only()
+            self._refresh_eupnea()
             # Clear out-of-date flag and status bar
-            self.window.eupnea_sniffing_out_of_date = False
-            self.window.statusBar().clearMessage()
+            self._set_eupnea_out_of_date(False)
+            self._clear_persistent_status()
         else:
             # Mark eupnea/sniffing detection as out of date
-            self.window.eupnea_sniffing_out_of_date = True
+            self._set_eupnea_out_of_date(True)
             # Show persistent warning (no timeout - stays until Update button is clicked)
-            self.window._log_status_message("⚠️ Eupnea/sniffing detection out of date")
+            self._log_status("⚠️ Eupnea/sniffing detection out of date")
 
     # ========== DELETE PEAKS MODE ==========
 
@@ -664,15 +760,15 @@ class EditingModes:
 
         if checked:
             # Turn off matplotlib toolbar modes (zoom, pan)
-            self.window.plot_host.turn_off_toolbar_modes()
+            self.plot_host.turn_off_toolbar_modes()
 
             # turn OFF add mode
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
-                self.window.addPeaksButton.blockSignals(True)
-                self.window.addPeaksButton.setChecked(False)
-                self.window.addPeaksButton.blockSignals(False)
-                self.window.addPeaksButton.setText("Add Peaks")
+                self._btn_add_peaks.blockSignals(True)
+                self._btn_add_peaks.setChecked(False)
+                self._btn_add_peaks.blockSignals(False)
+                self._btn_add_peaks.setText("Add Peaks")
 
             # turn OFF sigh mode + reset its label
             if getattr(self, "_add_sigh_mode", False):
@@ -681,40 +777,35 @@ class EditingModes:
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
-                self.window.movePointButton.blockSignals(True)
-                self.window.movePointButton.setChecked(False)
-                self.window.movePointButton.blockSignals(False)
-                self.window.movePointButton.setText("Move Point")
+                self._btn_move_point.blockSignals(True)
+                self._btn_move_point.setChecked(False)
+                self._btn_move_point.blockSignals(False)
+                self._btn_move_point.setText("Move Point")
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False
-                self.window.markSniffButton.blockSignals(True)
-                self.window.markSniffButton.setChecked(False)
-                self.window.markSniffButton.blockSignals(False)
-                self.window.markSniffButton.setText("Mark Sniff")
+                self._btn_mark_sniff.blockSignals(True)
+                self._btn_mark_sniff.setChecked(False)
+                self._btn_mark_sniff.blockSignals(False)
+                self._btn_mark_sniff.setText("Mark Sniff")
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
-                self._merge_peaks_mode = False
-                if hasattr(self.window, 'MergeBreathsButton'):
-                    self.window.MergeBreathsButton.blockSignals(True)
-                    self.window.MergeBreathsButton.setChecked(False)
-                    self.window.MergeBreathsButton.blockSignals(False)
-                    self.window.MergeBreathsButton.setText("Merge Breaths")
+                self._deactivate_merge_mode()
 
-            self.window.plot_host.set_click_callback(self._on_plot_click_delete_peak)
-            self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            self.plot_host.set_click_callback(self._on_plot_click_delete_peak)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
             # Show instructions in status bar
             msg = "DELETE PEAK: Click to delete nearest peak | Shift+click to add peak | Ctrl+click to toggle sigh"
-            self.window._log_status_message(msg, 0)
-            self.window._persistent_status_message = msg
+            self._log_status(msg, 0)
+            self._set_persistent_status(msg)
         else:
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
-                self.window.plot_host.clear_click_callback()
-                self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window.statusBar().clearMessage()
-                self.window._persistent_status_message = None
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self._clear_persistent_status()
+                self._clear_persistent_status()
 
     def _on_plot_click_delete_peak(self, xdata, ydata, event, _force_mode=None):
         """Handle plot click to delete a peak."""
@@ -740,13 +831,13 @@ class EditingModes:
                 self._on_plot_click_add_sigh(xdata, ydata, event, _force_mode='sigh')
                 return
 
-        st = self.window.state
+        st = self.state
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
         # Current sweep & processed trace
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-        t, y = self.window._current_trace()
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -778,11 +869,11 @@ class EditingModes:
 
         if distances[closest_idx] > half_win_n:
             print(f"[delete-peak] Closest peak is too far ({distances[closest_idx]} samples > {half_win_n} samples).")
-            self.window._log_status_message(f"✗ Click too far from peak (> {half_win_s:.2f}s)", 2000)
+            self._log_status(f"✗ Click too far from peak (> {half_win_s:.2f}s)", 2000)
             # Restore out-of-date warning after temporary message expires
-            if getattr(self.window, 'eupnea_sniffing_out_of_date', False):
+            if self._eupnea_out_of_date:
                 from PyQt6.QtCore import QTimer
-                QTimer.singleShot(2100, lambda: self.window._log_status_message("⚠️ Eupnea/sniffing detection out of date"))
+                QTimer.singleShot(2100, lambda: self._log_status("⚠️ Eupnea/sniffing detection out of date"))
             return
 
         # ========================================================================
@@ -834,28 +925,28 @@ class EditingModes:
                           num_peaks_after=len(pks_new),
                           sweep_index=s)
 
-        self.window._log_status_message("✓ Peak deleted", 1500)
+        self._log_status("✓ Peak deleted", 1500)
 
         # If a Y2 metric is selected, recompute
         if getattr(st, "y2_metric_key", None):
-            self.window._compute_y2_all_sweeps()
+            self._compute_y2()
 
         # Refresh plot FIRST to show updated peaks
-        self.window.redraw_main_plot()
+        self._redraw()
 
         # Re-run GMM clustering to update sniffing regions (if auto-update enabled)
-        if getattr(self.window, 'auto_gmm_enabled', False):
-            self.window._run_automatic_gmm_clustering()
+        if self._is_auto_gmm_enabled():
+            self._run_gmm()
             # LIGHTWEIGHT UPDATE: Just refresh eupnea/sniffing overlays (no full redraw)
-            self.window._refresh_eupnea_overlays_only()
+            self._refresh_eupnea()
             # Clear out-of-date flag and status bar
-            self.window.eupnea_sniffing_out_of_date = False
-            self.window.statusBar().clearMessage()
+            self._set_eupnea_out_of_date(False)
+            self._clear_persistent_status()
         else:
             # Mark eupnea/sniffing detection as out of date
-            self.window.eupnea_sniffing_out_of_date = True
+            self._set_eupnea_out_of_date(True)
             # Show persistent warning (no timeout - stays until Update button is clicked)
-            self.window._log_status_message("⚠️ Eupnea/sniffing detection out of date")
+            self._log_status("⚠️ Eupnea/sniffing detection out of date")
 
     # ========== ADD SIGH MODE ==========
 
@@ -865,15 +956,15 @@ class EditingModes:
 
         if checked:
             # Turn off matplotlib toolbar modes (zoom, pan)
-            self.window.plot_host.turn_off_toolbar_modes()
+            self.plot_host.turn_off_toolbar_modes()
 
             # turn OFF other modes (without triggering their slots)
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
-                self.window.addPeaksButton.blockSignals(True)
-                self.window.addPeaksButton.setChecked(False)
-                self.window.addPeaksButton.blockSignals(False)
-                self.window.addPeaksButton.setText("Add Peaks")
+                self._btn_add_peaks.blockSignals(True)
+                self._btn_add_peaks.setChecked(False)
+                self._btn_add_peaks.blockSignals(False)
+                self._btn_add_peaks.setText("Add Peaks")
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
@@ -881,41 +972,36 @@ class EditingModes:
             # turn OFF move point mode
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
-                self.window.movePointButton.blockSignals(True)
-                self.window.movePointButton.setChecked(False)
-                self.window.movePointButton.blockSignals(False)
-                self.window.movePointButton.setText("Move Point")
+                self._btn_move_point.blockSignals(True)
+                self._btn_move_point.setChecked(False)
+                self._btn_move_point.blockSignals(False)
+                self._btn_move_point.setText("Move Point")
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False
-                self.window.markSniffButton.blockSignals(True)
-                self.window.markSniffButton.setChecked(False)
-                self.window.markSniffButton.blockSignals(False)
-                self.window.markSniffButton.setText("Mark Sniff")
+                self._btn_mark_sniff.blockSignals(True)
+                self._btn_mark_sniff.setChecked(False)
+                self._btn_mark_sniff.blockSignals(False)
+                self._btn_mark_sniff.setText("Mark Sniff")
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
-                self._merge_peaks_mode = False
-                if hasattr(self.window, 'MergeBreathsButton'):
-                    self.window.MergeBreathsButton.blockSignals(True)
-                    self.window.MergeBreathsButton.setChecked(False)
-                    self.window.MergeBreathsButton.blockSignals(False)
-                    self.window.MergeBreathsButton.setText("Merge Breaths")
+                self._deactivate_merge_mode()
 
-            self.window.plot_host.set_click_callback(self._on_plot_click_add_sigh)
-            self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            self.plot_host.set_click_callback(self._on_plot_click_add_sigh)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
             # Show instructions in status bar
             msg = "TOGGLE SIGH: Click on a breath peak to mark/unmark as sigh"
-            self.window._log_status_message(msg, 0)
-            self.window._persistent_status_message = msg
+            self._log_status(msg, 0)
+            self._set_persistent_status(msg)
         else:
             # only clear if no other edit mode is active
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False):
-                self.window.plot_host.clear_click_callback()
-                self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window.statusBar().clearMessage()
-                self.window._persistent_status_message = None
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self._clear_persistent_status()
+                self._clear_persistent_status()
 
     def _on_plot_click_add_sigh(self, xdata, ydata, event, _force_mode=None):
         """Handle plot click to add or remove a sigh marker."""
@@ -925,13 +1011,13 @@ class EditingModes:
         if event.inaxes is None or xdata is None:
             return
 
-        st = self.window.state
+        st = self.state
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
         # Current sweep + processed trace (what you're seeing)
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-        t, y = self.window._current_trace()
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -991,7 +1077,7 @@ class EditingModes:
                         print(f"[sigh] Updated sigh_class for peak {i_nearest_peak} (ML mode, sigh_manual_ro unchanged)")
 
         # Redraw to see star(s)
-        self.window.redraw_main_plot()
+        self._redraw()
 
     # ========== MOVE POINT MODE ==========
 
@@ -1001,15 +1087,15 @@ class EditingModes:
 
         if checked:
             # Turn off matplotlib toolbar modes (zoom, pan)
-            self.window.plot_host.turn_off_toolbar_modes()
+            self.plot_host.turn_off_toolbar_modes()
 
             # Turn OFF other edit modes
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
-                self.window.addPeaksButton.blockSignals(True)
-                self.window.addPeaksButton.setChecked(False)
-                self.window.addPeaksButton.blockSignals(False)
-                self.window.addPeaksButton.setText("Add Peaks")
+                self._btn_add_peaks.blockSignals(True)
+                self._btn_add_peaks.setChecked(False)
+                self._btn_add_peaks.blockSignals(False)
+                self._btn_add_peaks.setText("Add Peaks")
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
@@ -1020,85 +1106,81 @@ class EditingModes:
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False
-                self.window.markSniffButton.blockSignals(True)
-                self.window.markSniffButton.setChecked(False)
-                self.window.markSniffButton.blockSignals(False)
-                self.window.markSniffButton.setText("Mark Sniff")
+                self._btn_mark_sniff.blockSignals(True)
+                self._btn_mark_sniff.setChecked(False)
+                self._btn_mark_sniff.blockSignals(False)
+                self._btn_mark_sniff.setText("Mark Sniff")
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
-                self._merge_peaks_mode = False
-                if hasattr(self.window, 'MergeBreathsButton'):
-                    self.window.MergeBreathsButton.blockSignals(True)
-                    self.window.MergeBreathsButton.setChecked(False)
-                    self.window.MergeBreathsButton.blockSignals(False)
-                    self.window.MergeBreathsButton.setText("Merge Breaths")
+                self._deactivate_merge_mode()
 
             # turn OFF omit region mode
             if getattr(self, "_omit_region_mode", False):
                 self._exit_omit_region_mode()
 
-            self.window.movePointButton.setText("Move Point (ON)")
-            self.window.plot_host.set_click_callback(self._on_plot_click_move_point)
-            self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            self._btn_move_point.setText("Move Point (ON)")
+            self.plot_host.set_click_callback(self._on_plot_click_move_point)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
             # Show rich text instructions in status bar
             html = ('<b>CLICK+DRAG:</b> Move point'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
                     '<b>SHIFT+DRAG:</b> Snap to critical points')
-            self.window._show_editing_instructions(html)
+            self._show_instructions(html)
 
             # Connect drag and key events (different for matplotlib vs PyQtGraph)
             if self._is_pyqtgraph_backend():
                 # PyQtGraph: use drag callback and key callback
-                self.window.plot_host.set_drag_callback(self._on_move_point_drag_pyqtgraph)
-                self.window.plot_host.set_key_callback(self._on_move_point_key_pyqtgraph)
+                self.plot_host.set_drag_callback(self._on_move_point_drag_pyqtgraph)
+                self.plot_host.set_key_callback(self._on_move_point_key_pyqtgraph)
             elif self._has_matplotlib_canvas():
                 # Connect matplotlib events
-                self._key_press_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
-                self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
-                self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_canvas_release)
+                self._key_press_cid = self.plot_host.canvas.mpl_connect('key_press_event', self._on_canvas_key_press)
+                self._motion_cid = self.plot_host.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
+                self._release_cid = self.plot_host.canvas.mpl_connect('button_release_event', self._on_canvas_release)
 
                 # Disable matplotlib's built-in toolbar - turn off any active modes
-                if hasattr(self.window.plot_host.toolbar, 'mode') and self.window.plot_host.toolbar.mode != '':
-                    if self.window.plot_host.toolbar.mode == 'pan/zoom':
-                        self.window.plot_host.toolbar.pan()
-                    elif self.window.plot_host.toolbar.mode == 'zoom rect':
-                        self.window.plot_host.toolbar.zoom()
+                if hasattr(self.plot_host.toolbar, 'mode') and self.plot_host.toolbar.mode != '':
+                    if self.plot_host.toolbar.mode == 'pan/zoom':
+                        self.plot_host.toolbar.pan()
+                    elif self.plot_host.toolbar.mode == 'zoom rect':
+                        self.plot_host.toolbar.zoom()
 
-                self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-                self.window.plot_host.canvas.setFocus()
+                self.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                self.plot_host.canvas.setFocus()
         else:
-            self.window.movePointButton.setText("Move Point")
+            self._btn_move_point.setText("Move Point")
 
             # Disconnect events (different for matplotlib vs PyQtGraph)
             if self._is_pyqtgraph_backend():
-                if hasattr(self.window.plot_host, 'clear_drag_callback'):
-                    self.window.plot_host.clear_drag_callback()
-                if hasattr(self.window.plot_host, 'clear_key_callback'):
-                    self.window.plot_host.clear_key_callback()
+                if hasattr(self.plot_host, 'clear_drag_callback'):
+                    self.plot_host.clear_drag_callback()
+                if hasattr(self.plot_host, 'clear_key_callback'):
+                    self.plot_host.clear_key_callback()
             elif self._has_matplotlib_canvas():
                 if self._key_press_cid is not None:
-                    self.window.plot_host.canvas.mpl_disconnect(self._key_press_cid)
+                    self.plot_host.canvas.mpl_disconnect(self._key_press_cid)
                     self._key_press_cid = None
                 if self._motion_cid is not None:
-                    self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                    self.plot_host.canvas.mpl_disconnect(self._motion_cid)
                     self._motion_cid = None
                 if self._release_cid is not None:
-                    self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+                    self.plot_host.canvas.mpl_disconnect(self._release_cid)
                     self._release_cid = None
 
                 # Re-enable toolbar (user can re-select zoom/pan if they want)
-                if hasattr(self.window.plot_host, 'canvas') and hasattr(self.window.plot_host.canvas, 'toolbar'):
-                    self.window.plot_host.canvas.toolbar.setEnabled(True)
+                toolbar = getattr(getattr(self.plot_host, 'canvas', None), 'toolbar', None)
+                if toolbar is not None:
+                    toolbar.setEnabled(True)
 
             # Clear selected point
             self._selected_point = None
 
             # Only clear if no other edit mode is active
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False):
-                self.window.plot_host.clear_click_callback()
-                self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self._clear_instructions()
 
     def _on_plot_click_move_point(self, xdata, ydata, event):
         """Select a point (peak/onset/offset/exp) to move."""
@@ -1109,12 +1191,12 @@ class EditingModes:
 
         # No need to check toolbar here - it's disabled when entering move mode
 
-        st = self.window.state
+        st = self.state
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-        t, y = self.window._current_trace()
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -1141,63 +1223,42 @@ class EditingModes:
         # Debug: print what's available
         print(f"[move-point-debug] Available points - peaks: {pks.size}, onsets: {onsets.size}, offsets: {offsets.size}, expmins: {expmins.size}, expoffs: {expoffs.size}")
 
-        # Find closest point (only consider points within 0.5 seconds)
-        max_distance = 0.5  # seconds
-        candidates = []
+        # Find closest point using 2D distance (normalized by visible ranges)
+        max_distance = 0.5  # seconds (x threshold)
+        y_range = np.ptp(y) if len(y) > 0 else 1.0
+        if y_range == 0:
+            y_range = 1.0
+        x_span = t_plot[-1] - t_plot[0] if len(t_plot) > 1 else 1.0
+        if x_span == 0:
+            x_span = 1.0
 
-        if pks.size > 0:
-            dists = np.abs(t_plot[pks] - xdata)
-            min_idx = np.argmin(dists)
-            if dists[min_idx] < max_distance:
-                candidates.append(('peak', pks[min_idx], dists[min_idx]))
+        best_type = None
+        best_idx = None
+        best_distance = float('inf')
 
-        if onsets.size > 0:
-            dists = np.abs(t_plot[onsets] - xdata)
-            min_idx = np.argmin(dists)
-            if dists[min_idx] < max_distance:
-                candidates.append(('onset', onsets[min_idx], dists[min_idx]))
+        for name, indices in [('peak', pks), ('onset', onsets), ('offset', offsets),
+                              ('expmin', expmins), ('expoff', expoffs)]:
+            if indices.size == 0:
+                continue
+            valid = indices[indices < len(t_plot)]
+            if len(valid) == 0:
+                continue
+            dx = (t_plot[valid] - xdata) / x_span
+            dy_arr = (y[valid] - ydata) / y_range
+            d2d = np.sqrt(dx**2 + dy_arr**2)
+            min_i = np.argmin(d2d)
+            x_dist = np.abs(t_plot[valid[min_i]] - xdata)
+            if d2d[min_i] < best_distance and x_dist < max_distance:
+                best_distance = d2d[min_i]
+                best_type = name
+                best_idx = valid[min_i]
 
-        if offsets.size > 0:
-            dists = np.abs(t_plot[offsets] - xdata)
-            min_idx = np.argmin(dists)
-            if dists[min_idx] < max_distance:
-                candidates.append(('offset', offsets[min_idx], dists[min_idx]))
-
-        if expmins.size > 0:
-            dists = np.abs(t_plot[expmins] - xdata)
-            min_idx = np.argmin(dists)
-            if dists[min_idx] < max_distance:
-                candidates.append(('expmin', expmins[min_idx], dists[min_idx]))
-
-        if expoffs.size > 0:
-            dists = np.abs(t_plot[expoffs] - xdata)
-            min_idx = np.argmin(dists)
-            if dists[min_idx] < max_distance:
-                candidates.append(('expoff', expoffs[min_idx], dists[min_idx]))
-
-        if not candidates:
-            print("[move-point] No points within 0.5s of click location - click closer to a point")
-            return
-
-        # Debug: print all candidates
-        print(f"[move-point-debug] Candidates within range: {[(c[0], f'{c[2]:.3f}s') for c in candidates]}")
-
-        # Select closest
-        point_type, idx, dist = min(candidates, key=lambda x: x[2])
-
-        # Disallow moving peaks (only breath event markers can be moved)
-        # Peaks should stay at detected positions; use add/delete to correct peak detection
-        if point_type == 'peak':
-            print(f"[move-point] Cannot move peaks - use Add/Delete Peak buttons instead")
-            self.window._log_status_message("Cannot move peaks - use Add/Delete instead", 2000)
+        if best_type is None:
             return
 
         # Store selection (keep original_index for finding it later)
-        self._selected_point = {'type': point_type, 'index': idx, 'sweep': s, 'original_index': idx}
-
-        # No visual feedback marker needed - the existing point markers are sufficient
-        print(f"[move-point] Selected {point_type} at index {idx} - use arrow keys to move (Shift=snap)")
-        self.window._log_status_message(f"Selected {point_type} - use arrow keys to move", 2000)
+        self._selected_point = {'type': best_type, 'index': best_idx, 'sweep': s, 'original_index': best_idx}
+        self._log_status(f"Selected {best_type} - drag or use arrow keys to move", 2000)
 
     def _find_nearest_zero_crossing(self, y, dy, current_idx, search_radius=200):
         """
@@ -1241,7 +1302,7 @@ class EditingModes:
         if not self._selected_point:
             return new_idx
 
-        st = self.window.state
+        st = self.state
         point_type = self._selected_point['type']
         original_idx = self._selected_point['original_index']
 
@@ -1331,7 +1392,7 @@ class EditingModes:
         new_idx = old_idx + direction
 
         # Get trace for bounds checking
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -1340,7 +1401,7 @@ class EditingModes:
             return
 
         # Constrain to peak boundaries
-        st = self.window.state
+        st = self.state
         s = self._selected_point['sweep']
         new_idx = self._constrain_to_peak_boundaries(new_idx, s)
 
@@ -1366,7 +1427,7 @@ class EditingModes:
         if not self._selected_point:
             return
 
-        st = self.window.state
+        st = self.state
         point_type = self._selected_point['type']
         old_idx = self._selected_point['index']
 
@@ -1409,22 +1470,21 @@ class EditingModes:
         t_exof = t_plot[exoff_idx] if len(exoff_idx) else None
         y_exof = y[exoff_idx] if len(exoff_idx) else None
 
-        self.window.plot_host.update_breath_markers(
+        self.plot_host.update_breath_markers(
             t_on=t_on, y_on=y_on,
             t_off=t_off, y_off=y_off,
             t_exp=t_exp, y_exp=y_exp,
             t_exoff=t_exof, y_exoff=y_exof,
-            size=36
         )
 
         # Update peaks scatter plot
         pks = st.peaks_by_sweep.get(s, np.array([], dtype=int))
         if len(pks) > 0:
-            self.window.plot_host.update_peaks(t_plot[pks], y[pks], size=50)
+            self.plot_host.update_peaks(t_plot[pks], y[pks])
 
         # Just update the canvas (matplotlib only)
         if self._has_matplotlib_canvas():
-            self.window.plot_host.canvas.draw_idle()
+            self.plot_host.canvas.draw_idle()
 
     def _on_move_point_drag_pyqtgraph(self, event_type, xdata, ydata, event):
         """Handle PyQtGraph drag events for move point mode."""
@@ -1432,13 +1492,13 @@ class EditingModes:
             return
 
         if event_type == 'press':
-            # Select a point - same logic as _on_plot_click_move_point
-            st = self.window.state
+            # Select a point
+            st = self.state
             if st.t is None or st.analyze_chan not in st.sweeps:
                 return
 
-            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-            t, y = self.window._current_trace()
+            s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+            t, y = self._get_current_trace()
             if t is None or y is None:
                 return
 
@@ -1459,30 +1519,36 @@ class EditingModes:
             expmins = np.asarray(breaths.get('expmins', np.array([], dtype=int)), dtype=int)
             expoffs = np.asarray(breaths.get('expoffs', np.array([], dtype=int)), dtype=int)
 
-            max_distance = 0.5  # seconds
-            best_type = None
-            best_idx = None
-            best_distance = float('inf')
+            max_distance = 0.5  # seconds (x-axis threshold)
+            candidates = []
 
-            # Check breath event markers (onsets, offsets, expmins, expoffs) - these can be moved
-            for name, indices in [('onset', onsets), ('offset', offsets), ('expmin', expmins), ('expoff', expoffs)]:
+            # Collect all points within x threshold, rank by 2D distance
+            y_range = np.ptp(y) if len(y) > 0 else 1.0
+            if y_range == 0:
+                y_range = 1.0
+
+            for name, indices in [('peak', pks), ('onset', onsets), ('offset', offsets),
+                                  ('expmin', expmins), ('expoff', expoffs)]:
                 if len(indices) == 0:
                     continue
-                valid_mask = indices < len(t_plot)
-                valid_indices = indices[valid_mask]
-                if len(valid_indices) == 0:
+                valid = indices[indices < len(t_plot)]
+                if len(valid) == 0:
                     continue
-                times = t_plot[valid_indices]
-                distances = np.abs(times - xdata)
-                min_dist_idx = np.argmin(distances)
-                if distances[min_dist_idx] < best_distance and distances[min_dist_idx] < max_distance:
-                    best_distance = distances[min_dist_idx]
-                    best_type = name
-                    best_idx = valid_indices[min_dist_idx]
+                x_dists = np.abs(t_plot[valid] - xdata)
+                within = np.where(x_dists < max_distance)[0]
+                for wi in within:
+                    # Normalized 2D distance for ranking
+                    dx_norm = x_dists[wi] / max_distance
+                    dy_norm = abs(y[valid[wi]] - ydata) / y_range
+                    d2d = np.sqrt(dx_norm**2 + dy_norm**2)
+                    candidates.append((name, valid[wi], d2d))
 
-            if best_type is None:
+            if not candidates:
                 self._selected_point = None
                 return
+
+            # Pick closest by 2D distance
+            best_type, best_idx, _ = min(candidates, key=lambda c: c[2])
 
             # Store selection
             self._selected_point = {
@@ -1491,6 +1557,12 @@ class EditingModes:
                 'sweep': s,
                 'original_index': best_idx
             }
+
+            # Remove anonymous scatter items from main render so drag markers
+            # don't overlap with stale originals
+            if self._is_pyqtgraph_backend():
+                self._clear_render_scatter_items()
+
             print(f"[move-point] Selected {best_type} at index {best_idx}")
 
         elif event_type == 'move':
@@ -1498,9 +1570,9 @@ class EditingModes:
             if not self._selected_point:
                 return
 
-            st = self.window.state
+            st = self.state
             s = self._selected_point['sweep']
-            t, y = self.window._current_trace()
+            t, y = self._get_current_trace()
             if t is None or y is None:
                 return
 
@@ -1572,11 +1644,11 @@ class EditingModes:
         # Recompute metrics if requested (after drag release)
         if recompute_metrics:
             # Trigger eupnea/outlier region recalculation by calling redraw
-            self.window.redraw_main_plot()
+            self._redraw()
             # Toolbar stays disabled during move mode
         else:
             # Just redraw
-            self.window.plot_host.canvas.draw_idle()
+            self.plot_host.canvas.draw_idle()
 
     def _cancel_move_point(self):
         """Cancel the point move operation and restore original position."""
@@ -1584,7 +1656,7 @@ class EditingModes:
             return
 
         # Restore original position
-        st = self.window.state
+        st = self.state
         s = self._selected_point['sweep']
         point_type = self._selected_point['type']
         original_idx = self._selected_point.get('original_index')
@@ -1613,7 +1685,7 @@ class EditingModes:
         self._selected_point = None
 
         # Redraw to show restored position
-        self.window.plot_host.canvas.draw_idle()
+        self.plot_host.canvas.draw_idle()
         print("[move-point] Move cancelled, position restored")
 
     # ========== MARK SNIFF MODE ==========
@@ -1624,15 +1696,15 @@ class EditingModes:
 
         if checked:
             # Turn off matplotlib toolbar modes (zoom, pan)
-            self.window.plot_host.turn_off_toolbar_modes()
+            self.plot_host.turn_off_toolbar_modes()
 
             # Turn OFF other edit modes
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
-                self.window.addPeaksButton.blockSignals(True)
-                self.window.addPeaksButton.setChecked(False)
-                self.window.addPeaksButton.blockSignals(False)
-                self.window.addPeaksButton.setText("Add Peaks")
+                self._btn_add_peaks.blockSignals(True)
+                self._btn_add_peaks.setChecked(False)
+                self._btn_add_peaks.blockSignals(False)
+                self._btn_add_peaks.setText("Add Peaks")
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
@@ -1642,47 +1714,42 @@ class EditingModes:
 
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
-                self.window.movePointButton.blockSignals(True)
-                self.window.movePointButton.setChecked(False)
-                self.window.movePointButton.blockSignals(False)
-                self.window.movePointButton.setText("Move Point")
+                self._btn_move_point.blockSignals(True)
+                self._btn_move_point.setChecked(False)
+                self._btn_move_point.blockSignals(False)
+                self._btn_move_point.setText("Move Point")
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
-                self._merge_peaks_mode = False
-                if hasattr(self.window, 'MergeBreathsButton'):
-                    self.window.MergeBreathsButton.blockSignals(True)
-                    self.window.MergeBreathsButton.setChecked(False)
-                    self.window.MergeBreathsButton.blockSignals(False)
-                    self.window.MergeBreathsButton.setText("Merge Breaths")
+                self._deactivate_merge_mode()
 
             # turn OFF omit region mode
             if getattr(self, "_omit_region_mode", False):
                 self._exit_omit_region_mode()
 
-            self.window.markSniffButton.setText("Mark Sniff (ON)")
-            self.window.plot_host.set_click_callback(self._on_plot_click_mark_sniff)
-            self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            self._btn_mark_sniff.setText("Mark Sniff (ON)")
+            self.plot_host.set_click_callback(self._on_plot_click_mark_sniff)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
             # Show rich text instructions in status bar
             html = ('<b>CLICK+DRAG:</b> Create region'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
                     '<b>CLICK+DRAG EDGE:</b> Adjust'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
                     '<b>SHIFT+CLICK:</b> <span style="color:#F44336">Delete</span>')
-            self.window._show_editing_instructions(html)
+            self._show_instructions(html)
 
             # Connect matplotlib events for drag functionality
-            self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_sniff_drag)
-            self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_sniff_release)
+            self._motion_cid = self.plot_host.canvas.mpl_connect('motion_notify_event', self._on_sniff_drag)
+            self._release_cid = self.plot_host.canvas.mpl_connect('button_release_event', self._on_sniff_release)
         else:
-            self.window.markSniffButton.setText("Mark Sniff")
+            self._btn_mark_sniff.setText("Mark Sniff")
 
             # Disconnect matplotlib events
             if self._motion_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self.plot_host.canvas.mpl_disconnect(self._motion_cid)
                 self._motion_cid = None
             if self._release_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self.plot_host.canvas.mpl_disconnect(self._release_cid)
                 self._release_cid = None
 
             # Clear drag artist
@@ -1692,13 +1759,13 @@ class EditingModes:
                 except:
                     pass
                 self._sniff_drag_artist = None
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
 
             # Only clear if no other edit mode is active
             if not getattr(self, "_add_peaks_mode", False) and not getattr(self, "_delete_peaks_mode", False) and not getattr(self, "_add_sigh_mode", False) and not getattr(self, "_move_point_mode", False):
-                self.window.plot_host.clear_click_callback()
-                self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self._clear_instructions()
 
     def _on_plot_click_mark_sniff(self, xdata, ydata, event):
         """Start marking a sniffing region (click-and-drag) or grab an edge to adjust.
@@ -1712,9 +1779,9 @@ class EditingModes:
         shift_held = (QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
 
         # Check if click is near an existing region edge
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-        regions = self.window.state.sniff_regions_by_sweep.get(s, [])
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        regions = self.state.sniff_regions_by_sweep.get(s, [])
 
         # Convert to plot time for comparison
         spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
@@ -1732,16 +1799,16 @@ class EditingModes:
                 # Check if click is INSIDE this region
                 if plot_start <= xdata <= plot_end:
                     # Delete this region
-                    del self.window.state.sniff_regions_by_sweep[s][i]
+                    del self.state.sniff_regions_by_sweep[s][i]
                     print(f"[mark-sniff] Deleted region {i}: {start_time:.3f} - {end_time:.3f} s")
 
                     # Log telemetry: manual edit
                     from core import telemetry
                     telemetry.log_edit('delete_sniff_region',
-                                      num_regions_after=len(self.window.state.sniff_regions_by_sweep.get(s, [])),
+                                      num_regions_after=len(self.state.sniff_regions_by_sweep.get(s, [])),
                                       sweep_index=s)
 
-                    self.window.redraw_main_plot()
+                    self._redraw()
                     return
 
         # Edge detection threshold (in plot time units)
@@ -1782,7 +1849,7 @@ class EditingModes:
             return
 
         # Get plot axes
-        ax = self.window.plot_host.ax_main
+        ax = self.plot_host.ax_main
         if ax is None:
             return
 
@@ -1800,7 +1867,7 @@ class EditingModes:
         x_right = max(x_start, x_end)
 
         self._sniff_drag_artist = ax.axvspan(x_left, x_right, alpha=0.3, color='purple', zorder=10)
-        self.window.plot_host.canvas.draw_idle()
+        self.plot_host.canvas.draw_idle()
 
     def _on_sniff_release(self, event):
         """Finalize the sniffing region when mouse is released."""
@@ -1826,12 +1893,12 @@ class EditingModes:
                 except:
                     pass
                 self._sniff_drag_artist = None
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
             return
 
         # Convert from normalized time back to actual time if needed
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
         spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
 
         if st.stim_chan and spans:
@@ -1847,24 +1914,24 @@ class EditingModes:
         actual_start, actual_end = self._snap_sniff_to_breath_events(s, actual_start, actual_end)
 
         # Initialize regions list if needed
-        if s not in self.window.state.sniff_regions_by_sweep:
-            self.window.state.sniff_regions_by_sweep[s] = []
+        if s not in self.state.sniff_regions_by_sweep:
+            self.state.sniff_regions_by_sweep[s] = []
 
         # Handle edge dragging vs new region creation
         if self._sniff_edge_mode is not None and self._sniff_region_index is not None:
             # Editing existing region - update it
-            old_start, old_end = self.window.state.sniff_regions_by_sweep[s][self._sniff_region_index]
+            old_start, old_end = self.state.sniff_regions_by_sweep[s][self._sniff_region_index]
             if self._sniff_edge_mode == 'start':
                 # Update start edge, keep end fixed
-                self.window.state.sniff_regions_by_sweep[s][self._sniff_region_index] = (actual_start, old_end)
+                self.state.sniff_regions_by_sweep[s][self._sniff_region_index] = (actual_start, old_end)
                 print(f"[mark-sniff] Updated START edge of region {self._sniff_region_index}: {actual_start:.3f} - {old_end:.3f} s")
             else:  # 'end'
                 # Update end edge, keep start fixed
-                self.window.state.sniff_regions_by_sweep[s][self._sniff_region_index] = (old_start, actual_end)
+                self.state.sniff_regions_by_sweep[s][self._sniff_region_index] = (old_start, actual_end)
                 print(f"[mark-sniff] Updated END edge of region {self._sniff_region_index}: {old_start:.3f} - {actual_end:.3f} s")
         else:
             # Creating new region - add it
-            self.window.state.sniff_regions_by_sweep[s].append((actual_start, actual_end))
+            self.state.sniff_regions_by_sweep[s].append((actual_start, actual_end))
             print(f"[mark-sniff] Added new sniff region: {actual_start:.3f} - {actual_end:.3f} s (sweep {s})")
 
         # Merge overlapping regions
@@ -1882,7 +1949,7 @@ class EditingModes:
             self._sniff_drag_artist = None
 
         # Redraw to show permanent overlay
-        self.window.redraw_main_plot()
+        self._redraw()
 
     def _snap_sniff_to_breath_events(self, sweep_idx: int, start_time: float, end_time: float):
         """Snap sniff region edges to nearest breath events.
@@ -1891,13 +1958,13 @@ class EditingModes:
         Right edge (end) snaps to nearest expiratory offset.
         """
         # Get current trace to convert indices to times
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None:
             print("[mark-sniff] No trace available for snapping")
             return start_time, end_time
 
         # Get breath events for this sweep
-        breaths = self.window.state.breath_by_sweep.get(sweep_idx, {})
+        breaths = self.state.breath_by_sweep.get(sweep_idx, {})
         onsets = np.asarray(breaths.get('onsets', []), dtype=int)
         expoffs = np.asarray(breaths.get('expoffs', []), dtype=int)
 
@@ -1934,7 +2001,7 @@ class EditingModes:
         Note: This is primarily for manually marked regions. GMM-based regions
         are already merged by consecutive breath index before being added.
         """
-        regions = self.window.state.sniff_regions_by_sweep.get(sweep_idx, [])
+        regions = self.state.sniff_regions_by_sweep.get(sweep_idx, [])
         if len(regions) <= 1:
             return
 
@@ -1959,7 +2026,7 @@ class EditingModes:
         merged.append((current_start, current_end))
 
         # Update state
-        self.window.state.sniff_regions_by_sweep[sweep_idx] = merged
+        self.state.sniff_regions_by_sweep[sweep_idx] = merged
         print(f"[mark-sniff] After merging: {len(merged)} region(s) on sweep {sweep_idx}")
 
     def update_sniff_artists(self, t_plot, sweep_idx: int):
@@ -1974,12 +2041,12 @@ class EditingModes:
 
         # Get sniff regions for this sweep
         s = int(sweep_idx)
-        regions = self.window.state.sniff_regions_by_sweep.get(s, [])
+        regions = self.state.sniff_regions_by_sweep.get(s, [])
         if not regions:
             return
 
         # Get time offset for normalization (if stim channel)
-        st = self.window.state
+        st = self.state
         spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
         if st.stim_chan and spans:
             t0 = spans[0][0]
@@ -1987,7 +2054,7 @@ class EditingModes:
             t0 = 0.0
 
         # Draw each region as a semi-transparent purple rectangle
-        ax = self.window.plot_host.ax_main
+        ax = self.plot_host.ax_main
         if ax is None:
             return
 
@@ -2000,7 +2067,7 @@ class EditingModes:
             artist = ax.axvspan(plot_start, plot_end, alpha=0.25, color='purple', zorder=5, label='Sniffing')
             self._sniff_artists.append(artist)
 
-        self.window.plot_host.canvas.draw_idle()
+        self.plot_host.canvas.draw_idle()
 
     # ========== Omit Region Mode ==========
 
@@ -2019,15 +2086,15 @@ class EditingModes:
         self._omit_region_remove_mode = remove_mode
 
         # Turn off matplotlib toolbar modes
-        self.window.plot_host.turn_off_toolbar_modes()
+        self.plot_host.turn_off_toolbar_modes()
 
         # Turn OFF other edit modes
         if getattr(self, "_add_peaks_mode", False):
             self._add_peaks_mode = False
-            self.window.addPeaksButton.blockSignals(True)
-            self.window.addPeaksButton.setChecked(False)
-            self.window.addPeaksButton.blockSignals(False)
-            self.window.addPeaksButton.setText("Add Peaks")
+            self._btn_add_peaks.blockSignals(True)
+            self._btn_add_peaks.setChecked(False)
+            self._btn_add_peaks.blockSignals(False)
+            self._btn_add_peaks.setText("Add Peaks")
 
         if getattr(self, "_delete_peaks_mode", False):
             self._delete_peaks_mode = False
@@ -2037,30 +2104,30 @@ class EditingModes:
 
         if getattr(self, "_move_point_mode", False):
             self._move_point_mode = False
-            self.window.movePointButton.blockSignals(True)
-            self.window.movePointButton.setChecked(False)
-            self.window.movePointButton.blockSignals(False)
-            self.window.movePointButton.setText("Move Point")
+            self._btn_move_point.blockSignals(True)
+            self._btn_move_point.setChecked(False)
+            self._btn_move_point.blockSignals(False)
+            self._btn_move_point.setText("Move Point")
 
         if getattr(self, "_mark_sniff_mode", False):
             self._mark_sniff_mode = False
-            self.window.markSniffButton.blockSignals(True)
-            self.window.markSniffButton.setChecked(False)
-            self.window.markSniffButton.blockSignals(False)
-            self.window.markSniffButton.setText("Mark Sniff")
+            self._btn_mark_sniff.blockSignals(True)
+            self._btn_mark_sniff.setChecked(False)
+            self._btn_mark_sniff.blockSignals(False)
+            self._btn_mark_sniff.setText("Mark Sniff")
 
         # turn OFF merge peaks mode
         if getattr(self, "_merge_peaks_mode", False):
             self._merge_peaks_mode = False
-            if hasattr(self.window, 'MergeBreathsButton'):
-                self.window.MergeBreathsButton.blockSignals(True)
-                self.window.MergeBreathsButton.setChecked(False)
-                self.window.MergeBreathsButton.blockSignals(False)
-                self.window.MergeBreathsButton.setText("Merge Breaths")
+            if self._btn_merge is not None:
+                self._btn_merge.blockSignals(True)
+                self._btn_merge.setChecked(False)
+                self._btn_merge.blockSignals(False)
+                self._btn_merge.setText("Merge Breaths")
 
         # Update omit button appearance
-        self.window.OmitSweepButton.setChecked(True)
-        self.window.OmitSweepButton.setText("Omit (ON)")
+        self._btn_omit.setChecked(True)
+        self._btn_omit.setText("Omit (ON)")
         # Show rich text instructions in status bar
         html = ('<b>CLICK+DRAG:</b> Create/Adjust'
                 '&nbsp;&nbsp;&nbsp;&nbsp;'
@@ -2070,29 +2137,29 @@ class EditingModes:
                 '&nbsp;&nbsp;&nbsp;&nbsp;'
                 '<b>R:</b> <span style="color:#64B5F6">Snap to breaths</span>')
         try:
-            self.window._show_editing_instructions(html)
+            self._show_instructions(html)
         except Exception: pass
 
         # Set up event handlers (different for matplotlib vs PyQtGraph)
-        self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+        self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
 
         if self._is_pyqtgraph_backend():
             # PyQtGraph: use drag callback for ALL interactions (press/move/release)
             # The drag callback handles Ctrl+Shift+click, Ctrl+click, and normal drag
             # Do NOT set click callback - it interferes with drag callback handling
-            self.window.plot_host.set_drag_callback(self._on_omit_region_drag_pyqtgraph)
-            self.window.plot_host.set_key_callback(self._on_omit_region_key_pyqtgraph)
+            self.plot_host.set_drag_callback(self._on_omit_region_drag_pyqtgraph)
+            self.plot_host.set_key_callback(self._on_omit_region_key_pyqtgraph)
         elif self._has_matplotlib_canvas():
             # Matplotlib: use click callback for click events, separate drag handlers
-            self.window.plot_host.set_click_callback(self._on_plot_click_omit_region)
+            self.plot_host.set_click_callback(self._on_plot_click_omit_region)
             # Give focus to the canvas so it can receive key events
-            self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            self.window.plot_host.canvas.setFocus()
+            self.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.plot_host.canvas.setFocus()
 
             # Connect matplotlib events for drag functionality and keyboard
-            self._motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_omit_region_drag)
-            self._release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_omit_region_release)
-            self._key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_omit_region_key_press)
+            self._motion_cid = self.plot_host.canvas.mpl_connect('motion_notify_event', self._on_omit_region_drag)
+            self._release_cid = self.plot_host.canvas.mpl_connect('button_release_event', self._on_omit_region_release)
+            self._key_cid = self.plot_host.canvas.mpl_connect('key_press_event', self._on_omit_region_key_press)
 
     def _exit_omit_region_mode(self):
         """Exit omit region selection mode."""
@@ -2100,24 +2167,24 @@ class EditingModes:
         self._omit_region_remove_mode = False
 
         # Update button appearance
-        self.window.OmitSweepButton.setChecked(False)
-        self.window._refresh_omit_button_label()
+        self._btn_omit.setChecked(False)
+        self._refresh_omit_label()
 
         # Disconnect events (different for matplotlib vs PyQtGraph)
         if self._is_pyqtgraph_backend():
-            if hasattr(self.window.plot_host, 'clear_drag_callback'):
-                self.window.plot_host.clear_drag_callback()
-            if hasattr(self.window.plot_host, 'clear_key_callback'):
-                self.window.plot_host.clear_key_callback()
+            if hasattr(self.plot_host, 'clear_drag_callback'):
+                self.plot_host.clear_drag_callback()
+            if hasattr(self.plot_host, 'clear_key_callback'):
+                self.plot_host.clear_key_callback()
         elif self._has_matplotlib_canvas():
             if self._motion_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._motion_cid)
+                self.plot_host.canvas.mpl_disconnect(self._motion_cid)
                 self._motion_cid = None
             if self._release_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._release_cid)
+                self.plot_host.canvas.mpl_disconnect(self._release_cid)
                 self._release_cid = None
             if self._key_cid is not None:
-                self.window.plot_host.canvas.mpl_disconnect(self._key_cid)
+                self.plot_host.canvas.mpl_disconnect(self._key_cid)
                 self._key_cid = None
 
         # Clear drag artist (matplotlib)
@@ -2128,20 +2195,20 @@ class EditingModes:
                 pass
             self._omit_region_drag_artist = None
             if self._has_matplotlib_canvas():
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
 
         # Clear PyQtGraph drag visual
         if self._is_pyqtgraph_backend():
-            if hasattr(self.window.plot_host, '_clear_drag_visual'):
-                self.window.plot_host._clear_drag_visual()
+            if hasattr(self.plot_host, '_clear_drag_visual'):
+                self.plot_host._clear_drag_visual()
 
         # Clear click callback and restore cursor
-        self.window.plot_host.clear_click_callback()
-        self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+        self.plot_host.clear_click_callback()
+        self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
 
         # Clear editing instructions
         try:
-            self.window._clear_editing_instructions()
+            self._clear_instructions()
         except Exception: pass
 
     def _on_plot_click_omit_region(self, xdata, ydata, event):
@@ -2174,13 +2241,13 @@ class EditingModes:
             ctrl_held = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
 
         # Get current sweep
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
 
         # Check if full sweep is already omitted (unless doing Ctrl+Shift to toggle)
         if s in st.omitted_sweeps and not (ctrl_held and shift_held):
             print(f"[omit-region] Full sweep {s} already omitted - ignoring region operations")
-            try: self.window._log_status_message("Full sweep already omitted (use Ctrl+Shift+click to un-omit)", 2000)
+            try: self._log_status("Full sweep already omitted (use Ctrl+Shift+click to un-omit)", 2000)
             except Exception: pass
             return
 
@@ -2188,13 +2255,13 @@ class EditingModes:
         if ctrl_held and shift_held:
             print(f"[omit-region] Ctrl+Shift detected in click handler - toggling full sweep")
             # Get current sweep
-            st = self.window.state
-            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+            st = self.state
+            s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
 
             # Toggle sweep omission directly (keep mode active)
             if s in st.omitted_sweeps:
                 st.omitted_sweeps.remove(s)
-                try: self.window._log_status_message(f"Sweep {s+1}: included", 2000)
+                try: self._log_status(f"Sweep {s+1}: included", 2000)
                 except Exception: pass
             else:
                 st.omitted_sweeps.add(s)
@@ -2202,19 +2269,19 @@ class EditingModes:
                 if s in st.omitted_ranges:
                     print(f"[omit-region] Clearing {len(st.omitted_ranges[s])} smaller regions (full sweep now omitted)")
                     del st.omitted_ranges[s]
-                try: self.window._log_status_message(f"Sweep {s+1}: omitted (cleared region markers)", 2000)
+                try: self._log_status(f"Sweep {s+1}: omitted (cleared region markers)", 2000)
                 except Exception: pass
 
             # Refresh and restore persistent message
-            self.window._refresh_omit_button_label()
-            self.window.redraw_main_plot()
-            try: self.window._restore_editing_instructions()
+            self._refresh_omit_label()
+            self._redraw()
+            try: self._restore_instructions()
             except Exception: pass
             return
 
         # Get current sweep
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
 
         # Get omitted regions for this sweep
         regions = st.omitted_ranges.get(s, [])
@@ -2242,9 +2309,9 @@ class EditingModes:
                         del st.omitted_ranges[s]
                     print(f"[omit-region] Deleted region {i}: {t_start:.3f} - {t_end:.3f} s")
 
-                    self.window.redraw_main_plot()
+                    self._redraw()
                     # Restore editing instructions
-                    try: self.window._restore_editing_instructions()
+                    try: self._restore_instructions()
                     except Exception: pass
                     return
 
@@ -2298,7 +2365,7 @@ class EditingModes:
             return
 
         # Get plot axes
-        ax = self.window.plot_host.ax_main
+        ax = self.plot_host.ax_main
         if ax is None:
             return
 
@@ -2318,7 +2385,7 @@ class EditingModes:
         # Choose color based on mode (gray for add, red for remove)
         color = 'red' if self._omit_region_remove_mode else 'gray'
         self._omit_region_drag_artist = ax.axvspan(x_left, x_right, alpha=0.3, color=color, zorder=10)
-        self.window.plot_host.canvas.draw_idle()
+        self.plot_host.canvas.draw_idle()
 
     def _on_omit_region_release(self, event):
         """Finalize the omitted region when mouse is released."""
@@ -2344,12 +2411,12 @@ class EditingModes:
                 except:
                     pass
                 self._omit_region_drag_artist = None
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
             return
 
         # Get current sweep and convert plot time to sample indices
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
         sr_hz = st.sr_hz if st.sr_hz else 1000.0
 
         # Adjust for stim normalization
@@ -2380,7 +2447,7 @@ class EditingModes:
                 except:
                     pass
                 self._omit_region_drag_artist = None
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
             return
 
         # Handle edge adjustment vs new region
@@ -2439,10 +2506,10 @@ class EditingModes:
         # Reset state and redraw
         self._reset_omit_region_state()
         print(f"[omit-region] Calling redraw_main_plot()...")
-        self.window.redraw_main_plot()
+        self._redraw()
 
         # Restore editing instructions after redraw
-        try: self.window._restore_editing_instructions()
+        try: self._restore_instructions()
         except Exception: pass
 
     def _reset_omit_region_state(self):
@@ -2459,12 +2526,12 @@ class EditingModes:
                 pass
             self._omit_region_drag_artist = None
             if self._has_matplotlib_canvas():
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
 
         # Clear PyQtGraph drag visual if present
         if self._is_pyqtgraph_backend():
-            if hasattr(self.window.plot_host, '_clear_drag_visual'):
-                self.window.plot_host._clear_drag_visual()
+            if hasattr(self.plot_host, '_clear_drag_visual'):
+                self.plot_host._clear_drag_visual()
 
     def _on_omit_region_drag_pyqtgraph(self, event_type, xdata, ydata, event):
         """Handle PyQtGraph drag events for omit region mode."""
@@ -2487,15 +2554,15 @@ class EditingModes:
 
             # Ctrl+Shift+Click: Toggle full sweep omission
             if ctrl_held and shift_held:
-                st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+                st = self.state
+                s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
                 if s in st.omitted_sweeps:
                     st.omitted_sweeps.discard(s)
                     # Clear any omitted regions for this sweep as well
                     if s in st.omitted_ranges:
                         del st.omitted_ranges[s]
                     print(f"[omit-region] Un-omitted full sweep {s}")
-                    try: self.window._log_status_message(f"Sweep {s+1}: included", 2000)
+                    try: self._log_status(f"Sweep {s+1}: included", 2000)
                     except Exception: pass
                 else:
                     st.omitted_sweeps.add(s)
@@ -2504,7 +2571,7 @@ class EditingModes:
                         print(f"[omit-region] Clearing {len(st.omitted_ranges[s])} smaller regions (full sweep now omitted)")
                         del st.omitted_ranges[s]
                     print(f"[omit-region] Omitted full sweep {s}")
-                    try: self.window._log_status_message(f"Sweep {s+1}: omitted", 2000)
+                    try: self._log_status(f"Sweep {s+1}: omitted", 2000)
                     except Exception: pass
 
                 # Clear any drag state to prevent accidental region creation
@@ -2515,14 +2582,14 @@ class EditingModes:
                 # Set flag to prevent duplicate handling in click callback
                 self._pyqtgraph_handled_ctrl_shift = True
 
-                self.window.redraw_main_plot()
-                self.window._refresh_omit_button_label()
+                self._redraw()
+                self._refresh_omit_label()
                 return 'handled'  # Signal to eventFilter not to start drag
 
             # Ctrl+Click: Delete region under cursor
             if ctrl_held and not shift_held:
-                st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+                st = self.state
+                s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
                 sr_hz = st.sr_hz if st.sr_hz else 1000.0
                 spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
                 t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
@@ -2544,13 +2611,13 @@ class EditingModes:
                         if not st.omitted_ranges[s]:
                             del st.omitted_ranges[s]
                         print(f"[omit-region] Deleted region {i}")
-                        self.window.redraw_main_plot()
+                        self._redraw()
                         return 'handled'  # Signal to eventFilter not to start drag
                 return 'handled'  # Ctrl+click outside region - don't start drag
 
             # Normal click - check for edge grab or start new region
-            st = self.window.state
-            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+            st = self.state
+            s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
             sr_hz = st.sr_hz if st.sr_hz else 1000.0
             spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
             t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
@@ -2595,7 +2662,7 @@ class EditingModes:
 
             # Use PyQtGraph's drag visual (gray for add, red for remove)
             color = (255, 100, 100, 80) if self._omit_region_remove_mode else (128, 128, 128, 80)
-            self.window.plot_host.add_drag_visual(x_left, x_right, color=color)
+            self.plot_host.add_drag_visual(x_left, x_right, color=color)
 
         elif event_type == 'release':
             # Finalize region
@@ -2614,8 +2681,8 @@ class EditingModes:
                 return
 
             # Get current sweep and convert to sample indices
-            st = self.window.state
-            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+            st = self.state
+            s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
             sr_hz = st.sr_hz if st.sr_hz else 1000.0
 
             spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
@@ -2662,8 +2729,8 @@ class EditingModes:
             self._reset_omit_region_state()
 
             # Redraw
-            self.window.redraw_main_plot()
-            self.window._refresh_omit_button_label()
+            self._redraw()
+            self._refresh_omit_label()
 
     def _on_omit_region_key_pyqtgraph(self, key, modifiers):
         """Handle keyboard events for omit region mode in PyQtGraph."""
@@ -2679,11 +2746,11 @@ class EditingModes:
 
     def _snap_all_omit_regions_to_breaths(self):
         """Snap all omitted regions on current sweep to breath onsets (onset to onset)."""
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
 
         if s not in st.omitted_ranges:
-            try: self.window._log_status_message("No omitted regions to snap on this sweep", 2000)
+            try: self._log_status("No omitted regions to snap on this sweep", 2000)
             except Exception: pass
             return
 
@@ -2692,12 +2759,12 @@ class EditingModes:
         onsets = np.asarray(breaths.get('onsets', []), dtype=int)
 
         if onsets.size == 0:
-            try: self.window._log_status_message("No breath onsets detected - run peak detection first", 3000)
+            try: self._log_status("No breath onsets detected - run peak detection first", 3000)
             except Exception: pass
             return
 
         # Get current trace for time conversion
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None:
             return
 
@@ -2726,8 +2793,8 @@ class EditingModes:
         self._merge_omit_regions(s)
 
         # Redraw and restore editing instructions
-        self.window.redraw_main_plot()
-        try: self.window._restore_editing_instructions()
+        self._redraw()
+        try: self._restore_instructions()
         except Exception: pass
 
         print(f"[omit-region] Snapped {len(regions)} region(s) to breath onsets")
@@ -2739,13 +2806,13 @@ class EditingModes:
         This captures complete breaths within the region.
         """
         # Get current trace to convert indices to times
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None:
             print("[omit-region] No trace available for snapping")
             return start_time, end_time
 
         # Get breath events for this sweep
-        breaths = self.window.state.breath_by_sweep.get(sweep_idx, {})
+        breaths = self.state.breath_by_sweep.get(sweep_idx, {})
         onsets = np.asarray(breaths.get('onsets', []), dtype=int)
 
         if onsets.size == 0:
@@ -2781,7 +2848,7 @@ class EditingModes:
 
     def _merge_omit_regions(self, sweep_idx: int):
         """Merge overlapping or directly adjacent omitted regions for a given sweep."""
-        st = self.window.state
+        st = self.state
         if sweep_idx not in st.omitted_ranges:
             return
 
@@ -2828,15 +2895,15 @@ class EditingModes:
 
         if checked:
             # Turn off matplotlib toolbar modes (zoom, pan)
-            self.window.plot_host.turn_off_toolbar_modes()
+            self.plot_host.turn_off_toolbar_modes()
 
             # Turn OFF other edit modes
             if getattr(self, "_add_peaks_mode", False):
                 self._add_peaks_mode = False
-                self.window.addPeaksButton.blockSignals(True)
-                self.window.addPeaksButton.setChecked(False)
-                self.window.addPeaksButton.blockSignals(False)
-                self.window.addPeaksButton.setText("Add Peaks")
+                self._btn_add_peaks.blockSignals(True)
+                self._btn_add_peaks.setChecked(False)
+                self._btn_add_peaks.blockSignals(False)
+                self._btn_add_peaks.setText("Add Peaks")
 
             if getattr(self, "_delete_peaks_mode", False):
                 self._delete_peaks_mode = False
@@ -2846,61 +2913,61 @@ class EditingModes:
 
             if getattr(self, "_move_point_mode", False):
                 self._move_point_mode = False
-                self.window.movePointButton.blockSignals(True)
-                self.window.movePointButton.setChecked(False)
-                self.window.movePointButton.blockSignals(False)
-                self.window.movePointButton.setText("Move Point")
+                self._btn_move_point.blockSignals(True)
+                self._btn_move_point.setChecked(False)
+                self._btn_move_point.blockSignals(False)
+                self._btn_move_point.setText("Move Point")
 
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False
-                self.window.markSniffButton.blockSignals(True)
-                self.window.markSniffButton.setChecked(False)
-                self.window.markSniffButton.blockSignals(False)
-                self.window.markSniffButton.setText("Mark Sniff")
+                self._btn_mark_sniff.blockSignals(True)
+                self._btn_mark_sniff.setChecked(False)
+                self._btn_mark_sniff.blockSignals(False)
+                self._btn_mark_sniff.setText("Mark Sniff")
 
             # turn OFF omit region mode
             if getattr(self, "_omit_region_mode", False):
                 self._exit_omit_region_mode()
 
-            self.window.MergeBreathsButton.setText("Merge Breaths (ON)")
-            self.window.plot_host.set_click_callback(self._on_plot_click_merge_peaks)
-            self.window.plot_host.setCursor(Qt.CursorShape.CrossCursor)
+            self._btn_merge.setText("Merge Breaths (ON)")
+            self.plot_host.set_click_callback(self._on_plot_click_merge_peaks)
+            self.plot_host.setCursor(Qt.CursorShape.CrossCursor)
             # Show rich text instructions in status bar
             html = ('<b>CLICK+DRAG:</b> Select breaths'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
                     '<b>CLICK/ENTER:</b> <span style="color:#4CAF50">Merge</span>'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
                     '<b>ESC:</b> <span style="color:#F44336">Cancel</span>')
-            self.window._show_editing_instructions(html)
+            self._show_instructions(html)
 
             # Connect drag events (different for matplotlib vs PyQtGraph)
             if self._is_pyqtgraph_backend():
                 # PyQtGraph: use drag callback and key callback
-                self.window.plot_host.set_drag_callback(self._on_merge_drag_pyqtgraph)
-                self.window.plot_host.set_key_callback(self._on_merge_key_pyqtgraph)
+                self.plot_host.set_drag_callback(self._on_merge_drag_pyqtgraph)
+                self.plot_host.set_key_callback(self._on_merge_key_pyqtgraph)
             elif self._has_matplotlib_canvas():
                 # Matplotlib: use mpl_connect
-                self._merge_motion_cid = self.window.plot_host.canvas.mpl_connect('motion_notify_event', self._on_merge_drag)
-                self._merge_release_cid = self.window.plot_host.canvas.mpl_connect('button_release_event', self._on_merge_release)
-                self._merge_key_cid = self.window.plot_host.canvas.mpl_connect('key_press_event', self._on_merge_canvas_key_press)
+                self._merge_motion_cid = self.plot_host.canvas.mpl_connect('motion_notify_event', self._on_merge_drag)
+                self._merge_release_cid = self.plot_host.canvas.mpl_connect('button_release_event', self._on_merge_release)
+                self._merge_key_cid = self.plot_host.canvas.mpl_connect('key_press_event', self._on_merge_canvas_key_press)
         else:
-            self.window.MergeBreathsButton.setText("Merge Breaths")
+            self._btn_merge.setText("Merge Breaths")
 
             # Disconnect drag events
             if self._is_pyqtgraph_backend():
-                if hasattr(self.window.plot_host, 'clear_drag_callback'):
-                    self.window.plot_host.clear_drag_callback()
-                if hasattr(self.window.plot_host, 'clear_key_callback'):
-                    self.window.plot_host.clear_key_callback()
+                if hasattr(self.plot_host, 'clear_drag_callback'):
+                    self.plot_host.clear_drag_callback()
+                if hasattr(self.plot_host, 'clear_key_callback'):
+                    self.plot_host.clear_key_callback()
             elif self._has_matplotlib_canvas():
                 if self._merge_motion_cid is not None:
-                    self.window.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
+                    self.plot_host.canvas.mpl_disconnect(self._merge_motion_cid)
                     self._merge_motion_cid = None
                 if self._merge_release_cid is not None:
-                    self.window.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
+                    self.plot_host.canvas.mpl_disconnect(self._merge_release_cid)
                     self._merge_release_cid = None
                 if self._merge_key_cid is not None:
-                    self.window.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
+                    self.plot_host.canvas.mpl_disconnect(self._merge_key_cid)
                     self._merge_key_cid = None
 
             # Clear selection and visual indicators
@@ -2912,9 +2979,9 @@ class EditingModes:
                        getattr(self, "_add_sigh_mode", False),
                        getattr(self, "_move_point_mode", False),
                        getattr(self, "_mark_sniff_mode", False)]):
-                self.window.plot_host.clear_click_callback()
-                self.window.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
-                self.window._clear_editing_instructions()
+                self.plot_host.clear_click_callback()
+                self.plot_host.setCursor(Qt.CursorShape.ArrowCursor)
+                self._clear_instructions()
 
     def _on_merge_drag_pyqtgraph(self, event_type, xdata, ydata, event):
         """Handle PyQtGraph drag events for merge peaks mode.
@@ -2932,9 +2999,9 @@ class EditingModes:
             # Start drag - same logic as _on_plot_click_merge_peaks
             # If 2 peaks are already selected, check for click on selected peaks to merge
             if len(self._selected_peaks) == 2:
-                st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-                t, y = self.window._current_trace()
+                st = self.state
+                s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+                t, y = self._get_current_trace()
                 if t is not None:
                     spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
                     if st.stim_chan and spans:
@@ -2955,7 +3022,7 @@ class EditingModes:
                     elif np.min(distances) > half_win_s * 2:
                         print(f"[merge-peaks] Click far from selected peaks, deselecting...")
                         self._cancel_merge_selection()
-                        self.window._log_status_message("✗ Selection cleared", 1500)
+                        self._log_status("✗ Selection cleared", 1500)
                         return
 
             # Clear previous selection and start new drag
@@ -2974,7 +3041,7 @@ class EditingModes:
             x_max = max(x_start, x_end)
 
             # Use PyQtGraph's drag visual
-            self.window.plot_host.add_drag_visual(x_min, x_max, color=(255, 255, 0, 50))
+            self.plot_host.add_drag_visual(x_min, x_max, color=(255, 255, 0, 50))
 
         elif event_type == 'release':
             # Complete drag - find peaks in selection
@@ -2989,11 +3056,11 @@ class EditingModes:
             self._merge_start_x = None
 
             # Get current sweep and peaks
-            st = self.window.state
+            st = self.state
             if st.t is None or st.analyze_chan not in st.sweeps:
                 return
 
-            s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+            s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
             pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
             if pks.size == 0:
                 print("[merge-peaks] No peaks in this sweep")
@@ -3001,7 +3068,7 @@ class EditingModes:
                 return
 
             # Get plot time (may be normalized if stim channel)
-            t, y = self.window._current_trace()
+            t, y = self._get_current_trace()
             if t is None:
                 return
 
@@ -3020,23 +3087,23 @@ class EditingModes:
             if len(selected_peak_indices) == 0:
                 print("[merge-peaks] No peaks selected")
                 self._cancel_merge_selection()
-                self.window._log_status_message("✗ No peaks in selection", 2000)
+                self._log_status("✗ No peaks in selection", 2000)
                 return
             elif len(selected_peak_indices) == 1:
                 print("[merge-peaks] Only 1 peak selected, need 2")
                 self._cancel_merge_selection()
-                self.window._log_status_message("✗ Need to select exactly 2 peaks", 2000)
+                self._log_status("✗ Need to select exactly 2 peaks", 2000)
                 return
             elif len(selected_peak_indices) > 2:
                 print(f"[merge-peaks] Too many peaks selected ({len(selected_peak_indices)})")
                 self._cancel_merge_selection()
-                self.window._log_status_message(f"✗ Too many peaks ({len(selected_peak_indices)})", 2000)
+                self._log_status(f"✗ Too many peaks ({len(selected_peak_indices)})", 2000)
                 return
 
             # Exactly 2 peaks selected!
             self._selected_peaks = list(selected_peak_indices)
             print(f"[merge-peaks] Selected 2 peaks at indices {self._selected_peaks}")
-            self.window._log_status_message("✓ 2 peaks selected. Click to merge or ESC to cancel.", 5000)
+            self._log_status("✓ 2 peaks selected. Click to merge or ESC to cancel.", 5000)
 
             # Highlight selected peaks using PyQtGraph scatter
             self._highlight_selected_peaks_pyqtgraph(t_plot, y)
@@ -3055,7 +3122,7 @@ class EditingModes:
         elif key == 'escape':
             print("[merge-peaks] Escape pressed, canceling...")
             self._cancel_merge_selection()
-            self.window._log_status_message("✗ Selection cleared", 1500)
+            self._log_status("✗ Selection cleared", 1500)
 
     def _highlight_selected_peaks_pyqtgraph(self, t_plot, y):
         """Highlight selected peaks in PyQtGraph mode."""
@@ -3064,7 +3131,7 @@ class EditingModes:
 
         try:
             import pyqtgraph as pg
-            main_plot = self.window.plot_host._get_main_plot()
+            main_plot = self.plot_host._get_main_plot()
             if main_plot is None:
                 return
 
@@ -3102,9 +3169,9 @@ class EditingModes:
         if len(self._selected_peaks) == 2:
             # Single click - check if near one of the selected peaks to merge
             if not event.dblclick:  # Ignore double-clicks (they're for matplotlib zoom)
-                st = self.window.state
-                s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
-                t, y = self.window._current_trace()
+                st = self.state
+                s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+                t, y = self._get_current_trace()
                 if t is None:
                     return
 
@@ -3128,7 +3195,7 @@ class EditingModes:
                 elif np.min(distances) > half_win_s * 2:  # 2x larger for deselect
                     print(f"[merge-peaks] Click far from selected peaks (distance={np.min(distances):.3f}s), deselecting...")
                     self._cancel_merge_selection()
-                    self.window._log_status_message("✗ Selection cleared", 1500)
+                    self._log_status("✗ Selection cleared", 1500)
                     return
                 else:
                     # Click in intermediate zone - start new drag (will deselect on release)
@@ -3157,7 +3224,7 @@ class EditingModes:
         x_max = max(x_start, x_end)
 
         # Get current y-axis limits
-        ax = self.window.plot_host.fig.axes[0]
+        ax = self.plot_host.fig.axes[0]
         y_min, y_max = ax.get_ylim()
 
         # Remove old rectangle
@@ -3174,7 +3241,7 @@ class EditingModes:
             facecolor='yellow', alpha=0.2, edgecolor='orange', linewidth=2
         )
         ax.add_patch(self._merge_drag_artist)
-        self.window.plot_host.canvas.draw_idle()
+        self.plot_host.canvas.draw_idle()
 
     def _on_merge_release(self, event):
         """Handle drag release to select peaks in the selected region."""
@@ -3194,11 +3261,11 @@ class EditingModes:
         self._merge_start_x = None
 
         # Get current sweep and peaks
-        st = self.window.state
+        st = self.state
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
         pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
         if pks.size == 0:
             print("[merge-peaks] No peaks in this sweep")
@@ -3206,7 +3273,7 @@ class EditingModes:
             return
 
         # Get plot time (may be normalized if stim channel)
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None:
             return
 
@@ -3225,30 +3292,30 @@ class EditingModes:
         if len(selected_peak_indices) == 0:
             print("[merge-peaks] No peaks selected")
             self._cancel_merge_selection()
-            self.window._log_status_message("✗ No peaks in selection", 2000)
+            self._log_status("✗ No peaks in selection", 2000)
             return
         elif len(selected_peak_indices) == 1:
             print("[merge-peaks] Only 1 peak selected, need 2")
             self._cancel_merge_selection()
-            self.window._log_status_message("✗ Need to select exactly 2 peaks", 2000)
+            self._log_status("✗ Need to select exactly 2 peaks", 2000)
             return
         elif len(selected_peak_indices) > 2:
             print(f"[merge-peaks] Too many peaks selected ({len(selected_peak_indices)}), need exactly 2")
             self._cancel_merge_selection()
-            self.window._log_status_message(f"✗ Too many peaks ({len(selected_peak_indices)}), need exactly 2", 2000)
+            self._log_status(f"✗ Too many peaks ({len(selected_peak_indices)}), need exactly 2", 2000)
             return
 
         # Exactly 2 peaks selected!
         self._selected_peaks = list(selected_peak_indices)
         print(f"[merge-peaks] Selected 2 peaks at indices {self._selected_peaks}. Click on one to merge.")
-        self.window._log_status_message(f"✓ 2 peaks selected. Click on one to merge, press Enter, or click away to deselect.", 5000)
+        self._log_status(f"✓ 2 peaks selected. Click on one to merge, press Enter, or click away to deselect.", 5000)
 
         # Set canvas to accept keyboard focus for Enter key
-        self.window.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.window.plot_host.canvas.setFocus()
+        self.plot_host.canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.plot_host.canvas.setFocus()
 
         # Highlight selected peaks
-        ax = self.window.plot_host.fig.axes[0]
+        ax = self.plot_host.fig.axes[0]
         peak_times_selected = t_plot[self._selected_peaks]
         peak_values_selected = y[self._selected_peaks]
 
@@ -3264,17 +3331,17 @@ class EditingModes:
             peak_times_selected, peak_values_selected,
             s=200, facecolors='none', edgecolors='orange', linewidths=3, zorder=10
         )
-        self.window.plot_host.canvas.draw_idle()
+        self.plot_host.canvas.draw_idle()
 
     def _execute_merge(self):
         """Merge the two selected peaks."""
         if len(self._selected_peaks) != 2:
             print("[merge-peaks] Cannot merge: need exactly 2 peaks selected")
-            self.window._log_status_message("✗ Need to select exactly 2 peaks first", 2000)
+            self._log_status("✗ Need to select exactly 2 peaks first", 2000)
             return
 
-        st = self.window.state
-        s = max(0, min(st.sweep_idx, self.window._nav_vm.sweep_count() - 1))
+        st = self.state
+        s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
         pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
 
         if pks.size == 0:
@@ -3295,7 +3362,7 @@ class EditingModes:
         pk2_idx = pk2_idx[0]
 
         # Determine which peak to keep (keep the larger one)
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None or y is None:
             return
 
@@ -3380,27 +3447,27 @@ class EditingModes:
                           num_peaks_after=len(pks_new),
                           sweep_index=s)
 
-        self.window._log_status_message(f"✓ Peaks merged! ({len(pks)} → {len(pks_new)} peaks)", 2000)
+        self._log_status(f"✓ Peaks merged! ({len(pks)} → {len(pks_new)} peaks)", 2000)
 
         # Clear selection
         self._cancel_merge_selection()
 
         # Recompute Y2 if active
         if getattr(st, "y2_metric_key", None):
-            self.window._compute_y2_all_sweeps()
+            self._compute_y2()
 
         # Refresh plot
-        self.window.redraw_main_plot()
+        self._redraw()
 
         # Re-run GMM clustering if auto-update enabled
-        if getattr(self.window, 'auto_gmm_enabled', False):
-            self.window._run_automatic_gmm_clustering()
-            self.window._refresh_eupnea_overlays_only()
-            self.window.eupnea_sniffing_out_of_date = False
-            self.window.statusBar().clearMessage()
+        if self._is_auto_gmm_enabled():
+            self._run_gmm()
+            self._refresh_eupnea()
+            self._set_eupnea_out_of_date(False)
+            self._clear_persistent_status()
         else:
-            self.window.eupnea_sniffing_out_of_date = True
-            self.window._log_status_message("⚠️ Eupnea/sniffing detection out of date")
+            self._set_eupnea_out_of_date(True)
+            self._log_status("⚠️ Eupnea/sniffing detection out of date")
 
     def _cancel_merge_selection(self):
         """Clear merge selection and visual indicators."""
@@ -3415,17 +3482,17 @@ class EditingModes:
                 pass
             self._merge_drag_artist = None
             if self._has_matplotlib_canvas():
-                self.window.plot_host.canvas.draw_idle()
+                self.plot_host.canvas.draw_idle()
 
         # Remove PyQtGraph visual indicators
         if self._is_pyqtgraph_backend():
             # Clear drag visual
-            if hasattr(self.window.plot_host, '_clear_drag_visual'):
-                self.window.plot_host._clear_drag_visual()
+            if hasattr(self.plot_host, '_clear_drag_visual'):
+                self.plot_host._clear_drag_visual()
             # Clear highlight scatter
             if hasattr(self, '_merge_highlight_scatter') and self._merge_highlight_scatter is not None:
                 try:
-                    main_plot = self.window.plot_host._get_main_plot()
+                    main_plot = self.plot_host._get_main_plot()
                     if main_plot:
                         main_plot.removeItem(self._merge_highlight_scatter)
                 except:
