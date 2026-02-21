@@ -728,6 +728,10 @@ class PyQtGraphPlotHost(QWidget):
                     main_window.peak_prominence = new_val
                     print(f"[threshold] Updated to {new_val:.4f}")
 
+                    # Enable detect button so user can re-run detection
+                    if hasattr(main_window, 'ApplyPeakFindPushButton'):
+                        main_window.ApplyPeakFindPushButton.setEnabled(True)
+
                     # Sync with Analysis Options dialog if open
                     try:
                         prom_dialog = getattr(main_window, 'prominence_dialog', None)

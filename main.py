@@ -189,14 +189,6 @@ class MainWindow(QMainWindow):
         # GMM clustering cache (for fast dialog loading)
         self._cached_gmm_results = None
 
-        # Outlier detection metrics (default set)
-        self.outlier_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
-
-        # Cross-sweep outlier detection
-        self.global_outlier_stats = None  # Dict[metric_key, (mean, std)] - computed across all sweeps
-        self.metrics_by_sweep = {}  # Dict[sweep_idx, Dict[metric_key, metric_array]]
-        self.onsets_by_sweep = {}  # Dict[sweep_idx, onsets_array]
-
         # Eupnea detection parameters
         self.eupnea_freq_threshold = 5.0  # Hz - frequency threshold for eupnea (used in frequency mode)
         self.eupnea_min_duration = 2.0  # seconds - minimum sustained duration for eupnea region
@@ -385,7 +377,22 @@ class MainWindow(QMainWindow):
         self.file_list_manager = FileListManager(self)
 
         # --- Initialize Plot Manager (BEFORE signal connections that may trigger plotting) ---
-        self.plot_manager = PlotManager(self)
+        self.plot_manager = PlotManager(
+            self,
+            get_current_trace=self._current_trace,
+            get_processed_for=self._get_processed_for,
+            get_apnea_thresh=lambda: self._parse_float(self.ApneaThresh) or 0.5,
+            get_outlier_sd=lambda: self._parse_float(self.OutlierSD) or 3.0,
+            get_eupnea_config=lambda: {
+                'freq_threshold': self.eupnea_freq_threshold,
+                'min_duration': self.eupnea_min_duration,
+                'detection_mode': self.eupnea_detection_mode,
+            },
+            get_event_annotation_config=self._get_event_annotation_config,
+            get_channel_manager=lambda: getattr(self, 'channel_manager', None),
+            log_status=self._log_status_message,
+            single_panel_mode_fn=lambda: self.single_panel_mode,
+        )
 
         # Export manager created lazily on first use (speeds up startup)
         self._export_manager = None
@@ -440,6 +447,9 @@ class MainWindow(QMainWindow):
                 self._value = str(value)
 
         self.OutlierSD = OutlierSDHolder("3.0")  # Default: 3.0 SD for outlier detection
+
+        # Sync config dataclasses (MVVM — Step 1 of refactoring)
+        self._sync_analysis_config()
 
         # Connect signals for apnea threshold changes to trigger redraw
         self.ApneaThresh.textChanged.connect(self._on_region_threshold_changed)
@@ -2841,6 +2851,11 @@ class MainWindow(QMainWindow):
             'core.detection.threshold',
             'core.detection',
             'dialogs.marker_detection_dialog',
+
+            # Analysis services
+            'core.services.analysis_service',
+            'core.services.classifier_service',
+            'core.services.stim_service',
         ]
 
         reloaded = []
@@ -2860,6 +2875,8 @@ class MainWindow(QMainWindow):
         if reloaded and self.state.in_path:
             try:
                 self.redraw_main_plot()
+                # Force event marker refresh (dedup key unchanged, so normal refresh skips)
+                self._refresh_event_markers(force=True)
                 plot_refreshed = True
             except Exception as e:
                 print(f"[Hot Reload] Plot refresh failed: {e}")
@@ -3303,6 +3320,7 @@ class MainWindow(QMainWindow):
 
         # Reset UI caches and widgets
         self._file_load_service.reset_caches(self)
+        self.plot_manager.clear_caches()
         self._refresh_omit_button_label()
 
         # Reset adaptive downsampling for fresh file
@@ -3636,6 +3654,7 @@ class MainWindow(QMainWindow):
 
         # Reset UI caches and widgets
         self._file_load_service.reset_caches(self)
+        self.plot_manager.clear_caches()
         self._refresh_omit_button_label()
 
         self.ApplyPeakFindPushButton.setEnabled(False)
@@ -3926,6 +3945,7 @@ class MainWindow(QMainWindow):
 
             # Clear caches
             self._file_load_service.reset_caches(self)
+            self.plot_manager.clear_caches()
             self._refresh_omit_button_label()
 
             # Disable peak apply button (peaks already loaded from session)
@@ -3989,23 +4009,23 @@ class MainWindow(QMainWindow):
         )
 
     def _compute_global_zscore_stats(self):
+        """Compute global mean/std across all sweeps for z-score normalization.
+
+        Delegates pure computation to ``analysis_service.compute_normalization_stats``
+        while keeping the UI progress dialog here.
         """
-        Compute global mean and std across all sweeps for z-score normalization.
-        This ensures all sweeps are normalized relative to the same baseline.
-        Uses a progress dialog with processEvents to keep UI responsive.
-        """
-        import numpy as np
+        from core.services.analysis_service import compute_normalization_stats
+        from core.domain.analysis.models import FilterConfig
+        from PyQt6.QtWidgets import QProgressDialog
 
         st = self.state
         if not st.analyze_chan or st.analyze_chan not in st.sweeps:
             return None, None
 
-        Y = st.sweeps[st.analyze_chan]  # (n_samples, n_sweeps)
+        Y = st.sweeps[st.analyze_chan]
         n_sweeps = Y.shape[1]
-        n_samples = Y.shape[0]
-        use_notch = (self.notch_filter_lower is not None and self.notch_filter_upper is not None)
 
-        # For large files, show progress and keep UI responsive
+        # UI progress (thin wrapper around the pure service call)
         show_progress = n_sweeps >= 20
         progress = None
         if show_progress:
@@ -4013,45 +4033,19 @@ class MainWindow(QMainWindow):
             progress.setWindowModality(Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(300)
 
-        # Pre-allocate array instead of list + concatenate
-        all_data = np.empty(n_samples * n_sweeps, dtype=np.float64)
+        def _progress_cb(current, total):
+            if progress:
+                progress.setValue(current)
+                QApplication.processEvents()
 
-        for sweep_idx in range(n_sweeps):
-            y_raw = Y[:, sweep_idx]
-
-            # Apply all filters EXCEPT z-score
-            y = filters.apply_all_1d(
-                y_raw, st.sr_hz,
-                st.use_low, st.low_hz,
-                st.use_high, st.high_hz,
-                st.use_mean_sub, st.mean_val,
-                st.use_invert,
-                order=self.filter_order
-            )
-
-            # Apply notch filter if configured
-            if use_notch:
-                y = self._apply_notch_filter(y, st.sr_hz, self.notch_filter_lower, self.notch_filter_upper)
-
-            all_data[sweep_idx * n_samples:(sweep_idx + 1) * n_samples] = y
-
-            if show_progress:
-                progress.setValue(sweep_idx)
-                if sweep_idx % 10 == 0:
-                    QApplication.processEvents()
+        fc = FilterConfig.from_app_state(st, self)
+        global_mean, global_std = compute_normalization_stats(Y, st.sr_hz, fc, _progress_cb)
 
         if progress:
             progress.close()
 
-        # Compute global statistics (excluding NaN values)
-        valid_mask = ~np.isnan(all_data)
-        if not np.any(valid_mask):
-            return None, None
-
-        global_mean = np.mean(all_data[valid_mask])
-        global_std = np.std(all_data[valid_mask], ddof=1)
-
-        print(f"[zscore] Computed global stats: mean={global_mean:.4f}, std={global_std:.4f}")
+        if global_mean is not None:
+            print(f"[zscore] Computed global stats: mean={global_mean:.4f}, std={global_std:.4f}")
         return global_mean, global_std
 
     def plot_all_channels(self):
@@ -4443,27 +4437,24 @@ class MainWindow(QMainWindow):
             print(msg)
 
     def _detect_stims_all_sweeps(self, thresh: float = 1.0):
-        """Detect stimulations on all sweeps (for export/preview)."""
+        """Detect stimulations on all sweeps. Delegates to stim_service."""
+        from core.services.stim_service import detect_stims_all_sweeps
+
         st = self.state
         if not st.stim_chan or st.stim_chan not in st.sweeps:
             return
 
-        Y = st.sweeps[st.stim_chan]
-        n_sweeps = Y.shape[1]
-        t = st.t
+        results = detect_stims_all_sweeps(
+            st.sweeps[st.stim_chan], st.t, thresh,
+            skip_existing=st.stim_spans_by_sweep,
+        )
+        for s, r in results.items():
+            st.stim_onsets_by_sweep[s] = r["onsets"]
+            st.stim_offsets_by_sweep[s] = r["offsets"]
+            st.stim_spans_by_sweep[s] = r["spans"]
+            st.stim_metrics_by_sweep[s] = r["metrics"]
 
-        for s in range(n_sweeps):
-            # Skip if already detected
-            if s in st.stim_spans_by_sweep:
-                continue
-
-            y = Y[:, s]
-            on_idx, off_idx, spans_s, metrics = stimdet.detect_threshold_crossings(y, t, thresh=thresh)
-            st.stim_onsets_by_sweep[s] = on_idx
-            st.stim_offsets_by_sweep[s] = off_idx
-            st.stim_spans_by_sweep[s] = spans_s
-            st.stim_metrics_by_sweep[s] = metrics
-
+        n_sweeps = st.sweeps[st.stim_chan].shape[1]
         print(f"[stim] Detected stims for all {n_sweeps} sweeps")
 
     # ---------- Filters & redraw ----------
@@ -4618,9 +4609,39 @@ class MainWindow(QMainWindow):
         if self.peak_prominence is not None and self.state.analyze_chan:
             self.ApplyPeakFindPushButton.setEnabled(True)
 
+    # ── MVVM config sync ──────────────────────────────────────────
+
+    def _sync_analysis_config(self):
+        """Populate AppState.filter_config / peak_config from current MainWindow values.
+
+        Called once in __init__ and can be called again whenever settings change
+        so that services always have an up-to-date snapshot.
+        """
+        from core.domain.analysis.models import FilterConfig, PeakDetectionConfig
+
+        st = self.state
+        st.filter_config = FilterConfig.from_app_state(st, self)
+        st.peak_config = PeakDetectionConfig.from_main_window(self)
+
     ##################################################
     ##Peak detection parameters                     ##
     ##################################################
+
+    def _get_event_annotation_config(self):
+        """Build EventAnnotationConfig from the event detection dialog state."""
+        from plotting.plot_manager import EventAnnotationConfig
+        dlg = getattr(self, '_event_detection_dialog', None)
+        if dlg is None:
+            return None
+        try:
+            return EventAnnotationConfig(
+                shade_events=dlg.shade_events_check.isChecked(),
+                show_labels=dlg.show_labels_check.isChecked(),
+                hargreaves_mode=dlg.hargreaves_radio.isChecked(),
+                threshold=dlg.threshold_spin.value(),
+            )
+        except Exception:
+            return None
 
     def _parse_float(self, line_edit):
         txt = line_edit.text().strip()
@@ -4637,7 +4658,11 @@ class MainWindow(QMainWindow):
         Filters are only applied to the primary Pleth channel (st.analyze_chan).
         All other channels return raw data — the current filter settings (HP/LP/notch)
         are designed for plethysmography signals and would distort other signal types.
+
+        Delegates heavy lifting to ``analysis_service.get_processed_signal``.
         """
+        from core.services.analysis_service import get_processed_signal
+
         st = self.state
         Y = st.sweeps[chan]
         s = max(0, min(sweep_idx, Y.shape[1]-1))
@@ -4650,59 +4675,23 @@ class MainWindow(QMainWindow):
                self.notch_filter_lower, self.notch_filter_upper, self.use_zscore_normalization)
         if key in st.proc_cache:
             return st.proc_cache[key]
-        y = Y[:, s]
-        y2 = filters.apply_all_1d(
-            y, st.sr_hz,
-            st.use_low,  st.low_hz,
-            st.use_high, st.high_hz,
-            st.use_mean_sub, st.mean_val,
-            st.use_invert
-        )
 
-        # Apply notch filter if configured
-        if self.notch_filter_lower is not None and self.notch_filter_upper is not None:
-            y2 = self._apply_notch_filter(y2, st.sr_hz, self.notch_filter_lower, self.notch_filter_upper)
-
-        # Apply z-score normalization if enabled (using global statistics)
+        # Ensure z-score stats are computed before delegating
         if self.use_zscore_normalization:
-            # Compute global stats if not cached
             if self.zscore_global_mean is None or self.zscore_global_std is None:
                 self.zscore_global_mean, self.zscore_global_std = self._compute_global_zscore_stats()
-            y2 = filters.zscore_normalize(y2, self.zscore_global_mean, self.zscore_global_std)
+
+        # Build filter config snapshot and delegate to pure service function
+        from core.domain.analysis.models import FilterConfig
+        fc = FilterConfig.from_app_state(st, self)
+        y2 = get_processed_signal(Y[:, s], st.sr_hz, fc)
 
         st.proc_cache[key] = y2
         return y2
 
     def _apply_notch_filter(self, y, sr_hz, lower_freq, upper_freq):
-        """Apply a notch (band-stop) filter to remove frequencies between lower_freq and upper_freq."""
-        from scipy import signal
-        import numpy as np
-
-        print(f"[notch-filter] Applying notch filter: {lower_freq:.2f} - {upper_freq:.2f} Hz (sr={sr_hz} Hz)")
-
-        # Design a butterworth band-stop filter
-        nyquist = sr_hz / 2.0
-        low = lower_freq / nyquist
-        high = upper_freq / nyquist
-
-        # Ensure frequencies are in valid range (0, 1)
-        low = np.clip(low, 0.001, 0.999)
-        high = np.clip(high, 0.001, 0.999)
-
-        if low >= high:
-            print(f"[notch-filter] Invalid frequency range: {lower_freq}-{upper_freq} Hz")
-            return y
-
-        try:
-            # Design 4th order Butterworth band-stop filter
-            sos = signal.butter(4, [low, high], btype='bandstop', output='sos')
-            # Apply filter (sos format is more numerically stable)
-            y_filtered = signal.sosfiltfilt(sos, y)
-            print(f"[notch-filter] Filter applied successfully. Signal range before: [{y.min():.3f}, {y.max():.3f}], after: [{y_filtered.min():.3f}, {y_filtered.max():.3f}]")
-            return y_filtered
-        except Exception as e:
-            print(f"[notch-filter] Error applying filter: {e}")
-            return y
+        """Apply a notch (band-stop) filter. Delegates to pure filters.notch_filter_1d."""
+        return filters.notch_filter_1d(y, sr_hz, lower_freq, upper_freq)
 
     def _open_analysis_options(self, tab=None):
         """
@@ -5163,116 +5152,27 @@ class MainWindow(QMainWindow):
     def _detect_single_sweep_core(self, sweep_idx: int, y_proc: np.ndarray,
                                    thresh: float, min_dist_samples: int,
                                    direction: str = "up") -> dict:
+        """Core peak detection for a single sweep (parallelizable).
+
+        Delegates to ``analysis_service.detect_single_sweep`` — a pure function
+        that takes config + data and returns results without touching state.
+
+        Legacy callers pass min_dist_samples; the service uses a PeakDetectionConfig.
+        We bridge by building a temporary config with the right min_dist_sec.
         """
-        Core peak detection logic for a single sweep (parallelizable).
+        from core.services.analysis_service import detect_single_sweep
+        from core.domain.analysis.models import PeakDetectionConfig
 
-        This method extracts the computationally expensive parts of peak detection
-        that can be safely run in parallel. It does NOT modify shared state.
-
-        Args:
-            sweep_idx: Sweep index being processed
-            y_proc: Pre-processed signal array
-            thresh: Height threshold for labeling
-            min_dist_samples: Minimum distance between peaks in samples
-            direction: Peak direction ("up" or "down")
-
-        Returns:
-            Dict with detection results (to be merged into state later)
-        """
         st = self.state
+        # Reverse-compute min_dist_sec from min_dist_samples
+        min_dist_sec = (min_dist_samples / st.sr_hz) if min_dist_samples else 0.05
 
-        # Step 1: Detect ALL peaks (no threshold filtering)
-        all_peak_indices = peakdet.detect_peaks(
-            y=y_proc, sr_hz=st.sr_hz,
-            thresh=None,
-            prominence=None,
-            min_dist_samples=min_dist_samples,
+        config = PeakDetectionConfig(
+            height_threshold=thresh,
+            min_dist_sec=min_dist_sec,
             direction=direction,
-            return_all=True
         )
-
-        # Step 2: Compute breath features for ALL peaks
-        all_breaths = peakdet.compute_breath_events(y_proc, all_peak_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-
-        # Step 3: Label peaks using threshold
-        all_peaks_data = peakdet.label_peaks_by_threshold(
-            y=y_proc,
-            peak_indices=all_peak_indices,
-            thresh=thresh,
-            direction=direction
-        )
-        all_peaks_data['labels_threshold_ro'] = all_peaks_data['labels'].copy()
-
-        # Initialize ML prediction arrays as None (will be filled later if models loaded)
-        all_peaks_data['labels_xgboost_ro'] = None
-        all_peaks_data['labels_rf_ro'] = None
-        all_peaks_data['labels_mlp_ro'] = None
-
-        # Step 4: Compute p_noise if threshold model available
-        try:
-            import core.metrics as metrics_mod
-            on = all_breaths.get('onsets', np.array([]))
-            off = all_breaths.get('offsets', np.array([]))
-            exm = all_breaths.get('expmins', np.array([]))
-            exo = all_breaths.get('expoffs', np.array([]))
-            p_noise_all = metrics_mod.compute_p_noise(st.t, y_proc, st.sr_hz, all_peak_indices, on, off, exm, exo)
-            p_breath_all = 1.0 - p_noise_all if p_noise_all is not None else None
-        except Exception:
-            p_noise_all = None
-            p_breath_all = None
-
-        # Step 5: Compute peak candidate metrics
-        peak_metrics = peakdet.compute_peak_candidate_metrics(
-            y=y_proc,
-            all_peak_indices=all_peak_indices,
-            breath_events=all_breaths,
-            sr_hz=st.sr_hz,
-            p_noise=p_noise_all,
-            p_breath=p_breath_all
-        )
-
-        # Step 6: Extract labeled peaks for display
-        labeled_mask = all_peaks_data['labels'] == 1
-        labeled_indices = all_peak_indices[labeled_mask]
-
-        # Step 7: Compute breath events for labeled peaks
-        labeled_breaths = peakdet.compute_breath_events(y_proc, labeled_indices, sr_hz=st.sr_hz, exclude_sec=0.030)
-
-        # Step 8: Recalculate current metrics using labeled peaks as neighbors
-        try:
-            import core.metrics as metrics_mod
-            p_noise_labeled = metrics_mod.compute_p_noise(
-                st.t, y_proc, st.sr_hz, labeled_indices,
-                labeled_breaths.get('onsets', np.array([])),
-                labeled_breaths.get('offsets', np.array([])),
-                labeled_breaths.get('expmins', np.array([])),
-                labeled_breaths.get('expoffs', np.array([]))
-            )
-            p_breath_labeled = 1.0 - p_noise_labeled if p_noise_labeled is not None else None
-
-            current_metrics = peakdet.compute_peak_candidate_metrics(
-                y=y_proc,
-                all_peak_indices=labeled_indices,
-                breath_events=labeled_breaths,
-                sr_hz=st.sr_hz,
-                p_noise=p_noise_labeled,
-                p_breath=p_breath_labeled
-            )
-        except Exception:
-            current_metrics = peak_metrics
-
-        return {
-            'sweep_idx': sweep_idx,
-            'all_peak_indices': all_peak_indices,
-            'all_breaths': all_breaths,
-            'all_peaks_data': all_peaks_data,
-            'peak_metrics': peak_metrics,
-            'current_metrics': current_metrics,
-            'labeled_indices': labeled_indices,
-            'labeled_breaths': labeled_breaths,
-            'p_noise_all': p_noise_all,
-            'p_breath_all': p_breath_all
-        }
+        return detect_single_sweep(sweep_idx, y_proc, st.t, st.sr_hz, config)
 
     def _apply_peak_detection(self):
         """
@@ -6225,7 +6125,22 @@ class MainWindow(QMainWindow):
         # Re-initialize PlotManager (it reads plot_host from self)
         if hasattr(self, 'plot_manager'):
             from plotting.plot_manager import PlotManager
-            self.plot_manager = PlotManager(self)
+            self.plot_manager = PlotManager(
+                self,
+                get_current_trace=self._current_trace,
+                get_processed_for=self._get_processed_for,
+                get_apnea_thresh=lambda: self._parse_float(self.ApneaThresh) or 0.5,
+                get_outlier_sd=lambda: self._parse_float(self.OutlierSD) or 3.0,
+                get_eupnea_config=lambda: {
+                    'freq_threshold': self.eupnea_freq_threshold,
+                    'min_duration': self.eupnea_min_duration,
+                    'detection_mode': self.eupnea_detection_mode,
+                },
+                get_event_annotation_config=self._get_event_annotation_config,
+                get_channel_manager=lambda: getattr(self, 'channel_manager', None),
+                log_status=self._log_status_message,
+                single_panel_mode_fn=lambda: self.single_panel_mode,
+            )
 
         # Handle event marker integration - only works with pyqtgraph
         if hasattr(self, '_event_marker_integration'):

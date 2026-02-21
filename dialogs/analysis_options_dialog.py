@@ -600,8 +600,8 @@ class AnalysisOptionsDialog(ExportMixin, QDialog):
 
         # Get currently selected metrics from parent window
         selected_metrics = []
-        if self.parent_window and hasattr(self.parent_window, 'outlier_metrics'):
-            selected_metrics = self.parent_window.outlier_metrics
+        if self.parent_window and hasattr(self.parent_window, 'plot_manager'):
+            selected_metrics = self.parent_window.plot_manager._outlier_metrics
 
         # Get current outlier SD threshold from parent window
         outlier_sd = 3.0  # Default
@@ -1399,7 +1399,8 @@ class AnalysisOptionsDialog(ExportMixin, QDialog):
         # Save outlier metrics selection back to parent window
         if hasattr(self, 'outlier_dialog') and self.parent_window:
             selected = self.outlier_dialog.get_selected_metrics()
-            self.parent_window.outlier_metrics = selected
+            if hasattr(self.parent_window, 'plot_manager'):
+                self.parent_window.plot_manager._outlier_metrics = selected
             print(f"[analysis-options] Updated outlier detection metrics: {selected}")
 
         # Call parent accept to close dialog

@@ -12,6 +12,15 @@ from core import metrics
 
 
 @dataclass
+class EventAnnotationConfig:
+    """Configuration for event annotation rendering on plots."""
+    shade_events: bool = True
+    show_labels: bool = True
+    hargreaves_mode: bool = False
+    threshold: float = 0.0
+
+
+@dataclass
 class ChannelPanelConfig:
     """Configuration for a single channel panel in multi-channel plotting.
 
@@ -95,16 +104,39 @@ class PlotManager:
     _SLOW_REDRAW_MS = 100   # If redraw takes longer, consider enabling auto-downsample
     _SLOW_COUNT_TRIGGER = 3  # Number of consecutive slow redraws before auto-enabling
 
-    def __init__(self, main_window):
+    def __init__(self, main_window, *, get_current_trace=None, get_processed_for=None,
+                 get_apnea_thresh=None, get_outlier_sd=None, get_eupnea_config=None,
+                 get_event_annotation_config=None, get_channel_manager=None,
+                 log_status=None, single_panel_mode_fn=None):
         """
         Initialize the PlotManager.
 
         Args:
-            main_window: Reference to MainWindow instance for accessing state and UI
+            main_window: Reference to MainWindow instance (kept for editing_modes wiring only)
+            get_current_trace: () -> (t, y_filtered) for current sweep
+            get_processed_for: (chan, sweep_idx) -> np.ndarray filtered signal
+            get_apnea_thresh: () -> float apnea threshold in seconds
+            get_outlier_sd: () -> float outlier SD threshold
+            get_eupnea_config: () -> dict with freq_threshold, min_duration, detection_mode
+            get_event_annotation_config: () -> EventAnnotationConfig
+            get_channel_manager: () -> channel_manager or None
+            log_status: (msg, timeout_ms) -> None
+            single_panel_mode_fn: () -> bool
         """
-        self.window = main_window
+        self.window = main_window  # Kept for editing_modes wiring (Step 7)
         self.plot_host = main_window.plot_host
         self.state = main_window.state
+
+        # Injected callbacks (with fallbacks to self.window for backward compat)
+        self._get_current_trace = get_current_trace
+        self._get_processed_for = get_processed_for
+        self._get_apnea_thresh = get_apnea_thresh
+        self._get_outlier_sd = get_outlier_sd
+        self._get_eupnea_config = get_eupnea_config
+        self._get_event_annotation_config = get_event_annotation_config
+        self._get_channel_manager = get_channel_manager
+        self._log_status = log_status
+        self._single_panel_mode_fn = single_panel_mode_fn
 
         # Threshold line artists (for manual removal)
         self._thresh_line_artists = []
@@ -115,6 +147,24 @@ class PlotManager:
         self._auto_downsample_active = True  # On by default — visually identical, much faster
         self._consecutive_slow_redraws = 0
         self._last_redraw_ms = 0
+
+        # Cross-sweep outlier detection render cache (owned by PlotManager, not MainWindow)
+        self._outlier_metrics = ["if", "amp_insp", "amp_exp", "ti", "te", "area_insp", "area_exp"]
+        self._metrics_by_sweep = {}   # Dict[sweep_idx, Dict[metric_key, metric_array]]
+        self._onsets_by_sweep = {}    # Dict[sweep_idx, onsets_array]
+        self._global_outlier_stats = None  # Dict[metric_key, (mean, std)]
+
+    def clear_caches(self):
+        """Clear cross-sweep outlier render caches. Call when loading a new file."""
+        self._metrics_by_sweep.clear()
+        self._onsets_by_sweep.clear()
+        self._global_outlier_stats = None
+
+    def _is_single_panel_mode(self) -> bool:
+        """Check if single panel mode is active."""
+        if self._single_panel_mode_fn:
+            return self._single_panel_mode_fn()
+        return getattr(self.window, 'single_panel_mode', True)
 
     @property
     def use_auto_downsample(self) -> bool:
@@ -148,8 +198,8 @@ class PlotManager:
         mode = "auto" if self._downsample_override is None else ("on" if self._downsample_override else "off")
         active = self.use_auto_downsample
         msg = f"Performance mode: {mode} (downsampling {'active' if active else 'inactive'})"
-        if hasattr(self.window, '_log_status_message'):
-            self.window._log_status_message(msg, 4000)
+        if self._log_status:
+            self._log_status(msg, 4000)
         print(f"[perf] {msg}")
 
         # Redraw with new setting
@@ -172,8 +222,8 @@ class PlotManager:
                 except (StopIteration, AttributeError):
                     pass
                 msg = f"Performance mode auto-enabled ({elapsed_ms:.0f}ms redraw, {n_pts:,} pts/ch) — right-click plot to adjust"
-                if hasattr(self.window, '_log_status_message'):
-                    self.window._log_status_message(msg, 6000)
+                if self._log_status:
+                    self._log_status(msg, 6000)
                 print(f"[perf] {msg}")
         else:
             self._consecutive_slow_redraws = 0
@@ -199,7 +249,7 @@ class PlotManager:
                 # Channel manager has visible channels - use unified drawing
                 self.draw_channels(configs, grid_mode=False)
                 self._restore_editing_mode_connections()
-            elif self.window.single_panel_mode:
+            elif self._is_single_panel_mode():
                 # No channel manager config - create single Pleth config
                 single_config = ChannelPanelConfig.for_single_panel(st.analyze_chan or "Signal")
 
@@ -237,7 +287,7 @@ class PlotManager:
             if len(visible_channels) >= 1:
                 self._draw_multi_channel_plot(channel_config)
                 self._restore_editing_mode_connections()
-            elif self.window.single_panel_mode:
+            elif self._is_single_panel_mode():
                 self._draw_single_panel_plot()
                 self._restore_editing_mode_connections()
             else:
@@ -303,8 +353,9 @@ class PlotManager:
                 break  # Use first opto channel found
 
         # Also check hidden opto channels (from channel manager)
-        if not opto_spans_plot and hasattr(self.window, 'channel_manager'):
-            channels = self.window.channel_manager.get_channels()
+        cm = self._get_channel_manager() if self._get_channel_manager else None
+        if not opto_spans_plot and cm is not None:
+            channels = cm.get_channels()
             for name, cm_config in channels.items():
                 if cm_config.channel_type == "Opto Stim" and name in st.sweeps:
                     opto_data = st.sweeps[name][:, s]
@@ -404,7 +455,7 @@ class PlotManager:
 
             # Apply filtering if configured (Pleth channels)
             if config.apply_filtering and config.name == st.analyze_chan:
-                _, y_filtered = self.window._current_trace()
+                _, y_filtered = self._get_current_trace()
                 y_data = y_filtered
 
             # Store primary Pleth data for overlays
@@ -539,8 +590,9 @@ class PlotManager:
                 break
 
         # Also check hidden opto channels
-        if not opto_spans_plot and hasattr(self.window, 'channel_manager'):
-            channels = self.window.channel_manager.get_channels()
+        cm = self._get_channel_manager() if self._get_channel_manager else None
+        if not opto_spans_plot and cm is not None:
+            channels = cm.get_channels()
             for name, cm_config in channels.items():
                 if cm_config.channel_type == "Opto Stim" and name in st.sweeps:
                     opto_data = st.sweeps[name][:, s]
@@ -700,7 +752,7 @@ class PlotManager:
 
             # Apply filtering if configured (Pleth channels)
             if config.apply_filtering and config.name == st.analyze_chan:
-                _, y_filtered = self.window._current_trace()
+                _, y_filtered = self._get_current_trace()
                 y_data = y_filtered
 
             # Store primary Pleth data for overlays
@@ -1087,12 +1139,12 @@ class PlotManager:
                 exoff_idx = br.get("expoffs", [])
 
                 # Get processed Y data
-                y = self.window._get_processed_for(st.analyze_chan, sweep_idx) if hasattr(self, 'window') else None
+                y = self._get_processed_for(st.analyze_chan, sweep_idx) if self._get_processed_for else None
                 if y is None:
                     y = st.sweeps[st.analyze_chan][:, sweep_idx]
 
                 # Get apnea threshold
-                apnea_thresh = self.window._parse_float(self.window.ApneaThresh) or 0.5 if hasattr(self, 'window') else 0.5
+                apnea_thresh = self._get_apnea_thresh() if self._get_apnea_thresh else 0.5
 
                 # Compute apnea mask and convert to regions
                 apnea_mask = metrics.detect_apneas(
@@ -1415,10 +1467,11 @@ class PlotManager:
         configs = []
         st = self.state
 
-        if not hasattr(self.window, 'channel_manager'):
+        cm = self._get_channel_manager() if self._get_channel_manager else None
+        if cm is None:
             return configs
 
-        channels = self.window.channel_manager.get_channels()
+        channels = cm.get_channels()
 
         # Collect visible channels sorted by order
         visible_list = []
@@ -1448,7 +1501,7 @@ class PlotManager:
     def _draw_single_panel_plot(self):
         """Draw the main single-panel plot with all overlays."""
         st = self.state
-        t, y = self.window._current_trace()
+        t, y = self._get_current_trace()
         if t is None:
             return
 
@@ -1773,12 +1826,9 @@ class PlotManager:
         ax.axhline(0.0, linestyle="--", linewidth=0.8, color="#666666", alpha=0.9, zorder=0)
 
         # Add threshold line if event detection dialog exists and has a threshold set
-        if hasattr(self.window, '_event_detection_dialog') and self.window._event_detection_dialog is not None:
-            try:
-                threshold = self.window._event_detection_dialog.threshold_spin.value()
-                ax.axhline(threshold, linestyle=':', linewidth=1.5, color='red', alpha=0.7, zorder=5)
-            except:
-                pass
+        evt_cfg = self._get_event_annotation_config() if self._get_event_annotation_config else None
+        if evt_cfg is not None and evt_cfg.threshold != 0.0:
+            ax.axhline(evt_cfg.threshold, linestyle=':', linewidth=1.5, color='red', alpha=0.7, zorder=5)
 
         # Add stim spans to event plot
         for (t0_span, t1_span) in (spans_plot or []):
@@ -1796,16 +1846,15 @@ class PlotManager:
             return
 
         # Check if shading is enabled
-        shade_enabled = True  # Default to True for backward compatibility
-        labels_enabled = True  # Default to True
-        hargreaves_mode = False
-        if hasattr(self.window, '_event_detection_dialog') and self.window._event_detection_dialog is not None:
-            try:
-                shade_enabled = self.window._event_detection_dialog.shade_events_check.isChecked()
-                labels_enabled = self.window._event_detection_dialog.show_labels_check.isChecked()
-                hargreaves_mode = self.window._event_detection_dialog.hargreaves_radio.isChecked()
-            except:
-                pass
+        evt_cfg = self._get_event_annotation_config() if self._get_event_annotation_config else None
+        if evt_cfg is not None:
+            shade_enabled = evt_cfg.shade_events
+            labels_enabled = evt_cfg.show_labels
+            hargreaves_mode = evt_cfg.hargreaves_mode
+        else:
+            shade_enabled = True
+            labels_enabled = True
+            hargreaves_mode = False
 
         # Check if a boundary is being dragged (to hide it during drag)
         dragging_region_idx = None
@@ -2111,8 +2160,11 @@ class PlotManager:
                 exoff_idx = br.get("expoffs", [])
 
                 # Get thresholds
-                eupnea_thresh = self.window.eupnea_freq_threshold
-                apnea_thresh = self.window._parse_float(self.window.ApneaThresh) or 0.5
+                eupnea_cfg = self._get_eupnea_config() if self._get_eupnea_config else {}
+                eupnea_thresh = eupnea_cfg.get('freq_threshold', 5.0)
+                eupnea_min_duration = eupnea_cfg.get('min_duration', 2.0)
+                eupnea_mode = eupnea_cfg.get('detection_mode', 'gmm')
+                apnea_thresh = self._get_apnea_thresh() if self._get_apnea_thresh else 0.5
 
                 # Get sniff and eupnea regions from state (stored in absolute time)
                 sniff_regions_raw = self.state.sniff_regions_by_sweep.get(sweep_idx, [])
@@ -2124,12 +2176,12 @@ class PlotManager:
 
                 # For backward compatibility, also support mask-based eupnea from frequency mode
                 eupnea_mask = None
-                if self.window.eupnea_detection_mode != "gmm":
+                if eupnea_mode != "gmm":
                     # Frequency-based (legacy): Use threshold method to create mask
                     eupnea_mask = metrics.detect_eupnic_regions(
                         t, y, st.sr_hz, pks, on_idx, off_idx, ex_idx, exoff_idx,
                         freq_threshold_hz=eupnea_thresh,
-                        min_duration_sec=self.window.eupnea_min_duration,
+                        min_duration_sec=eupnea_min_duration,
                         sniff_regions=sniff_regions
                     )
 
@@ -2178,28 +2230,28 @@ class PlotManager:
                     metrics_dict[metric_key] = metric_arr
 
             # Store metrics for this sweep (for cross-sweep outlier detection)
-            self.window.metrics_by_sweep[sweep_idx] = metrics_dict
-            self.window.onsets_by_sweep[sweep_idx] = onsets_arr
+            self._metrics_by_sweep[sweep_idx] = metrics_dict
+            self._onsets_by_sweep[sweep_idx] = onsets_arr
 
             # Compute global statistics across all sweeps (if we have multiple sweeps analyzed)
-            if len(self.window.metrics_by_sweep) >= 2:
-                self.window.global_outlier_stats = compute_global_metric_statistics(
-                    self.window.metrics_by_sweep,
-                    self.window.onsets_by_sweep,
-                    self.window.outlier_metrics
+            if len(self._metrics_by_sweep) >= 2:
+                self._global_outlier_stats = compute_global_metric_statistics(
+                    self._metrics_by_sweep,
+                    self._onsets_by_sweep,
+                    self._outlier_metrics
                 )
             else:
-                self.window.global_outlier_stats = None
+                self._global_outlier_stats = None
 
             # Get outlier threshold from UI
-            outlier_sd = self.window._parse_float(self.window.OutlierSD) or 3.0
+            outlier_sd = self._get_outlier_sd() if self._get_outlier_sd else 3.0
 
             # Identify problematic breaths
             outlier_mask, failure_mask = identify_problematic_breaths(
                 t, y, st.sr_hz, peaks_arr, onsets_arr, offsets_arr,
                 expmins_arr, expoffs_arr, metrics_dict, outlier_threshold=outlier_sd,
-                outlier_metrics=self.window.outlier_metrics,
-                global_stats=self.window.global_outlier_stats
+                outlier_metrics=self._outlier_metrics,
+                global_stats=self._global_outlier_stats
             )
 
         except Exception as outlier_error:
@@ -2377,10 +2429,11 @@ class PlotManager:
         }
 
         # Check if channel manager exists
-        if not hasattr(self.window, 'channel_manager'):
+        cm = self._get_channel_manager() if self._get_channel_manager else None
+        if cm is None:
             return result
 
-        channels = self.window.channel_manager.get_channels()
+        channels = cm.get_channels()
 
         # Collect all opto stim channels (even hidden ones) for blue spans
         for name, config in channels.items():
@@ -2535,7 +2588,7 @@ class PlotManager:
             if config.channel_type == "Pleth":
                 # Use filtered data via _current_trace if this is the analyze channel
                 if ch_name == st.analyze_chan:
-                    _, y_filtered = self.window._current_trace()
+                    _, y_filtered = self._get_current_trace()
                     y_data = y_filtered
 
             # Track Event channel axis
@@ -2586,7 +2639,7 @@ class PlotManager:
 
             # Get filtered Pleth data
             if pleth_name == st.analyze_chan:
-                _, y_pleth = self.window._current_trace()
+                _, y_pleth = self._get_current_trace()
             else:
                 y_pleth = st.sweeps[pleth_name][:, s]
 

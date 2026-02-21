@@ -37,6 +37,14 @@ class FileLoadService:
             state.omitted_sweeps.clear()
             state.omitted_ranges.clear()
 
+        # Reset derived analysis state
+        for attr in ('all_peaks_by_sweep', 'all_breaths_by_sweep',
+                     'sniff_regions_by_sweep', 'peak_metrics_by_sweep',
+                     'current_peak_metrics_by_sweep'):
+            d = getattr(state, attr, None)
+            if isinstance(d, dict):
+                d.clear()
+
         # Clear event annotations
         if hasattr(state, 'bout_annotations'):
             state.bout_annotations.clear()
@@ -45,14 +53,14 @@ class FileLoadService:
         """
         Clear MainWindow-level caches that live outside AppState.
 
+        Note: Outlier render caches (metrics_by_sweep, onsets_by_sweep,
+        global_outlier_stats) are owned by PlotManager — call
+        plot_manager.clear_caches() separately.
+
         Args:
-            mw_state_holder: Object with metrics_by_sweep, onsets_by_sweep,
-                             global_outlier_stats, _export_metric_cache,
+            mw_state_holder: Object with _export_metric_cache,
                              zscore_global_mean, zscore_global_std attributes.
         """
-        mw_state_holder.metrics_by_sweep.clear()
-        mw_state_holder.onsets_by_sweep.clear()
-        mw_state_holder.global_outlier_stats = None
         mw_state_holder._export_metric_cache = {}
         mw_state_holder.zscore_global_mean = None
         mw_state_holder.zscore_global_std = None
