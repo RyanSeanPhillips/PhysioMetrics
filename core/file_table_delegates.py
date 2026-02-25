@@ -46,10 +46,10 @@ class ButtonDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._button_width = 24
         self._button_spacing = 2
+        # (action, icon_text, tooltip, normal_color, hover_color)
         self._buttons = [
-            ('analyze', '▶', 'Analyze this file'),
-            ('delete', '✕', 'Remove from list'),
-            ('info', 'ℹ', 'Show file info'),
+            ('analyze', '▶', 'Open in Analysis tab', QColor(45, 125, 70), QColor(58, 158, 90)),
+            ('info', 'ℹ', 'View metadata & sources', QColor(37, 99, 168), QColor(52, 120, 194)),
         ]
         self._hover_row = -1
         self._hover_button = -1
@@ -71,27 +71,27 @@ class ButtonDelegate(QStyledItemDelegate):
         x = option.rect.left() + 4
         y = option.rect.top() + (option.rect.height() - self._button_width) // 2
 
-        for i, (action, icon_text, tooltip) in enumerate(self._buttons):
+        for i, (action, icon_text, tooltip, normal_color, hover_color) in enumerate(self._buttons):
             btn_rect = QRect(x, y, self._button_width, self._button_width)
 
             # Determine button state
             is_hover = (row == self._hover_row and i == self._hover_button)
             is_pressed = (row == self._hover_row and i == self._pressed_button)
 
-            # Draw button background
+            # Draw button background with per-button color
             if is_pressed:
-                painter.fillRect(btn_rect, QColor(80, 80, 80))
+                painter.fillRect(btn_rect, hover_color.darker(120))
             elif is_hover:
-                painter.fillRect(btn_rect, QColor(60, 60, 60))
+                painter.fillRect(btn_rect, hover_color)
             else:
-                painter.fillRect(btn_rect, QColor(50, 50, 50))
+                painter.fillRect(btn_rect, normal_color)
 
-            # Draw border
-            painter.setPen(QPen(QColor(100, 100, 100), 1))
-            painter.drawRect(btn_rect)
+            # Draw rounded border
+            painter.setPen(QPen(normal_color.lighter(130), 1))
+            painter.drawRoundedRect(btn_rect, 3, 3)
 
-            # Draw icon/text
-            painter.setPen(QPen(QColor(200, 200, 200)))
+            # Draw icon/text in white
+            painter.setPen(QPen(QColor(240, 240, 240)))
             painter.drawText(btn_rect, Qt.AlignmentFlag.AlignCenter, icon_text)
 
             x += self._button_width + self._button_spacing
@@ -143,8 +143,6 @@ class ButtonDelegate(QStyledItemDelegate):
                     action = self._buttons[button_idx][0]
                     if action == 'analyze':
                         self.analyze_clicked.emit(row)
-                    elif action == 'delete':
-                        self.delete_clicked.emit(row)
                     elif action == 'info':
                         self.info_clicked.emit(row)
 

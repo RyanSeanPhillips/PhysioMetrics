@@ -71,6 +71,15 @@ DEFAULT_COLUMNS: List[ColumnDef] = [
         tooltip="ABF file name"
     ),
     ColumnDef(
+        key='description',
+        header='Description',
+        width=160,
+        min_width=80,
+        column_type=ColumnType.TEXT_READONLY,
+        expandable=True,
+        tooltip="Composite: protocol + state + stim_type + power"
+    ),
+    ColumnDef(
         key='protocol',
         header='Protocol',
         width=58,
@@ -205,8 +214,8 @@ DEFAULT_COLUMNS: List[ColumnDef] = [
     ColumnDef(
         key='actions',
         header='',
-        width=85,
-        min_width=85,
+        width=60,
+        min_width=56,
         column_type=ColumnType.BUTTON,
         fixed=True,
         tooltip="Actions"
@@ -265,6 +274,9 @@ class FileTableModel(QAbstractTableModel):
 
     # Metadata fields that can be verified via source links
     VERIFIABLE_FIELDS = {'strain', 'sex', 'animal_id', 'stim_type', 'power', 'experiment', 'state'}
+
+    # Concise mode: only show these columns
+    CONCISE_COLUMNS = {'file_name', 'description', 'animal_id', 'sex', 'status', 'actions'}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -396,6 +408,18 @@ class FileTableModel(QAbstractTableModel):
             # Highlight conflicts (whole row)
             if row in self._conflict_rows:
                 return QBrush(QColor(100, 80, 50))  # Brownish highlight
+            # Description column: color by completeness
+            if col_def.key == 'description':
+                filled = sum(1 for k in ('protocol', 'state', 'stim_type', 'power')
+                             if row_data.get(k, '') and str(row_data.get(k, '')).strip())
+                if filled >= 4:
+                    return QBrush(QColor(60, 140, 100, 40))   # green tint
+                elif filled >= 2:
+                    return QBrush(QColor(180, 160, 60, 35))   # yellow tint
+                elif filled >= 1:
+                    return QBrush(QColor(200, 120, 50, 35))   # orange tint
+                else:
+                    return QBrush(QColor(200, 80, 80, 35))    # red tint
             # Per-cell quality coloring for metadata fields
             if self._quality_coloring and col_def.key in self.VERIFIABLE_FIELDS:
                 value = row_data.get(col_def.key, '')
@@ -448,6 +472,15 @@ class FileTableModel(QAbstractTableModel):
 
         if col_def.key == 'file_name':
             return str(value) if value else ""
+
+        elif col_def.key == 'description':
+            # Synthesize from protocol + state + stim_type + power
+            parts = []
+            for k in ('protocol', 'state', 'stim_type', 'power'):
+                v = row_data.get(k, '')
+                if v and str(v).strip():
+                    parts.append(str(v).strip())
+            return ' '.join(parts)
 
         elif col_def.key == 'channel_count':
             # Format channel count
@@ -782,6 +815,40 @@ class FileTableModel(QAbstractTableModel):
             top_left = self.index(0, 0)
             bottom_right = self.index(len(self._rows) - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.BackgroundRole])
+
+    # -------------------------------------------------------------------------
+    # Concise mode
+    # -------------------------------------------------------------------------
+
+    _concise_mode: bool = False
+    _pre_concise_hidden: set = None  # type: ignore
+
+    def is_concise_mode(self) -> bool:
+        return self._concise_mode
+
+    def set_concise_mode(self, enabled: bool):
+        """Toggle concise mode: show only CONCISE_COLUMNS or restore previous."""
+        if enabled == self._concise_mode:
+            return
+        self.beginResetModel()
+        if enabled:
+            # Save current hidden set before switching
+            self._pre_concise_hidden = set(self._hidden_columns)
+            # Hide everything not in CONCISE_COLUMNS
+            all_keys = set(self._column_order)
+            self._hidden_columns = all_keys - self.CONCISE_COLUMNS
+        else:
+            # Restore saved hidden set
+            if self._pre_concise_hidden is not None:
+                self._hidden_columns = self._pre_concise_hidden
+                self._pre_concise_hidden = None
+            else:
+                self._hidden_columns = set()
+        self._concise_mode = enabled
+        self.endResetModel()
+        # Persist
+        settings = QSettings("PhysioMetrics", "BreathAnalysis")
+        settings.setValue("project_builder/concise_mode", enabled)
 
     # -------------------------------------------------------------------------
     # Column management

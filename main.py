@@ -114,13 +114,12 @@ class MainWindow(QMainWindow):
         self._enable_dark_title_bar()
 
         # === Projects Tab Rework (Phase 1) ===
-        # Remove all sub-tabs except Data Files, then hide the tab bar
-        # Tab order in .ui: 0=Notes, 1=Data Files, 2=Consolidate, 3=Code Notebook
-        for tab_name in ('notebookContainer', 'notesContainer', 'consolidationContainer'):
-            for i in range(self.leftColumnTabs.count()):
-                if self.leftColumnTabs.widget(i) and self.leftColumnTabs.widget(i).objectName() == tab_name:
-                    self.leftColumnTabs.removeTab(i)
-                    break
+        # Remove Consolidate sub-tab (Notes + Notebook removed from .ui in Phase 1.5)
+        for i in range(self.leftColumnTabs.count()):
+            w = self.leftColumnTabs.widget(i)
+            if w and w.objectName() == 'consolidationContainer':
+                self.leftColumnTabs.removeTab(i)
+                break
         # Only Data Files tab remains — hide the tab bar entirely
         self.leftColumnTabs.tabBar().hide()
         self.leftColumnTabs.setCurrentIndex(0)
@@ -7263,6 +7262,13 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         table.setAlternatingRowColors(True)
+        table.setStyleSheet("""
+            QTableView {
+                alternate-background-color: #262626;
+                background-color: #1e1e1e;
+                gridline-color: #3e3e42;
+            }
+        """)
         table.setSortingEnabled(False)  # We handle sorting ourselves
         table.setWordWrap(False)
         table.verticalHeader().setVisible(False)
@@ -7277,10 +7283,13 @@ class MainWindow(QMainWindow):
         self._setup_table_delegates(table)
 
         # Set column widths from column definitions
+        is_concise = self._file_table_model.is_concise_mode()
         for i, col_def in enumerate(self._file_table_model.get_visible_columns()):
             table.setColumnWidth(i, col_def.width)
             if col_def.fixed:
                 header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+            elif is_concise and col_def.key == 'description':
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
             else:
                 header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
 
@@ -7311,7 +7320,7 @@ class MainWindow(QMainWindow):
 
     def _setup_search_bar(self):
         """Add a search bar above the data files table."""
-        from PyQt6.QtWidgets import QLineEdit, QLabel, QHBoxLayout, QWidget
+        from PyQt6.QtWidgets import QLineEdit, QLabel, QHBoxLayout, QVBoxLayout, QWidget
         from PyQt6.QtCore import QTimer
 
         # Find the table's parent layout (tableContainerLayout)
@@ -7331,14 +7340,21 @@ class MainWindow(QMainWindow):
         if table_idx < 0:
             return
 
-        # Create search bar container
-        search_container = QWidget()
-        search_layout = QHBoxLayout(search_container)
+        # Create toolbar container with two rows
+        from PyQt6.QtWidgets import QComboBox, QFrame
+        toolbar_container = QWidget()
+        toolbar_vlayout = QVBoxLayout(toolbar_container)
+        toolbar_vlayout.setContentsMargins(0, 2, 0, 0)
+        toolbar_vlayout.setSpacing(0)
+
+        # === Row 1: Filters ===
+        filter_row = QWidget()
+        search_layout = QHBoxLayout(filter_row)
         search_layout.setContentsMargins(0, 2, 0, 2)
         search_layout.setSpacing(6)
 
         self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("Search experiments...")
+        self._search_edit.setPlaceholderText("Search by name, strain, animal, stim...")
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.setStyleSheet("""
             QLineEdit {
@@ -7359,11 +7375,14 @@ class MainWindow(QMainWindow):
         self._search_count_label.setStyleSheet("color: #888; font-size: 9pt; padding-right: 4px;")
         search_layout.addWidget(self._search_count_label)
 
-        # Status filter dropdown (Step 1.3)
-        from PyQt6.QtWidgets import QComboBox
+        # Status filter dropdown
         self._status_filter = ''
         self._status_combo = QComboBox()
-        self._status_combo.addItems(['All Status', 'pending', 'completed', 'in_progress', 'error'])
+        self._status_combo.addItem('All Status', '')
+        self._status_combo.addItem('Pending', 'pending')
+        self._status_combo.addItem('Completed', 'completed')
+        self._status_combo.addItem('In Progress', 'in_progress')
+        self._status_combo.addItem('Error', 'error')
         self._status_combo.setFixedWidth(110)
         self._status_combo.setStyleSheet("""
             QComboBox {
@@ -7377,15 +7396,52 @@ class MainWindow(QMainWindow):
                 selection-background-color: #094771;
             }
         """)
-        self._status_combo.currentTextChanged.connect(self._on_status_filter_changed)
+        self._status_combo.currentIndexChanged.connect(self._on_status_filter_changed)
         search_layout.addWidget(self._status_combo)
 
-        # Separator
-        sep = QLabel("|")
-        sep.setStyleSheet("color: #555; font-size: 9pt; padding: 0 2px;")
-        search_layout.addWidget(sep)
+        # Concise/Expanded toggle
+        self._concise_toggle = QPushButton("Concise")
+        self._concise_toggle.setCheckable(True)
+        self._concise_toggle.setFixedHeight(26)
+        self._concise_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b2b; color: #e0e0e0;
+                border: 1px solid #555; border-radius: 4px;
+                padding: 3px 10px; font-size: 9pt;
+            }
+            QPushButton:hover { border-color: #4682b4; }
+            QPushButton:checked {
+                background-color: #094771; border-color: #4682b4; color: #ffffff;
+            }
+        """)
+        self._concise_toggle.setToolTip("Toggle concise view (fewer columns)")
+        self._concise_toggle.clicked.connect(self._on_concise_toggle)
+        # Restore persisted state
+        from PyQt6.QtCore import QSettings as _QS
+        _saved_concise = _QS("PhysioMetrics", "BreathAnalysis").value(
+            "project_builder/concise_mode", False, type=bool)
+        if _saved_concise:
+            self._concise_toggle.setChecked(True)
+            self._file_table_model.set_concise_mode(True)
+            self._concise_toggle.setText("All Columns")
+        search_layout.addWidget(self._concise_toggle)
 
-        # Action buttons (Step 1.4)
+        toolbar_vlayout.addWidget(filter_row)
+
+        # === Row 2: Actions (with subtle top border) ===
+        action_row = QWidget()
+        action_row.setStyleSheet("border-top: 1px solid #3e3e42;")
+        action_layout = QHBoxLayout(action_row)
+        action_layout.setContentsMargins(0, 4, 0, 2)
+        action_layout.setSpacing(6)
+
+        self._selection_count_label = QLabel("")
+        self._selection_count_label.setStyleSheet("color: #569cd6; font-size: 9pt; border: none;")
+        action_layout.addWidget(self._selection_count_label)
+
+        action_layout.addStretch()
+
+        # Action buttons
         btn_style = """
             QPushButton {{
                 background-color: {bg}; color: #ffffff;
@@ -7400,17 +7456,19 @@ class MainWindow(QMainWindow):
         self._batch_analyze_btn.setToolTip("Run batch analysis on selected experiments")
         self._batch_analyze_btn.setEnabled(False)
         self._batch_analyze_btn.clicked.connect(self._on_batch_analyze_clicked)
-        search_layout.addWidget(self._batch_analyze_btn)
+        action_layout.addWidget(self._batch_analyze_btn)
 
         self._review_btn = QPushButton("Review")
         self._review_btn.setStyleSheet(btn_style.format(bg='#2563a8', hover='#3478c2'))
         self._review_btn.setToolTip("Review analyzed experiments in the Analysis tab")
         self._review_btn.setEnabled(False)
         self._review_btn.clicked.connect(self._on_review_selected_clicked)
-        search_layout.addWidget(self._review_btn)
+        action_layout.addWidget(self._review_btn)
 
-        # Insert before the table
-        parent_layout.insertWidget(table_idx, search_container)
+        toolbar_vlayout.addWidget(action_row)
+
+        # Insert toolbar before the table
+        parent_layout.insertWidget(table_idx, toolbar_container)
 
         # Debounced search (300ms)
         self._search_timer = QTimer()
@@ -7439,7 +7497,7 @@ class MainWindow(QMainWindow):
             for row in range(self._file_table_model.rowCount()):
                 table.setRowHidden(row, False)
             total = self._file_table_model.rowCount()
-            self._search_count_label.setText("")
+            self._search_count_label.setText(f"{total} experiments")
             if hasattr(self, 'summaryLabel'):
                 self.summaryLabel.setText(f"Summary: {total} experiments")
             return
@@ -7451,7 +7509,8 @@ class MainWindow(QMainWindow):
         # Normalize folder path for comparison
         norm_folder = ''
         if folder_path:
-            norm_folder = folder_path.replace('/', '\\').rstrip('\\').lower()
+            from core.services.folder_tree_service import normalize_path
+            norm_folder = normalize_path(folder_path).lower()
 
         for row in range(total):
             row_data = self._file_table_model.get_row_data(row)
@@ -7461,10 +7520,11 @@ class MainWindow(QMainWindow):
 
             show = True
 
-            # Folder filter
+            # Folder filter (normalize both sides to handle Z: vs UNC)
             if norm_folder:
-                file_path = str(row_data.get('file_path', '')).replace('/', '\\').lower()
-                if not file_path.startswith(norm_folder + '\\') and file_path != norm_folder:
+                from core.services.folder_tree_service import normalize_path as _np
+                file_path = _np(str(row_data.get('file_path', ''))).lower()
+                if not file_path.startswith(norm_folder + os.sep) and file_path != norm_folder:
                     show = False
 
             # Status filter
@@ -8531,42 +8591,26 @@ class MainWindow(QMainWindow):
             self.filterColumnCombo.currentIndexChanged.connect(self._on_table_filter_changed)
 
         # === File Tree Browser (Projects Tab Rework Phase 1, Step 1.2) ===
-        # Replace hidden chatbot panel with a folder tree on the LEFT side.
-        # The mainContentSplitter has: index 0 = left panel, index 1 = right panel.
-        # In the .ui file, left = leftColumnTabs (table), right = chatbotPanel.
-        # We swap: put file tree in chatbotPanel's spot, then reorder so tree is left.
+        # Add a DB-backed folder tree on the LEFT side of the splitter.
         self._folder_filter_path = ""  # Current folder filter for table
-        if hasattr(self, 'chatbotPanel') and hasattr(self, 'mainContentSplitter'):
+        if hasattr(self, 'mainContentSplitter'):
             from views.project.file_tree_widget import FileTreeWidget
-            self._file_tree = FileTreeWidget()
-            # Replace chatbot panel contents with file tree
-            chatbot_layout = self.chatbotPanel.layout()
-            if chatbot_layout:
-                # Clear existing chatbot widgets
-                while chatbot_layout.count():
-                    item = chatbot_layout.takeAt(0)
-                    w = item.widget()
-                    if w:
-                        w.hide()
-                        w.deleteLater()
-                chatbot_layout.addWidget(self._file_tree)
-            self.chatbotPanel.setVisible(True)
-            self.chatbotPanel.setMinimumWidth(180)
+            from viewmodels.folder_tree_viewmodel import FolderTreeViewModel
 
-            # Reorder splitter: move chatbotPanel (now file tree) to index 0 (left)
-            # Qt splitter: insertWidget moves the widget to the new position
-            self.mainContentSplitter.insertWidget(0, self.chatbotPanel)
-            self.mainContentSplitter.setSizes([220, 780])
+            self._folder_tree_vm = FolderTreeViewModel(self)
+            self._file_tree = FileTreeWidget()
+            self._file_tree.set_viewmodel(self._folder_tree_vm)
+            self._file_tree.setMinimumWidth(180)
 
             # Connect folder selection to table filtering
-            self._file_tree.folder_selected.connect(self._on_folder_filter_changed)
+            self._folder_tree_vm.folder_selected.connect(self._on_folder_filter_changed)
 
-            # Set root to project directory if we have one (may not be set yet during init)
-            proj_dir = getattr(self, '_project_directory', None)
-            if proj_dir:
-                self._file_tree.set_root(str(proj_dir))
+            # Insert file tree as left-most widget in splitter
+            self.mainContentSplitter.insertWidget(0, self._file_tree)
+            self.mainContentSplitter.setSizes([220, 780])
         else:
             self._file_tree = None
+            self._folder_tree_vm = None
 
     def _on_table_column_mode_changed(self, state):
         """Handle toggle of the 'Show Full Content' checkbox."""
@@ -8642,48 +8686,42 @@ class MainWindow(QMainWindow):
                 self.filterCountLabel.setText(f"({visible_count} of {total_count})")
 
     def _update_file_tree_root_from_experiments(self, experiments):
-        """Auto-detect the common root folder from experiment file paths and set the file tree."""
-        if not getattr(self, '_file_tree', None) or not experiments:
+        """Rebuild the DB-backed folder tree from experiment file paths."""
+        if not getattr(self, '_folder_tree_vm', None) or not experiments:
             return
-        # Already has a root set explicitly
-        if self._file_tree.root_path():
-            return
-        # Find common prefix of all file paths
         paths = [e.get('file_path', '') for e in experiments if e.get('file_path')]
         if not paths:
             return
-        from pathlib import Path as P
         try:
-            # Use Path parents to find common ancestor
-            parts_list = [P(p).parts for p in paths[:50]]  # Sample first 50 for speed
-            if not parts_list:
-                return
-            common = list(parts_list[0])
-            for parts in parts_list[1:]:
-                new_common = []
-                for a, b in zip(common, parts):
-                    if a.lower() == b.lower():
-                        new_common.append(a)
-                    else:
-                        break
-                common = new_common
-            if len(common) >= 2:  # At least drive + one folder
-                # Go up 2 levels from deepest common to show more context
-                root_parts = common
-                if len(root_parts) > 3:
-                    root_parts = root_parts[:-2]
-                root = str(P(*root_parts))
-                self._file_tree.set_root(root)
+            self._folder_tree_vm.rebuild(paths)
         except Exception as e:
-            print(f"[file-tree] Error detecting root: {e}")
+            print(f"[file-tree] Error building tree: {e}")
 
-    def _on_status_filter_changed(self, text: str):
+    def _on_status_filter_changed(self, index: int):
         """Handle status filter dropdown change."""
-        if text == 'All Status':
-            self._status_filter = ''
-        else:
-            self._status_filter = text
+        self._status_filter = self._status_combo.itemData(index) or ''
         self._on_search_execute()
+
+    def _on_concise_toggle(self, checked: bool):
+        """Toggle concise/expanded column view."""
+        from PyQt6.QtWidgets import QHeaderView
+        self._file_table_model.set_concise_mode(checked)
+        self._concise_toggle.setText("All Columns" if checked else "Concise")
+        table = self.discoveredFilesTable
+        header = table.horizontalHeader()
+        visible_cols = self._file_table_model.get_visible_columns()
+        # Re-apply column widths and resize modes
+        for i, col_def in enumerate(visible_cols):
+            table.setColumnWidth(i, col_def.width)
+            if col_def.fixed:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+            elif checked and col_def.key == 'description':
+                # In concise mode, stretch Description to fill available space
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        # Re-setup delegates for the new column layout
+        self._setup_table_delegates(table)
 
     def _on_batch_analyze_clicked(self):
         """Stub: Launch batch analysis on selected experiments (Phase 2)."""
@@ -8709,11 +8747,15 @@ class MainWindow(QMainWindow):
 
     def _on_table_selection_changed(self):
         """Enable/disable action buttons based on table selection."""
-        has_selection = bool(self.discoveredFilesTable.selectionModel().selectedRows())
+        selected = self.discoveredFilesTable.selectionModel().selectedRows()
+        count = len(selected)
+        has_selection = count > 0
         if hasattr(self, '_batch_analyze_btn'):
             self._batch_analyze_btn.setEnabled(has_selection)
         if hasattr(self, '_review_btn'):
             self._review_btn.setEnabled(has_selection)
+        if hasattr(self, '_selection_count_label'):
+            self._selection_count_label.setText(f"{count} selected" if count else "")
 
     def _on_folder_filter_changed(self, folder_path: str):
         """Filter table rows to experiments whose file_path is under the selected folder."""

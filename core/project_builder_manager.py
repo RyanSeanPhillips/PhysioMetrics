@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Dict, Any, Optional
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QStyle
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QMainWindow
@@ -1281,8 +1281,21 @@ class ProjectBuilderManager:
             clear_action.triggered.connect(lambda: self.clear_scan_warnings(rows_with_warnings))
             conflict_menu.addAction(clear_action)
 
-        # Export options
+        # --- Utilities ---
         menu.addSeparator()
+
+        # Copy file path
+        if len(selected_rows) == 1:
+            row = next(iter(selected_rows))
+            if row < len(self.mw._master_file_list):
+                fp = self.mw._master_file_list[row].get('file_path', '')
+                copy_path_action = QAction("Copy file path", self.mw)
+                copy_path_action.triggered.connect(
+                    lambda checked=False, p=fp: QApplication.clipboard().setText(p)
+                )
+                menu.addAction(copy_path_action)
+
+        # Export options
         export_menu = menu.addMenu("Export Table")
 
         export_selected_action = QAction(f"Export {len(selected_rows)} selected rows to CSV...", self.mw)
@@ -1293,7 +1306,41 @@ class ProjectBuilderManager:
         export_all_action.triggered.connect(lambda: self.export_table_to_csv(None))
         export_menu.addAction(export_all_action)
 
+        # --- Danger zone ---
+        menu.addSeparator()
+        remove_action = QAction(f"Remove {len(selected_rows)} from list", self.mw)
+        remove_action.triggered.connect(lambda: self._remove_selected_rows(selected_rows))
+        # Red-tinted text
+        remove_action.setIcon(self.mw.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        menu.addAction(remove_action)
+
         menu.exec(table.viewport().mapToGlobal(position))
+
+    def _remove_selected_rows(self, rows):
+        """Remove selected rows from the master file list and DB."""
+        from PyQt6.QtWidgets import QMessageBox
+        count = len(rows)
+        reply = QMessageBox.question(
+            self.mw, "Remove Experiments",
+            f"Remove {count} experiment(s) from the project?\n\n"
+            "This removes them from the database. The original files are not deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        # Remove from DB via viewmodel if available
+        for row in sorted(rows, reverse=True):
+            if row < len(self.mw._master_file_list):
+                task = self.mw._master_file_list[row]
+                exp_id = task.get('id')
+                if exp_id and hasattr(self.mw, '_project_viewmodel'):
+                    try:
+                        self.mw._project_viewmodel.service.store.delete_experiment(exp_id)
+                    except Exception as e:
+                        print(f"[context-menu] Error deleting experiment {exp_id}: {e}")
+        # Reload
+        self.mw._load_experiments_from_db(snapshot_id=getattr(self.mw, '_active_snapshot_id', None))
 
     def export_table_to_csv(self, selected_rows=None):
         """Export table data to CSV file.
