@@ -261,7 +261,26 @@ def band_pass_1d(y: np.ndarray, sr_hz: float,
 
 #     return x
 
-import numpy as np
+def notch_filter_1d(y: np.ndarray, sr_hz: float, lower_freq: float, upper_freq: float, order: int = 4) -> np.ndarray:
+    """Apply a band-stop (notch) filter to remove frequencies between lower_freq and upper_freq.
+
+    Pure function — no side effects. Replaces MainWindow._apply_notch_filter.
+    """
+    from scipy import signal as _sig
+
+    nyquist = sr_hz / 2.0
+    low = np.clip(lower_freq / nyquist, 0.001, 0.999)
+    high = np.clip(upper_freq / nyquist, 0.001, 0.999)
+
+    if low >= high:
+        return y
+
+    try:
+        sos = _sig.butter(order, [low, high], btype="bandstop", output="sos")
+        return _sig.sosfiltfilt(sos, y)
+    except Exception:
+        return y
+
 
 def apply_all_1d(
     y: np.ndarray,

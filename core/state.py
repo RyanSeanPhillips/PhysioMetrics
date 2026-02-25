@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.event_markers import EventMarkerManager
+    from core.domain.analysis.models import FilterConfig, PeakDetectionConfig
 
 
 @dataclass
@@ -36,6 +37,11 @@ class AppState:
     low_hz: Optional[float] = None
     high_hz: Optional[float] = None
     mean_val: float = 0.0
+
+    # Analysis config (MVVM — replaces scattered MainWindow attrs)
+    # These are lazily populated by MainWindow.__init__ or from_app_state() helpers.
+    filter_config: Optional['FilterConfig'] = None
+    peak_config: Optional['PeakDetectionConfig'] = None
 
     # Navigation
     sweep_idx: int = 0

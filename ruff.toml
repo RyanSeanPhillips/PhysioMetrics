@@ -1,0 +1,22 @@
+# Ruff configuration for PhysioMetrics
+# Focus: catch real bugs, not style nits in legacy code
+
+target-version = "py39"
+line-length = 120
+
+[lint]
+# Only rules that catch real bugs:
+#   F821 - undefined name (catches the QProgressDialog bug!)
+#   F822 - undefined name in __all__
+#   F823 - local variable referenced before assignment
+select = ["F821", "F822", "F823"]
+
+# Directories to skip entirely
+exclude = [
+    "dist/",
+    "lib/",
+    "build/",
+    "__pycache__/",
+    ".git/",
+    "*.pyi",
+]

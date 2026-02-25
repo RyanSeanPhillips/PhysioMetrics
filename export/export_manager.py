@@ -14,7 +14,7 @@ import pandas as pd
 from pathlib import Path
 from PyQt6.QtWidgets import QMessageBox, QFileDialog, QDialog, QProgressDialog, QApplication
 from PyQt6.QtCore import Qt, Qt as QtCore_Qt
-from core import metrics, telemetry
+from core import metrics, telemetry, peaks as peakdet
 from dialogs import SaveMetaDialog
 
 # Enable line profiling when running with kernprof -l

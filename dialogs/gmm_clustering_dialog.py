@@ -1135,7 +1135,6 @@ class GMMClusteringDialog(QDialog):
             elif quality_status == "WARNING":
                 # Show warning
                 self.had_quality_warning = True
-                from PyQt6.QtWidgets import QMessageBox
                 msg = QMessageBox(self)
                 msg.setWindowTitle("Clustering Quality Warning")
                 msg.setIcon(QMessageBox.Icon.Warning)
@@ -2367,7 +2366,6 @@ GMM is an unsupervised machine learning technique that automatically identifies 
 
     def on_apply_to_plot(self):
         """Apply GMM clustering results to main plot by marking sniffing breaths."""
-        from PyQt6.QtWidgets import QMessageBox
         import numpy as np
 
         if self.sniffing_cluster_id is None:
@@ -2408,6 +2406,7 @@ GMM is an unsupervised machine learning technique that automatically identifies 
 
         # Store GMM classification directly in all_peaks_by_sweep
         # Add 'breath_type_class' field: 0=eupnea, 1=sniffing, -1=unclassified
+        confidence_threshold = self.confidence_threshold_slider.value()
         for i, (sweep_idx, breath_idx) in enumerate(self.breath_cycles):
             # Get peak sample index for this breath
             peaks = self.main_window.state.peaks_by_sweep.get(sweep_idx)

@@ -571,7 +571,7 @@ class ErrorReporter:
         lock_data = {
             "session_id": self._session_id,
             "started": datetime.now().isoformat(),
-            "pid": str(os.getpid()) if 'os' in dir() else "unknown"
+            "pid": "unknown"
         }
 
         try:

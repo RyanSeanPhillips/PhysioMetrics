@@ -69,6 +69,48 @@ class ClaudeLauncherService:
             print(f"[claude-launcher] Error launching: {e}")
             return False
 
+    def launch_assistant(self, workspace_dir: Optional[str] = None,
+                         root_data_dir: Optional[str] = None) -> bool:
+        """Launch the Metadata Extraction Assistant as a separate process.
+
+        Args:
+            workspace_dir: Working directory for Claude in the assistant.
+            root_data_dir: Root data directory to show in the file tree.
+
+        Returns:
+            True if launched successfully, False on error.
+        """
+        import sys
+        python = sys.executable
+
+        # Ensure MCP config exists in the workspace
+        ws = workspace_dir
+        if not ws:
+            appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+            ws = os.path.join(appdata, "PhysioMetrics", "ai_workspace")
+        os.makedirs(ws, exist_ok=True)
+        self._ensure_mcp_config(ws)
+
+        try:
+            env = os.environ.copy()
+            env.pop("CLAUDECODE", None)
+
+            cmd = [python, "-m", "_internal.scripts.metadata_assistant"]
+            cmd.extend(["--workspace", ws])
+            if root_data_dir:
+                cmd.extend(["--root", root_data_dir])
+
+            subprocess.Popen(
+                cmd,
+                cwd=self._project_root,
+                env=env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
+            )
+            return True
+        except Exception as e:
+            print(f"[claude-launcher] Error launching assistant: {e}")
+            return False
+
     def _ensure_mcp_config(self, project_dir: str):
         """Write/update .mcp.json with app + project MCP server configs."""
         mcp_path = Path(project_dir) / ".mcp.json"
@@ -95,6 +137,20 @@ class ClaudeLauncherService:
         servers["project"] = {
             "command": python_path,
             "args": ["-u", "tools/project_mcp.py"],
+            "cwd": self._project_root,
+        }
+
+        # Ensure file-index MCP is configured
+        servers["file-index"] = {
+            "command": python_path,
+            "args": ["-u", "tools/file_index_mcp.py"],
+            "cwd": self._project_root,
+        }
+
+        # Ensure assistant MCP is configured (for metadata extraction GUI)
+        servers["assistant"] = {
+            "command": python_path,
+            "args": ["-u", "_internal/scripts/metadata_assistant/mcp/assistant_mcp.py"],
             "cwd": self._project_root,
         }
 

@@ -6419,7 +6419,7 @@ class MainWindow(QMainWindow):
             btn.setEnabled(False)
             btn.setToolTip("Claude Code CLI not found on PATH")
         else:
-            btn.setToolTip("Launch Claude Code in a new terminal")
+            btn.setToolTip("Launch Metadata Extraction Assistant")
             btn.clicked.connect(self._on_claude_launch)
 
         # Insert next to Help button in the same layout
@@ -6433,12 +6433,13 @@ class MainWindow(QMainWindow):
         self._claude_button = btn
 
     def _on_claude_launch(self):
-        """Launch Claude Code CLI."""
-        ok = self._claude_launcher.launch()
+        """Launch Metadata Extraction Assistant (embedded Claude Code)."""
+        root_dir = getattr(self, '_project_directory', None)
+        ok = self._claude_launcher.launch_assistant(root_data_dir=root_dir)
         if ok:
-            self._log_status_message("Claude Code launched in new terminal", 3000)
+            self._log_status_message("Metadata Assistant launched", 3000)
         else:
-            self._log_status_message("Failed to launch Claude Code", 3000)
+            self._log_status_message("Failed to launch Metadata Assistant", 3000)
 
     def _check_for_updates_on_startup(self):
         """Check for updates in background and update UI if available."""

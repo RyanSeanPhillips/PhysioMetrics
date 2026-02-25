@@ -52,89 +52,89 @@ def assess_breath_quality(t: np.ndarray, y: np.ndarray, peaks: np.ndarray,
             cycle_start = 0
             cycle_end = N
 
-        # Determine cycle boundaries for highlighting
-        if onsets is not None and len(onsets) > i:
-            cycle_start = max(0, int(onsets[i]))
-            if i + 1 < len(onsets):
-                cycle_end = min(N, int(onsets[i + 1]))
-            else:
-                cycle_end = N
-        elif i > 0 and i < len(peaks) - 1:
-            # Fallback to peak-based boundaries
-            cycle_start = max(0, int(0.5 * (int(peaks[i-1]) + int(peak_idx))))
-            cycle_end = min(N, int(0.5 * (int(peak_idx) + int(peaks[i+1]))))
+            # Determine cycle boundaries for highlighting
+            if onsets is not None and len(onsets) > i:
+                cycle_start = max(0, int(onsets[i]))
+                if i + 1 < len(onsets):
+                    cycle_end = min(N, int(onsets[i + 1]))
+                else:
+                    cycle_end = N
+            elif i > 0 and i < len(peaks) - 1:
+                # Fallback to peak-based boundaries
+                cycle_start = max(0, int(0.5 * (int(peaks[i-1]) + int(peak_idx))))
+                cycle_end = min(N, int(0.5 * (int(peak_idx) + int(peaks[i+1]))))
 
-        # Check 1: Missing breath events
-        has_onset = onsets is not None and len(onsets) > i
-        has_offset = offsets is not None and len(offsets) > i
-        has_expmin = expmins is not None and len(expmins) > i
-        has_expoff = expoffs is not None and len(expoffs) > i
+            # Check 1: Missing breath events
+            has_onset = onsets is not None and len(onsets) > i
+            has_offset = offsets is not None and len(offsets) > i
+            has_expmin = expmins is not None and len(expmins) > i
+            has_expoff = expoffs is not None and len(expoffs) > i
 
-        if not has_onset:
-            errors.append("Missing onset")
-        if not has_offset:
-            errors.append("Missing offset")
-        if not has_expmin:
-            warnings.append("Missing expiratory minimum")
-        if not has_expoff:
-            warnings.append("Missing expiratory offset")
+            if not has_onset:
+                errors.append("Missing onset")
+            if not has_offset:
+                errors.append("Missing offset")
+            if not has_expmin:
+                warnings.append("Missing expiratory minimum")
+            if not has_expoff:
+                warnings.append("Missing expiratory offset")
 
-        # Check 2: Event ordering (onsets should be before offsets, etc.)
-        if has_onset and has_offset:
-            onset_idx = int(onsets[i])
-            offset_idx = int(offsets[i])
+            # Check 2: Event ordering (onsets should be before offsets, etc.)
+            if has_onset and has_offset:
+                onset_idx = int(onsets[i])
+                offset_idx = int(offsets[i])
+                peak_idx_int = int(peak_idx)
+
+                if onset_idx >= peak_idx_int:
+                    errors.append("Onset after peak")
+                if offset_idx <= peak_idx_int:
+                    errors.append("Offset before peak")
+                if onset_idx >= offset_idx:
+                    errors.append("Onset after offset")
+
+            # Check 3: Reasonable cycle timing
+            if has_onset and i + 1 < len(onsets):
+                cycle_duration = t[int(onsets[i + 1])] - t[int(onsets[i])]
+                if cycle_duration < 0.5:  # Less than 0.5 seconds
+                    warnings.append(f"Very short cycle ({cycle_duration:.2f}s)")
+                elif cycle_duration > 10.0:  # More than 10 seconds
+                    warnings.append(f"Very long cycle ({cycle_duration:.2f}s)")
+
+            # Check 4: Ti/Te ratio reasonableness
+            if has_onset and has_offset and i + 1 < len(onsets):
+                ti = t[int(offsets[i])] - t[int(onsets[i])]
+                te = t[int(onsets[i + 1])] - t[int(offsets[i])]
+
+                if ti <= 0:
+                    errors.append("Invalid Ti (≤0)")
+                elif ti < 0.1:
+                    warnings.append(f"Very short Ti ({ti:.2f}s)")
+                elif ti > 5.0:
+                    warnings.append(f"Very long Ti ({ti:.2f}s)")
+
+                if te <= 0:
+                    errors.append("Invalid Te (≤0)")
+                elif te < 0.2:
+                    warnings.append(f"Very short Te ({te:.2f}s)")
+                elif te > 8.0:
+                    warnings.append(f"Very long Te ({te:.2f}s)")
+
+            # Check 5: Peak detection at trace edges (often problematic)
+            edge_threshold = int(0.5 * sr_hz)  # 0.5 seconds from edges
             peak_idx_int = int(peak_idx)
+            if peak_idx_int < edge_threshold:
+                warnings.append("Peak near start of trace")
+            elif peak_idx_int > N - edge_threshold:
+                warnings.append("Peak near end of trace")
 
-            if onset_idx >= peak_idx_int:
-                errors.append("Onset after peak")
-            if offset_idx <= peak_idx_int:
-                errors.append("Offset before peak")
-            if onset_idx >= offset_idx:
-                errors.append("Onset after offset")
-
-        # Check 3: Reasonable cycle timing
-        if has_onset and i + 1 < len(onsets):
-            cycle_duration = t[int(onsets[i + 1])] - t[int(onsets[i])]
-            if cycle_duration < 0.5:  # Less than 0.5 seconds
-                warnings.append(f"Very short cycle ({cycle_duration:.2f}s)")
-            elif cycle_duration > 10.0:  # More than 10 seconds
-                warnings.append(f"Very long cycle ({cycle_duration:.2f}s)")
-
-        # Check 4: Ti/Te ratio reasonableness
-        if has_onset and has_offset and i + 1 < len(onsets):
-            ti = t[int(offsets[i])] - t[int(onsets[i])]
-            te = t[int(onsets[i + 1])] - t[int(offsets[i])]
-
-            if ti <= 0:
-                errors.append("Invalid Ti (≤0)")
-            elif ti < 0.1:
-                warnings.append(f"Very short Ti ({ti:.2f}s)")
-            elif ti > 5.0:
-                warnings.append(f"Very long Ti ({ti:.2f}s)")
-
-            if te <= 0:
-                errors.append("Invalid Te (≤0)")
-            elif te < 0.2:
-                warnings.append(f"Very short Te ({te:.2f}s)")
-            elif te > 8.0:
-                warnings.append(f"Very long Te ({te:.2f}s)")
-
-        # Check 5: Peak detection at trace edges (often problematic)
-        edge_threshold = int(0.5 * sr_hz)  # 0.5 seconds from edges
-        peak_idx_int = int(peak_idx)
-        if peak_idx_int < edge_threshold:
-            warnings.append("Peak near start of trace")
-        elif peak_idx_int > N - edge_threshold:
-            warnings.append("Peak near end of trace")
-
-        # Store cycle assessment
-        cycle_info = {
-            'cycle_idx': i,
-            'errors': errors,
-            'warnings': warnings,
-            'severity': 'error' if errors else ('warning' if warnings else 'good')
-        }
-        cycle_errors.append(cycle_info)
+            # Store cycle assessment
+            cycle_info = {
+                'cycle_idx': i,
+                'errors': errors,
+                'warnings': warnings,
+                'severity': 'error' if errors else ('warning' if warnings else 'good')
+            }
+            cycle_errors.append(cycle_info)
 
             # Mark regions for highlighting
             if errors:
