@@ -113,13 +113,27 @@ class MainWindow(QMainWindow):
         # Enable dark title bar on Windows 11
         self._enable_dark_title_bar()
 
-        # Remove dead tabs from UI (Notes and Code Notebook)
+        # === Projects Tab Rework (Phase 1) ===
+        # Remove all sub-tabs except Data Files, then hide the tab bar
         # Tab order in .ui: 0=Notes, 1=Data Files, 2=Consolidate, 3=Code Notebook
-        for tab_name in ('notebookContainer', 'notesContainer'):
+        for tab_name in ('notebookContainer', 'notesContainer', 'consolidationContainer'):
             for i in range(self.leftColumnTabs.count()):
                 if self.leftColumnTabs.widget(i) and self.leftColumnTabs.widget(i).objectName() == tab_name:
                     self.leftColumnTabs.removeTab(i)
                     break
+        # Only Data Files tab remains — hide the tab bar entirely
+        self.leftColumnTabs.tabBar().hide()
+        self.leftColumnTabs.setCurrentIndex(0)
+
+        # Hide legacy project name bar (replaced by file tree folder selection)
+        for widget_name in (
+            'projectNameCombo', 'newProjectButton', 'saveProjectButton',
+        ):
+            w = getattr(self, widget_name, None)
+            if w is not None:
+                w.hide()
+        # Also hide the dropdown arrow button added programmatically in _setup_project_name_combo
+        self._project_bar_hidden = True
 
         # Hide scan toolbar (browse, scan buttons, file-type checkboxes)
         # and bottom filter bar (replaced by search bar above table)
@@ -137,9 +151,6 @@ class MainWindow(QMainWindow):
             w = getattr(self, widget_name, None)
             if w is not None:
                 w.hide()
-
-        # Set Data Files as default tab
-        self.leftColumnTabs.setCurrentIndex(0)
 
         # Style status bar to match dark theme (true black)
         self.statusBar().setStyleSheet("""
@@ -609,26 +620,9 @@ class MainWindow(QMainWindow):
         # Wire consolidate button
         self.ConsolidateSaveDataButton.clicked.connect(self.on_consolidate_save_data_clicked)
 
-        # Wire new consolidation tab in Project Builder
-        self.consolidationSourceList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.consolidationFilesList.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.consolidationSaveButton.clicked.connect(self._on_consolidation_save_clicked)
-        # Connect move buttons
-        self.consolidationMoveAllRight.clicked.connect(self._consolidation_move_all_right)
-        self.consolidationMoveSingleRight.clicked.connect(self._consolidation_move_selected_right)
-        self.consolidationMoveSingleLeft.clicked.connect(self._consolidation_move_selected_left)
-        self.consolidationMoveAllLeft.clicked.connect(self._consolidation_move_all_left)
-        # Connect search filter
-        self.consolidationSearchBox.textChanged.connect(self._filter_consolidation_source_list)
-        # Connect browse button
-        self.consolidationBrowseButton.clicked.connect(self._on_consolidation_browse_clicked)
-        # Connect reset button (returns to project files)
-        self.consolidationResetButton.clicked.connect(self._on_consolidation_reset_clicked)
-        self.consolidationResetButton.hide()  # Hidden initially, shown when browsing custom folder
-        # Track consolidation source mode (None = project files, path = custom folder)
+        # Consolidation tab removed in Projects Tab Rework (Phase 1).
+        # Consolidation functionality will return as Grouping tab in a future phase.
         self._consolidation_custom_folder = None
-        # Auto-refresh consolidation source when switching to the tab
-        self.leftColumnTabs.currentChanged.connect(self._on_left_column_tab_changed)
 
         # ========================================
         # TESTING MODE: Auto-load file and set channels
@@ -8101,6 +8095,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'projectNameCombo'):
             print("[project-builder] WARNING: projectNameCombo not found in UI")
             return
+        # Skip full setup if project bar is hidden (Projects Tab Rework Phase 1)
+        if getattr(self, '_project_bar_hidden', False):
+            self._project_combo_updating = False
+            self._project_combo_edit_mode = False
+            # Still load all experiments at startup
+            self._populate_project_name_combo()
+            return
 
         combo = self.projectNameCombo
         self._project_combo_updating = False  # Prevent recursive updates
@@ -8374,6 +8375,9 @@ class MainWindow(QMainWindow):
         self._rebuild_table_from_master_list()
         self._auto_fit_table_columns()
 
+        # Auto-detect file tree root from loaded experiments
+        self._update_file_tree_root_from_experiments(experiments)
+
         # Update summary
         label = f"Summary: {total} experiments"
         if snapshot_id is not None:
@@ -8440,11 +8444,43 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'filterColumnCombo'):
             self.filterColumnCombo.currentIndexChanged.connect(self._on_table_filter_changed)
 
-        # Hide AI chatbot panel — replaced by Claude Code CLI (launched externally)
-        if hasattr(self, 'chatbotPanel'):
-            self.chatbotPanel.setVisible(False)
-        if hasattr(self, 'mainContentSplitter'):
-            self.mainContentSplitter.setSizes([1000, 0])
+        # === File Tree Browser (Projects Tab Rework Phase 1, Step 1.2) ===
+        # Replace hidden chatbot panel with a folder tree on the LEFT side.
+        # The mainContentSplitter has: index 0 = left panel, index 1 = right panel.
+        # In the .ui file, left = leftColumnTabs (table), right = chatbotPanel.
+        # We swap: put file tree in chatbotPanel's spot, then reorder so tree is left.
+        self._folder_filter_path = ""  # Current folder filter for table
+        if hasattr(self, 'chatbotPanel') and hasattr(self, 'mainContentSplitter'):
+            from views.project.file_tree_widget import FileTreeWidget
+            self._file_tree = FileTreeWidget()
+            # Replace chatbot panel contents with file tree
+            chatbot_layout = self.chatbotPanel.layout()
+            if chatbot_layout:
+                # Clear existing chatbot widgets
+                while chatbot_layout.count():
+                    item = chatbot_layout.takeAt(0)
+                    w = item.widget()
+                    if w:
+                        w.hide()
+                        w.deleteLater()
+                chatbot_layout.addWidget(self._file_tree)
+            self.chatbotPanel.setVisible(True)
+            self.chatbotPanel.setMinimumWidth(180)
+
+            # Reorder splitter: move chatbotPanel (now file tree) to index 0 (left)
+            # Qt splitter: insertWidget moves the widget to the new position
+            self.mainContentSplitter.insertWidget(0, self.chatbotPanel)
+            self.mainContentSplitter.setSizes([220, 780])
+
+            # Connect folder selection to table filtering
+            self._file_tree.folder_selected.connect(self._on_folder_filter_changed)
+
+            # Set root to project directory if we have one (may not be set yet during init)
+            proj_dir = getattr(self, '_project_directory', None)
+            if proj_dir:
+                self._file_tree.set_root(str(proj_dir))
+        else:
+            self._file_tree = None
 
     def _on_table_column_mode_changed(self, state):
         """Handle toggle of the 'Show Full Content' checkbox."""
@@ -8518,6 +8554,101 @@ class MainWindow(QMainWindow):
                 self.filterCountLabel.setText("")
             else:
                 self.filterCountLabel.setText(f"({visible_count} of {total_count})")
+
+    def _update_file_tree_root_from_experiments(self, experiments):
+        """Auto-detect the common root folder from experiment file paths and set the file tree."""
+        if not getattr(self, '_file_tree', None) or not experiments:
+            return
+        # Already has a root set explicitly
+        if self._file_tree.root_path():
+            return
+        # Find common prefix of all file paths
+        paths = [e.get('file_path', '') for e in experiments if e.get('file_path')]
+        if not paths:
+            return
+        from pathlib import Path as P
+        try:
+            # Use Path parents to find common ancestor
+            parts_list = [P(p).parts for p in paths[:50]]  # Sample first 50 for speed
+            if not parts_list:
+                return
+            common = list(parts_list[0])
+            for parts in parts_list[1:]:
+                new_common = []
+                for a, b in zip(common, parts):
+                    if a.lower() == b.lower():
+                        new_common.append(a)
+                    else:
+                        break
+                common = new_common
+            if len(common) >= 2:  # At least drive + one folder
+                # Go up 2 levels from deepest common to show more context
+                root_parts = common
+                if len(root_parts) > 3:
+                    root_parts = root_parts[:-2]
+                root = str(P(*root_parts))
+                self._file_tree.set_root(root)
+        except Exception as e:
+            print(f"[file-tree] Error detecting root: {e}")
+
+    def _on_folder_filter_changed(self, folder_path: str):
+        """Filter table rows to experiments whose file_path is under the selected folder."""
+        self._folder_filter_path = folder_path
+        self._apply_combined_filters()
+
+    def _apply_combined_filters(self):
+        """Apply all active filters (folder path + text search) to the table."""
+        if not hasattr(self, 'discoveredFilesTable'):
+            return
+
+        table = self.discoveredFilesTable
+        folder_path = getattr(self, '_folder_filter_path', '')
+        search_text = ''
+        if hasattr(self, 'projectSearchBar'):
+            search_text = self.projectSearchBar.text().strip().lower()
+
+        visible_count = 0
+        total_count = len(self._master_file_list) if self._master_file_list else 0
+
+        for row in range(self._file_table_model.rowCount()):
+            if row >= len(self._master_file_list):
+                continue
+
+            task = self._master_file_list[row]
+            show = True
+
+            # Folder filter
+            if folder_path:
+                file_path = str(task.get('file_path', ''))
+                # Normalize path separators for comparison
+                norm_folder = folder_path.replace('/', '\\').rstrip('\\').lower()
+                norm_file = file_path.replace('/', '\\').lower()
+                if not norm_file.startswith(norm_folder + '\\') and norm_file != norm_folder:
+                    show = False
+
+            # Text search filter
+            if show and search_text:
+                searchable = ['file_name', 'protocol', 'animal_id', 'strain',
+                              'keywords_display', 'power', 'sex', 'stim_type',
+                              'experiment', 'file_path']
+                match = False
+                for col in searchable:
+                    if search_text in str(task.get(col, '')).lower():
+                        match = True
+                        break
+                if not match:
+                    show = False
+
+            table.setRowHidden(row, not show)
+            if show:
+                visible_count += 1
+
+        # Update summary label
+        if hasattr(self, 'summaryLabel'):
+            if folder_path or search_text:
+                self.summaryLabel.setText(f"Showing {visible_count} of {total_count} experiments")
+            else:
+                self.summaryLabel.setText(f"Summary: {total_count} experiments")
 
     def on_resolve_all_conflicts(self):
         """Show dialog to resolve all conflicts at once."""
