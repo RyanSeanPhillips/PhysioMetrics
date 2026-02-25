@@ -7359,6 +7359,56 @@ class MainWindow(QMainWindow):
         self._search_count_label.setStyleSheet("color: #888; font-size: 9pt; padding-right: 4px;")
         search_layout.addWidget(self._search_count_label)
 
+        # Status filter dropdown (Step 1.3)
+        from PyQt6.QtWidgets import QComboBox
+        self._status_filter = ''
+        self._status_combo = QComboBox()
+        self._status_combo.addItems(['All Status', 'pending', 'completed', 'in_progress', 'error'])
+        self._status_combo.setFixedWidth(110)
+        self._status_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2b2b2b; color: #e0e0e0;
+                border: 1px solid #555; border-radius: 4px;
+                padding: 3px 6px; font-size: 9pt;
+            }
+            QComboBox:focus { border: 1px solid #4682b4; }
+            QComboBox QAbstractItemView {
+                background-color: #2b2b2b; color: #e0e0e0;
+                selection-background-color: #094771;
+            }
+        """)
+        self._status_combo.currentTextChanged.connect(self._on_status_filter_changed)
+        search_layout.addWidget(self._status_combo)
+
+        # Separator
+        sep = QLabel("|")
+        sep.setStyleSheet("color: #555; font-size: 9pt; padding: 0 2px;")
+        search_layout.addWidget(sep)
+
+        # Action buttons (Step 1.4)
+        btn_style = """
+            QPushButton {{
+                background-color: {bg}; color: #ffffff;
+                border: none; border-radius: 4px;
+                padding: 4px 12px; font-size: 9pt; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {hover}; }}
+            QPushButton:disabled {{ background-color: #333; color: #666; }}
+        """
+        self._batch_analyze_btn = QPushButton("Batch Analyze")
+        self._batch_analyze_btn.setStyleSheet(btn_style.format(bg='#2d7d46', hover='#3a9e5a'))
+        self._batch_analyze_btn.setToolTip("Run batch analysis on selected experiments")
+        self._batch_analyze_btn.setEnabled(False)
+        self._batch_analyze_btn.clicked.connect(self._on_batch_analyze_clicked)
+        search_layout.addWidget(self._batch_analyze_btn)
+
+        self._review_btn = QPushButton("Review")
+        self._review_btn.setStyleSheet(btn_style.format(bg='#2563a8', hover='#3478c2'))
+        self._review_btn.setToolTip("Review analyzed experiments in the Analysis tab")
+        self._review_btn.setEnabled(False)
+        self._review_btn.clicked.connect(self._on_review_selected_clicked)
+        search_layout.addWidget(self._review_btn)
+
         # Insert before the table
         parent_layout.insertWidget(table_idx, search_container)
 
@@ -7369,22 +7419,39 @@ class MainWindow(QMainWindow):
         self._search_timer.timeout.connect(self._on_search_execute)
         self._search_edit.textChanged.connect(lambda: self._search_timer.start())
 
+        # Connect table selection changes to enable/disable action buttons
+        table = self.discoveredFilesTable
+        table.selectionModel().selectionChanged.connect(
+            lambda: self._on_table_selection_changed()
+        )
+
     def _on_search_execute(self):
-        """Execute search and filter table rows."""
+        """Execute combined search (text + folder + status) and filter table rows."""
         query = self._search_edit.text().strip()
         table = self.discoveredFilesTable
+        folder_path = getattr(self, '_folder_filter_path', '')
+        status_filter = getattr(self, '_status_filter', '')
 
-        if not query:
+        has_any_filter = bool(query) or bool(folder_path) or bool(status_filter)
+
+        if not has_any_filter:
             # Show all rows
             for row in range(self._file_table_model.rowCount()):
                 table.setRowHidden(row, False)
+            total = self._file_table_model.rowCount()
             self._search_count_label.setText("")
+            if hasattr(self, 'summaryLabel'):
+                self.summaryLabel.setText(f"Summary: {total} experiments")
             return
 
-        # Search across row data fields
-        query_lower = query.lower()
+        query_lower = query.lower() if query else ''
         visible_count = 0
         total = self._file_table_model.rowCount()
+
+        # Normalize folder path for comparison
+        norm_folder = ''
+        if folder_path:
+            norm_folder = folder_path.replace('/', '\\').rstrip('\\').lower()
 
         for row in range(total):
             row_data = self._file_table_model.get_row_data(row)
@@ -7392,21 +7459,40 @@ class MainWindow(QMainWindow):
                 table.setRowHidden(row, True)
                 continue
 
-            # Search across key metadata fields
-            match = False
-            for key in ('file_name', 'experiment', 'strain', 'stim_type',
-                        'power', 'sex', 'animal_id', 'protocol',
-                        'keywords_display', 'channel'):
-                val = str(row_data.get(key, '')).lower()
-                if query_lower in val:
-                    match = True
-                    break
+            show = True
 
-            table.setRowHidden(row, not match)
-            if match:
+            # Folder filter
+            if norm_folder:
+                file_path = str(row_data.get('file_path', '')).replace('/', '\\').lower()
+                if not file_path.startswith(norm_folder + '\\') and file_path != norm_folder:
+                    show = False
+
+            # Status filter
+            if show and status_filter:
+                row_status = str(row_data.get('status', 'pending')).lower()
+                if row_status != status_filter.lower():
+                    show = False
+
+            # Text search
+            if show and query_lower:
+                match = False
+                for key in ('file_name', 'experiment', 'strain', 'stim_type',
+                            'power', 'sex', 'animal_id', 'protocol',
+                            'keywords_display', 'channel', 'file_path'):
+                    val = str(row_data.get(key, '')).lower()
+                    if query_lower in val:
+                        match = True
+                        break
+                if not match:
+                    show = False
+
+            table.setRowHidden(row, not show)
+            if show:
                 visible_count += 1
 
         self._search_count_label.setText(f"{visible_count} of {total}")
+        if hasattr(self, 'summaryLabel'):
+            self.summaryLabel.setText(f"Showing {visible_count} of {total} experiments")
 
     def _setup_table_delegates(self, table: QTableView):
         """Set up item delegates for special column types."""
@@ -8591,64 +8677,48 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[file-tree] Error detecting root: {e}")
 
+    def _on_status_filter_changed(self, text: str):
+        """Handle status filter dropdown change."""
+        if text == 'All Status':
+            self._status_filter = ''
+        else:
+            self._status_filter = text
+        self._on_search_execute()
+
+    def _on_batch_analyze_clicked(self):
+        """Stub: Launch batch analysis on selected experiments (Phase 2)."""
+        from PyQt6.QtWidgets import QMessageBox
+        selected = self.discoveredFilesTable.selectionModel().selectedRows()
+        count = len(selected)
+        QMessageBox.information(
+            self, "Batch Analyze",
+            f"Batch analysis will run on {count} selected experiment(s).\n\n"
+            "This feature is coming in Phase 2."
+        )
+
+    def _on_review_selected_clicked(self):
+        """Stub: Launch batch review in the Analysis tab (Phase 3)."""
+        from PyQt6.QtWidgets import QMessageBox
+        selected = self.discoveredFilesTable.selectionModel().selectedRows()
+        count = len(selected)
+        QMessageBox.information(
+            self, "Review",
+            f"Review mode will open {count} experiment(s) in the Analysis tab.\n\n"
+            "This feature is coming in Phase 3."
+        )
+
+    def _on_table_selection_changed(self):
+        """Enable/disable action buttons based on table selection."""
+        has_selection = bool(self.discoveredFilesTable.selectionModel().selectedRows())
+        if hasattr(self, '_batch_analyze_btn'):
+            self._batch_analyze_btn.setEnabled(has_selection)
+        if hasattr(self, '_review_btn'):
+            self._review_btn.setEnabled(has_selection)
+
     def _on_folder_filter_changed(self, folder_path: str):
         """Filter table rows to experiments whose file_path is under the selected folder."""
         self._folder_filter_path = folder_path
-        self._apply_combined_filters()
-
-    def _apply_combined_filters(self):
-        """Apply all active filters (folder path + text search) to the table."""
-        if not hasattr(self, 'discoveredFilesTable'):
-            return
-
-        table = self.discoveredFilesTable
-        folder_path = getattr(self, '_folder_filter_path', '')
-        search_text = ''
-        if hasattr(self, 'projectSearchBar'):
-            search_text = self.projectSearchBar.text().strip().lower()
-
-        visible_count = 0
-        total_count = len(self._master_file_list) if self._master_file_list else 0
-
-        for row in range(self._file_table_model.rowCount()):
-            if row >= len(self._master_file_list):
-                continue
-
-            task = self._master_file_list[row]
-            show = True
-
-            # Folder filter
-            if folder_path:
-                file_path = str(task.get('file_path', ''))
-                # Normalize path separators for comparison
-                norm_folder = folder_path.replace('/', '\\').rstrip('\\').lower()
-                norm_file = file_path.replace('/', '\\').lower()
-                if not norm_file.startswith(norm_folder + '\\') and norm_file != norm_folder:
-                    show = False
-
-            # Text search filter
-            if show and search_text:
-                searchable = ['file_name', 'protocol', 'animal_id', 'strain',
-                              'keywords_display', 'power', 'sex', 'stim_type',
-                              'experiment', 'file_path']
-                match = False
-                for col in searchable:
-                    if search_text in str(task.get(col, '')).lower():
-                        match = True
-                        break
-                if not match:
-                    show = False
-
-            table.setRowHidden(row, not show)
-            if show:
-                visible_count += 1
-
-        # Update summary label
-        if hasattr(self, 'summaryLabel'):
-            if folder_path or search_text:
-                self.summaryLabel.setText(f"Showing {visible_count} of {total_count} experiments")
-            else:
-                self.summaryLabel.setText(f"Summary: {total_count} experiments")
+        self._on_search_execute()
 
     def on_resolve_all_conflicts(self):
         """Show dialog to resolve all conflicts at once."""
