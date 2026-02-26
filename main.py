@@ -7467,6 +7467,47 @@ class MainWindow(QMainWindow):
 
         toolbar_vlayout.addWidget(action_row)
 
+        # === Row 3: Batch progress (hidden by default) ===
+        from PyQt6.QtWidgets import QProgressBar
+        self._batch_progress_widget = QWidget()
+        self._batch_progress_widget.setVisible(False)
+        bp_layout = QHBoxLayout(self._batch_progress_widget)
+        bp_layout.setContentsMargins(0, 2, 0, 2)
+        bp_layout.setSpacing(6)
+
+        self._batch_progress_bar = QProgressBar()
+        self._batch_progress_bar.setFixedHeight(16)
+        self._batch_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #2b2b2b; border: 1px solid #555;
+                border-radius: 4px; text-align: center;
+                color: #e0e0e0; font-size: 8pt;
+            }
+            QProgressBar::chunk {
+                background-color: #2d7d46; border-radius: 3px;
+            }
+        """)
+        bp_layout.addWidget(self._batch_progress_bar, stretch=1)
+
+        self._batch_progress_label = QLabel("")
+        self._batch_progress_label.setStyleSheet("color: #aaa; font-size: 8pt;")
+        bp_layout.addWidget(self._batch_progress_label)
+
+        self._batch_cancel_btn = QPushButton("Cancel")
+        self._batch_cancel_btn.setFixedHeight(20)
+        self._batch_cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8b3a3a; color: #fff;
+                border: none; border-radius: 3px;
+                padding: 2px 8px; font-size: 8pt;
+            }
+            QPushButton:hover { background-color: #a04545; }
+        """)
+        self._batch_cancel_btn.clicked.connect(self._on_batch_cancel_clicked)
+        bp_layout.addWidget(self._batch_cancel_btn)
+
+        toolbar_vlayout.addWidget(self._batch_progress_widget)
+
         # Insert toolbar before the table
         parent_layout.insertWidget(table_idx, toolbar_container)
 
@@ -7482,6 +7523,9 @@ class MainWindow(QMainWindow):
         table.selectionModel().selectionChanged.connect(
             lambda: self._on_table_selection_changed()
         )
+
+        # === Batch Analysis ViewModel ===
+        self._batch_vm = None  # lazy-init in _on_batch_analyze_clicked
 
     def _on_search_execute(self):
         """Execute combined search (text + folder + status) and filter table rows."""
@@ -7553,6 +7597,9 @@ class MainWindow(QMainWindow):
         self._search_count_label.setText(f"{visible_count} of {total}")
         if hasattr(self, 'summaryLabel'):
             self.summaryLabel.setText(f"Showing {visible_count} of {total} experiments")
+        # Update batch button state (enable if visible rows exist)
+        if hasattr(self, '_batch_analyze_btn'):
+            self._batch_analyze_btn.setEnabled(visible_count > 0)
 
     def _setup_table_delegates(self, table: QTableView):
         """Set up item delegates for special column types."""
@@ -8015,73 +8062,26 @@ class MainWindow(QMainWindow):
             self._sort_column = column
             self._sort_ascending = True
 
-        # Group tasks by parent file path
-        groups = {}  # file_path -> {'parent': task, 'sub_rows': [tasks]}
-        parent_order = []  # Track order of parents for sorting
+        # Get sort field from the clicked column
+        field = self._file_table_model.get_column_key(column) or 'file_name'
+        if field == 'keywords':
+            field = 'keywords_display'
+        elif field == 'exports':
+            field = 'export_path'
 
-        for task in self._master_file_list:
-            file_path = str(task.get('file_path', ''))
-            is_sub_row = task.get('is_sub_row', False)
-
-            if file_path not in groups:
-                groups[file_path] = {'parent': None, 'sub_rows': []}
-                parent_order.append(file_path)
-
-            if is_sub_row:
-                groups[file_path]['sub_rows'].append(task)
-            else:
-                groups[file_path]['parent'] = task
-
-        # Get sort key for a group (uses parent's column value)
-        def get_sort_key(file_path):
-            group = groups[file_path]
-            parent = group['parent']
-            if not parent:
-                # No parent, use first sub-row
-                if group['sub_rows']:
-                    parent = group['sub_rows'][0]
-                else:
-                    return ''
-
-            # Get value from the appropriate column
-            # Map column index to task field
-            column_to_field = {
-                0: 'file_name',
-                1: 'protocol',
-                2: 'channel_count',
-                3: 'sweep_count',
-                4: 'keywords_display',
-                5: 'channel',
-                6: 'stim_channel',
-                7: 'events_channel',
-                8: 'strain',
-                9: 'stim_type',
-                10: 'power',
-                11: 'sex',
-                12: 'animal_id',
-                13: 'status',
-                15: 'export_path',
-            }
-            field = column_to_field.get(column, 'file_name')
-            value = parent.get(field, '')
-            # Convert to string for consistent sorting
+        def get_sort_key(task):
+            value = task.get(field, '')
             return str(value).lower() if value else ''
 
-        # Sort parent_order by the sort key
-        parent_order.sort(key=get_sort_key, reverse=not self._sort_ascending)
-
-        # Rebuild _master_file_list with sorted groups
-        new_master_list = []
-        for file_path in parent_order:
-            group = groups[file_path]
-            if group['parent']:
-                new_master_list.append(group['parent'])
-            new_master_list.extend(group['sub_rows'])
-
-        self._master_file_list = new_master_list
+        self._master_file_list.sort(
+            key=get_sort_key, reverse=not self._sort_ascending
+        )
 
         # Rebuild the table
         self._rebuild_table_from_master_list()
+
+        # Re-apply search/filter (sorting rebuilds model, clearing hidden state)
+        self._on_search_execute()
 
         # Show sort indicator
         direction = "↑" if self._sort_ascending else "↓"
@@ -8724,21 +8724,212 @@ class MainWindow(QMainWindow):
         self._setup_table_delegates(table)
 
     def _on_batch_analyze_clicked(self):
-        """Stub: Launch batch analysis on selected experiments (Phase 2)."""
+        """Launch batch analysis (dry run) on selected or all visible experiments."""
         from PyQt6.QtWidgets import QMessageBox
+
         selected = self.discoveredFilesTable.selectionModel().selectedRows()
-        count = len(selected)
-        QMessageBox.information(
-            self, "Batch Analyze",
-            f"Batch analysis will run on {count} selected experiment(s).\n\n"
-            "This feature is coming in Phase 2."
+
+        # If nothing selected, use all visible (non-hidden) rows
+        if not selected:
+            table = self.discoveredFilesTable
+            row_count = self._file_table_model.rowCount()
+            if row_count == 0:
+                return
+            experiments = []
+            for r in range(row_count):
+                if not table.isRowHidden(r):
+                    row_data = self._file_table_model.get_row_data(r)
+                    if row_data:
+                        experiments.append((r, dict(row_data)))
+            if not experiments:
+                return
+            scope_label = f"all {len(experiments)} visible"
+        else:
+            table = self.discoveredFilesTable
+            experiments = []
+            for idx in selected:
+                r = idx.row()
+                if table.isRowHidden(r):
+                    continue  # Skip hidden (filtered-out) rows
+                row_data = self._file_table_model.get_row_data(r)
+                if row_data:
+                    experiments.append((r, dict(row_data)))
+            scope_label = f"{len(experiments)} selected"
+
+        if not experiments:
+            return
+
+        # Validate file paths
+        missing = [name for _, exp in experiments
+                   if not Path(exp.get("file_path", "")).exists()
+                   for name in [exp.get("file_name", "?")]]
+
+        msg = f"Run analysis (dry run) on {scope_label} experiment(s)?\n\nNo files will be written to disk."
+        if missing:
+            msg += f"\n\nWarning: {len(missing)} file(s) not found on disk — they will show errors."
+
+        reply = QMessageBox.question(
+            self, "Batch Analyze (Dry Run)", msg,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
         )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        # Store row indices for later update
+        self._batch_row_map = {i: row_idx for i, (row_idx, _) in enumerate(experiments)}
+        self._batch_results = []
+
+        # Mark rows as running
+        for row_idx, exp in experiments:
+            self._file_table_model.set_cell_value(row_idx, 'status', 'in_progress')
+            if row_idx < len(self._master_file_list):
+                self._master_file_list[row_idx]['status'] = 'in_progress'
+
+        # Lazy-init ViewModel
+        if self._batch_vm is None:
+            from viewmodels.batch_analysis_viewmodel import BatchAnalysisViewModel
+            store = getattr(self, '_experiment_store', None)
+            self._batch_vm = BatchAnalysisViewModel(store=store, parent=self)
+            self._batch_vm.batch_started.connect(self._on_batch_started)
+            self._batch_vm.file_started.connect(self._on_batch_file_started)
+            self._batch_vm.file_progress.connect(self._on_batch_file_progress)
+            self._batch_vm.file_completed.connect(self._on_batch_file_completed)
+            self._batch_vm.batch_finished.connect(self._on_batch_all_done)
+            self._batch_vm.batch_error.connect(self._on_batch_error)
+            self._batch_vm.progress_message.connect(
+                lambda msg: self._batch_progress_label.setText(msg)
+            )
+
+        from core.domain.analysis.models import AnalysisConfig
+        exp_dicts = [exp for _, exp in experiments]
+        self._batch_vm.run_batch(exp_dicts, AnalysisConfig(), dry_run=True)
+
+    def _on_batch_cancel_clicked(self):
+        """Cancel the running batch analysis."""
+        if self._batch_vm and self._batch_vm.is_running:
+            self._batch_vm.cancel()
+            self._batch_progress_label.setText("Cancelling...")
+
+    def _on_batch_started(self, total):
+        """Show progress panel, disable button."""
+        self._batch_progress_widget.setVisible(True)
+        self._batch_progress_bar.setMaximum(total)
+        self._batch_progress_bar.setValue(0)
+        self._batch_progress_label.setText(f"0 / {total}")
+        self._batch_analyze_btn.setEnabled(False)
+
+    def _on_batch_file_started(self, idx, name):
+        """Update progress label and set row to show 'Loading...'."""
+        total = self._batch_progress_bar.maximum()
+        self._batch_progress_label.setText(f"{idx + 1} / {total}: {name}")
+
+        # Set row-level progress detail
+        row_idx = self._batch_row_map.get(idx)
+        if row_idx is not None:
+            self._file_table_model.set_cell_value(row_idx, 'batch_detail', 'Loading...')
+            self._file_table_model.set_cell_value(row_idx, 'batch_progress', 0.1)
+
+    def _on_batch_file_progress(self, idx, msg):
+        """Update row-level progress detail from analysis stage messages."""
+        row_idx = self._batch_row_map.get(idx)
+        if row_idx is None:
+            return
+
+        # Parse message to determine progress fraction and short label
+        msg_lower = msg.lower()
+        if 'loading' in msg_lower:
+            progress, label = 0.1, 'Loading...'
+        elif 'normali' in msg_lower:
+            progress, label = 0.25, 'Normalizing...'
+        elif 'threshold' in msg_lower:
+            progress, label = 0.35, 'Threshold...'
+        elif 'detect' in msg_lower:
+            progress, label = 0.5, 'Detecting...'
+        elif 'wrote' in msg_lower or 'metric' in msg_lower:
+            progress, label = 0.9, 'Metrics...'
+        else:
+            progress, label = 0.5, msg[:15] + '...' if len(msg) > 15 else msg
+
+        self._file_table_model.set_cell_value(row_idx, 'batch_detail', label)
+        self._file_table_model.set_cell_value(row_idx, 'batch_progress', progress)
+
+    def _on_batch_file_completed(self, idx, exp_dict, result):
+        """Update row status and advance progress bar."""
+        self._batch_progress_bar.setValue(
+            self._batch_progress_bar.value() + 1
+        )
+        self._batch_results.append((exp_dict, result))
+
+        # Determine status
+        status = 'completed' if result.error is None else 'error'
+
+        # Update model row — clear batch progress fields, set final status
+        row_idx = self._batch_row_map.get(idx)
+        if row_idx is not None:
+            self._file_table_model.set_cell_value(row_idx, 'status', status)
+            self._file_table_model.set_cell_value(row_idx, 'batch_detail', '')
+            self._file_table_model.set_cell_value(row_idx, 'batch_progress', 0.0)
+            if row_idx < len(self._master_file_list):
+                self._master_file_list[row_idx]['status'] = status
+
+    def _on_batch_all_done(self, results):
+        """Hide progress, show summary dialog."""
+        self._batch_progress_widget.setVisible(False)
+        self._batch_analyze_btn.setEnabled(True)
+
+        if not results:
+            results = self._batch_results
+
+        n_total = len(results)
+        n_ok = sum(1 for _, r in results if r.error is None)
+        n_err = n_total - n_ok
+        total_peaks = sum(r.n_peaks_total for _, r in results if r.error is None)
+        total_breaths = sum(r.n_breaths_total for _, r in results if r.error is None)
+
+        # Build per-file detail lines
+        lines = []
+        for exp, r in results:
+            name = exp.get("file_name", "?")
+            if r.error:
+                lines.append(f"  {name}: ERROR — {r.error}")
+            else:
+                lines.append(
+                    f"  {name}: {r.n_sweeps} sweeps, "
+                    f"{r.n_peaks_total} peaks, {r.n_breaths_total} breaths"
+                )
+
+        detail = "\n".join(lines)
+        summary = (
+            f"Batch Analysis Complete (Dry Run)\n\n"
+            f"Files: {n_total}  |  OK: {n_ok}  |  Errors: {n_err}\n"
+            f"Total peaks: {total_peaks}  |  Total breaths: {total_breaths}\n\n"
+            f"Per-file results:\n{detail}"
+        )
+
+        from PyQt6.QtWidgets import QMessageBox
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Batch Analysis Summary")
+        msg_box.setText(f"{n_ok} of {n_total} files analyzed successfully (dry run).")
+        msg_box.setDetailedText(summary)
+        msg_box.setIcon(QMessageBox.Icon.Information if n_err == 0 else QMessageBox.Icon.Warning)
+        msg_box.exec()
+
+        self._batch_results = []
+        self._batch_row_map = {}
+
+    def _on_batch_error(self, msg):
+        """Handle fatal batch error."""
+        self._batch_progress_widget.setVisible(False)
+        self._batch_analyze_btn.setEnabled(True)
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(self, "Batch Analysis Error", msg)
 
     def _on_review_selected_clicked(self):
         """Stub: Launch batch review in the Analysis tab (Phase 3)."""
         from PyQt6.QtWidgets import QMessageBox
-        selected = self.discoveredFilesTable.selectionModel().selectedRows()
-        count = len(selected)
+        table = self.discoveredFilesTable
+        selected = table.selectionModel().selectedRows()
+        count = sum(1 for idx in selected if not table.isRowHidden(idx.row()))
         QMessageBox.information(
             self, "Review",
             f"Review mode will open {count} experiment(s) in the Analysis tab.\n\n"
@@ -8747,15 +8938,23 @@ class MainWindow(QMainWindow):
 
     def _on_table_selection_changed(self):
         """Enable/disable action buttons based on table selection."""
-        selected = self.discoveredFilesTable.selectionModel().selectedRows()
-        count = len(selected)
-        has_selection = count > 0
+        table = self.discoveredFilesTable
+        selected = table.selectionModel().selectedRows()
+        # Only count visible (non-hidden) selected rows
+        count = sum(1 for idx in selected if not table.isRowHidden(idx.row()))
+        has_rows = self._file_table_model.rowCount() > 0
         if hasattr(self, '_batch_analyze_btn'):
-            self._batch_analyze_btn.setEnabled(has_selection)
+            # Enable if rows selected OR if there are visible rows (analyze all)
+            self._batch_analyze_btn.setEnabled(count > 0 or has_rows)
         if hasattr(self, '_review_btn'):
-            self._review_btn.setEnabled(has_selection)
+            self._review_btn.setEnabled(count > 0)
         if hasattr(self, '_selection_count_label'):
-            self._selection_count_label.setText(f"{count} selected" if count else "")
+            if count > 0:
+                self._selection_count_label.setText(f"{count} selected")
+            elif has_rows:
+                self._selection_count_label.setText(f"{self._file_table_model.rowCount()} visible")
+            else:
+                self._selection_count_label.setText("")
 
     def _on_folder_filter_changed(self, folder_path: str):
         """Filter table rows to experiments whose file_path is under the selected folder."""

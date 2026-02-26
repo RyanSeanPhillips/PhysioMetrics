@@ -206,8 +206,8 @@ DEFAULT_COLUMNS: List[ColumnDef] = [
     ColumnDef(
         key='status',
         header='Status',
-        width=55,
-        min_width=45,
+        width=80,
+        min_width=55,
         column_type=ColumnType.STATUS,
         tooltip="Analysis status"
     ),
@@ -236,6 +236,15 @@ DEFAULT_COLUMNS: List[ColumnDef] = [
         min_width=35,
         column_type=ColumnType.TEXT_READONLY,
         tooltip="Notes files that reference this data file (click to preview)"
+    ),
+    ColumnDef(
+        key='results_path',
+        header='Results',
+        width=70,
+        min_width=40,
+        column_type=ColumnType.TEXT_READONLY,
+        hidden=True,
+        tooltip="Path to analysis results CSV"
     ),
 ]
 

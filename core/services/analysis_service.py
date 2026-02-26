@@ -405,6 +405,8 @@ def analyze_file(
     config: AnalysisConfig,
     output_dir: Optional[Path] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    write_csv: bool = True,
+    analyze_channel: Optional[str] = None,
 ) -> AnalysisResult:
     """Headless analysis of a single recording file.
 
@@ -422,6 +424,8 @@ def analyze_file(
         config: Full analysis configuration
         output_dir: Where to write results. Defaults to same folder as input.
         progress_callback: Optional status message callback
+        write_csv: If False, skip CSV writing (dry run). Still returns full metrics.
+        analyze_channel: If provided (e.g. "IN 0"), use that channel instead of auto-detect.
 
     Returns:
         AnalysisResult with paths to output files.
@@ -446,13 +450,18 @@ def analyze_file(
         ch_names = data["channel_names"]
         t = data["t"]
 
-        # 2. Auto-detect channels
-        from core.abf_io import auto_select_channels
-        stim_ch, analyze_ch = auto_select_channels(sweeps, ch_names)
-        if analyze_ch is None:
-            # Fallback: pick first non-stim channel
-            non_stim = [c for c in ch_names if c != stim_ch]
-            analyze_ch = non_stim[0] if non_stim else ch_names[0]
+        # 2. Select analysis channel
+        if analyze_channel and analyze_channel in ch_names:
+            analyze_ch = analyze_channel
+        elif analyze_channel and analyze_channel not in ch_names:
+            result.error = f"Channel '{analyze_channel}' not found in {ch_names}"
+            return result
+        else:
+            from core.abf_io import auto_select_channels
+            stim_ch, analyze_ch = auto_select_channels(sweeps, ch_names)
+            if analyze_ch is None:
+                non_stim = [c for c in ch_names if c != stim_ch]
+                analyze_ch = non_stim[0] if non_stim else ch_names[0]
 
         Y = sweeps[analyze_ch]  # (n_samples, n_sweeps)
         n_sweeps = Y.shape[1]
@@ -525,8 +534,8 @@ def analyze_file(
 
                     all_metrics_rows.append(row)
 
-        # 7. Save results CSV
-        if all_metrics_rows:
+        # 7. Save results CSV (skip in dry-run mode)
+        if all_metrics_rows and write_csv:
             import csv
             csv_path = output_dir / f"{path.stem}_results.csv"
             fieldnames = list(all_metrics_rows[0].keys())

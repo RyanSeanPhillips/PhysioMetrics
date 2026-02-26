@@ -532,6 +532,22 @@ class ProjectBuilderManager:
         except Exception as e:
             print(f"[project-builder] Error refreshing verification cache: {e}")
 
+    def _select_all_visible_rows(self):
+        """Select all currently visible rows in the table."""
+        from PyQt6.QtCore import QItemSelection, QItemSelectionModel
+        table = self.mw.discoveredFilesTable
+        model = self.mw._file_table_model
+        row_count = model.rowCount()
+        if row_count == 0:
+            return
+        selection = QItemSelection(
+            model.index(0, 0),
+            model.index(row_count - 1, model.columnCount() - 1),
+        )
+        table.selectionModel().select(
+            selection, QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
+
     def get_experiment_history(self) -> list:
         """Get list of previously used experiment names from QSettings."""
         from PyQt6.QtCore import QSettings
@@ -1169,12 +1185,28 @@ class ProjectBuilderManager:
         from PyQt6.QtGui import QAction
 
         table = self.mw.discoveredFilesTable
-        selected_rows = set(index.row() for index in table.selectedIndexes())
-
-        if not selected_rows:
-            return
+        # Filter out hidden (filtered) rows from selection
+        selected_rows = set(
+            index.row() for index in table.selectedIndexes()
+            if not table.isRowHidden(index.row())
+        )
 
         menu = QMenu(self.mw)
+
+        # "Select All Visible" — always available
+        visible_count = sum(
+            1 for r in range(self.mw._file_table_model.rowCount())
+            if not table.isRowHidden(r)
+        )
+        select_all_action = QAction(f"Select All Visible ({visible_count})", self.mw)
+        select_all_action.triggered.connect(self._select_all_visible_rows)
+        menu.addAction(select_all_action)
+
+        if not selected_rows:
+            menu.exec(table.viewport().mapToGlobal(position))
+            return
+
+        menu.addSeparator()
 
         # Review Sources (single row only, requires animal_id)
         if len(selected_rows) == 1:
