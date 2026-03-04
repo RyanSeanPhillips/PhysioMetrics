@@ -143,7 +143,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=f'PhysioMetrics_v{VERSION_STRING}',
+    name='PhysioMetrics',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

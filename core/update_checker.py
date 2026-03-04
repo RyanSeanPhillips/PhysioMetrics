@@ -139,6 +139,27 @@ def fetch_all_releases(timeout: float = 5.0) -> List[dict]:
         return []
 
 
+def extract_windows_asset(release: dict) -> Optional[dict]:
+    """
+    Extract Windows ZIP asset info from a GitHub release.
+
+    Args:
+        release: Release dictionary from GitHub API
+
+    Returns:
+        Dict with download_url, file_name, size or None if no Windows asset
+    """
+    for asset in release.get('assets', []):
+        name = asset.get('name', '')
+        if name.endswith('_Windows.zip'):
+            return {
+                'download_url': asset.get('browser_download_url', ''),
+                'file_name': name,
+                'size': asset.get('size', 0),
+            }
+    return None
+
+
 def check_for_updates(timeout: float = 5.0) -> Optional[dict]:
     """
     Check GitHub for new releases, handling both stable and beta versions.
@@ -190,7 +211,8 @@ def check_for_updates(timeout: float = 5.0) -> Optional[dict]:
                 'url': latest_stable.get('html_url', GITHUB_RELEASES_URL),
                 'name': latest_stable.get('name', f'Version {latest_stable_version}'),
                 'published_at': latest_stable.get('published_at', ''),
-                'body': latest_stable.get('body', '')
+                'body': latest_stable.get('body', ''),
+                'asset': extract_windows_asset(latest_stable),
             }
 
             # Check if there's a newer stable version
@@ -205,7 +227,8 @@ def check_for_updates(timeout: float = 5.0) -> Optional[dict]:
                 'url': latest_prerelease.get('html_url', GITHUB_RELEASES_URL),
                 'name': latest_prerelease.get('name', f'Beta {latest_pre_version}'),
                 'published_at': latest_prerelease.get('published_at', ''),
-                'body': latest_prerelease.get('body', '')
+                'body': latest_prerelease.get('body', ''),
+                'asset': extract_windows_asset(latest_prerelease),
             }
 
             # Check if there's a newer beta version

@@ -588,6 +588,8 @@ class MainWindow(QMainWindow):
 
         # Store update info for later use
         self.update_info = None
+        self._updater_vm = None       # Lazy — created on first "Update Now"
+        self._pending_update_asset = None  # Asset info when update available
 
         # Start background update check
         self._check_for_updates_on_startup()
@@ -1031,6 +1033,23 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Save window geometry on close."""
         self.settings.setValue("geometry", self.saveGeometry())
+
+        # If an update is staged and ready, offer to apply it
+        if (self._updater_vm is not None
+                and self._updater_vm.state == 'ready'):
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                "Apply Update?",
+                "An update is downloaded and ready to install.\n"
+                "Apply it now before closing?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._updater_vm.apply_and_restart()
+                event.ignore()
+                return
 
         # Stop MCP app bridge
         if hasattr(self, '_app_bridge') and self._app_bridge:
@@ -1561,6 +1580,28 @@ class MainWindow(QMainWindow):
         self.state.modified = True
         # Update marker count display if we have the UI element
         self._update_marker_count_display()
+        # Refresh minimap markers
+        self._refresh_minimap_markers()
+
+    def _refresh_minimap_markers(self):
+        """Update just the minimap event markers without a full redraw."""
+        try:
+            if not hasattr(self.plot_host, '_minimap_nav'):
+                return
+            st = self.state
+            # Compute t0 offset (stim alignment) to match main plot
+            t0 = 0.0
+            if st.stim_chan and st.stim_spans_by_sweep:
+                spans = st.stim_spans_by_sweep.get(st.sweep_idx, [])
+                if spans:
+                    t0 = spans[0][0]
+            nav = self.plot_host._minimap_nav
+            markers = self.plot_manager._collect_minimap_markers(
+                st.sweep_idx, t0=t0
+            )
+            nav.set_markers(markers)
+        except Exception:
+            pass
 
     def _on_generate_cta_requested(self):
         """Handle request to generate Photometry CTA from context menu."""
@@ -2550,16 +2591,109 @@ class MainWindow(QMainWindow):
         if file_info.get('file_type') == 'photometry':
             metadata_parts.append("Photometry")
 
+        # Look up experiment metadata from master file list
+        exp_info = self._lookup_experiment_info(file_info)
+
         if len(st.file_info) == 1:
             if metadata_parts:
-                self.filename_label.setText(f"File: {filename}  [{', '.join(metadata_parts)}]")
+                display = f"File: {filename}  [{', '.join(metadata_parts)}]"
             else:
-                self.filename_label.setText(f"File: {filename}")
+                display = f"File: {filename}"
         else:
             if metadata_parts:
-                self.filename_label.setText(f"Files: {len(st.file_info)} files ({filename}, ...)  [{', '.join(metadata_parts)}]")
+                display = f"Files: {len(st.file_info)} files ({filename}, ...)  [{', '.join(metadata_parts)}]"
             else:
-                self.filename_label.setText(f"Files: {len(st.file_info)} files ({filename}, ...)")
+                display = f"Files: {len(st.file_info)} files ({filename}, ...)"
+
+        # Append experiment info if found (may contain HTML)
+        if exp_info:
+            from PyQt6.QtCore import Qt
+            self.filename_label.setTextFormat(Qt.TextFormat.RichText)
+            display = f"{display}  |  {exp_info}"
+        else:
+            from PyQt6.QtCore import Qt
+            self.filename_label.setTextFormat(Qt.TextFormat.PlainText)
+
+        self.filename_label.setText(display)
+
+    def _lookup_experiment_info(self, file_info):
+        """Look up experiment metadata for the current file.
+
+        Searches _master_file_list for a matching file_path or file_name.
+        Returns a formatted string like 'M123 (C57BL/6, M) | Baseline' or ''.
+        """
+        try:
+            file_path = file_info.get('path')
+            if file_info.get('file_type') == 'photometry' or file_path is None:
+                # Build photometry experiment info with color coding
+                st = self.state
+                parts = []
+                exp_idx = getattr(st, 'photometry_experiment_index', 0)
+                n_exp = getattr(st, 'photometry_n_experiments', 1)
+                if n_exp > 1:
+                    parts.append(
+                        f'<span style="color: #5cb8ff; font-weight: bold;">'
+                        f'Experiment {exp_idx + 1}/{n_exp}</span>'
+                    )
+                animal_id = getattr(st, 'photometry_animal_id', '')
+                if animal_id:
+                    parts.append(
+                        f'<span style="color: #d4d4d4;">ID:</span> '
+                        f'<span style="color: #4CAF50; font-weight: bold;">'
+                        f'{animal_id}</span>'
+                    )
+                return ' &nbsp;|&nbsp; '.join(parts) if parts else ''
+
+            file_path_str = str(file_path)
+            file_name = file_path.name if hasattr(file_path, 'name') else ''
+
+            master_list = getattr(self, '_master_file_list', None)
+            if not master_list:
+                return ''
+
+            # Search for matching row
+            match = None
+            for row in master_list:
+                row_path = row.get('file_path', '')
+                if row_path and (row_path == file_path_str or str(row_path) == file_path_str):
+                    match = row
+                    break
+                # Fallback: match by file_name
+                row_name = row.get('file_name', '')
+                if row_name and file_name and row_name == file_name:
+                    match = row
+                    break
+
+            if not match:
+                return ''
+
+            # Build display string with color coding
+            parts = []
+            animal_id = match.get('animal_id', '')
+            if animal_id:
+                # Animal info: "M123 (C57BL/6, M)"
+                animal_parts = [animal_id]
+                strain = match.get('strain', '')
+                sex = match.get('sex', '')
+                details = ', '.join(filter(None, [strain, sex]))
+                if details:
+                    animal_parts.append(f"({details})")
+                parts.append(
+                    f'<span style="color: #d4d4d4;">ID:</span> '
+                    f'<span style="color: #4CAF50; font-weight: bold;">'
+                    f'{" ".join(animal_parts)}</span>'
+                )
+
+            experiment = match.get('experiment') or match.get('experiment_name', '')
+            if experiment:
+                parts.append(
+                    f'<span style="color: #5cb8ff; font-weight: bold;">'
+                    f'{experiment}</span>'
+                )
+
+            return ' &nbsp;|&nbsp; '.join(parts)
+        except Exception:
+            return ''
 
     def _enable_dark_title_bar(self, widget=None):
         """Enable dark title bar on Windows 10/11.
@@ -3018,8 +3152,10 @@ class MainWindow(QMainWindow):
             st.in_path = None
 
         # Initialize file_info for consistency
+        npz_name = st.in_path.stem if st.in_path else None
         st.file_info = [{
             'path': st.in_path,
+            'display_name': npz_name or "Photometry Data",
             'sweep_start': 0,
             'sweep_end': 0,  # Single "sweep" for photometry
             'file_type': 'photometry',
@@ -3672,9 +3808,9 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import Qt
         from PyQt6.QtGui import QKeyEvent
 
-        # Ctrl+S - Save Data (same as Save Data button)
+        # Ctrl+S - Silent .pmx save (new save path)
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_S:
-            self.on_save_analyzed_clicked()
+            self._save_session_pmx()
             event.accept()
         else:
             # Pass event to parent for default handling
@@ -3836,8 +3972,114 @@ class MainWindow(QMainWindow):
                 f"Failed to save session state:\n\n{str(e)}"
             )
 
+    def _save_session_pmx(self):
+        """Silent .pmx save — Ctrl+S shortcut. No dialog, just saves and shows status bar message."""
+        if not self.state.in_path:
+            self._log_status_message("No data loaded — nothing to save.", timeout=3000)
+            return
+
+        if not self.state.analyze_chan:
+            self._log_status_message("No channel selected — cannot save.", timeout=3000)
+            return
+
+        try:
+            from core.npz_io import save_state_to_npz, get_pmx_path
+            import time
+
+            # Determine output path
+            channel = self.state.analyze_chan
+            # Try to get animal_id from current master list row
+            animal_id = ""
+            active_row = getattr(self, '_active_master_list_row', None)
+            if active_row is not None and hasattr(self, '_master_file_list'):
+                if active_row < len(self._master_file_list):
+                    animal_id = self._master_file_list[active_row].get('animal_id', '') or ''
+
+            pmx_path = get_pmx_path(
+                self.state.in_path,
+                analysis_type="pleth",
+                animal_id=animal_id,
+                channel=channel,
+            )
+            pmx_path.parent.mkdir(parents=True, exist_ok=True)
+
+            t_start = time.time()
+
+            # Collect GMM cache
+            gmm_cache = getattr(self, '_cached_gmm_results', None)
+
+            # Collect app settings
+            app_settings = {
+                'filter_order': self.filter_order,
+                'use_zscore_normalization': self.use_zscore_normalization,
+                'notch_filter_lower': self.notch_filter_lower,
+                'notch_filter_upper': self.notch_filter_upper,
+                'apnea_threshold': self._parse_float(self.ApneaThresh) or 0.5,
+                'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
+            }
+
+            # Get event markers
+            event_markers_data = None
+            if hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
+                try:
+                    event_markers_data = self._event_marker_viewmodel.save_to_npz()
+                except Exception:
+                    pass
+
+            # Use existing save_state_to_npz for the full state (including manual edits)
+            # but write to .pmx path in physiometrics/ subfolder
+            save_state_to_npz(
+                self.state, pmx_path,
+                include_raw_data=False,
+                gmm_cache=gmm_cache,
+                app_settings=app_settings,
+                event_markers=event_markers_data,
+            )
+
+            # Patch in v2 keys (schema_version, analysis_type, etc.)
+            # We reload, add keys, and re-save. This is fast for compressed NPZ.
+            import numpy as _np
+            existing_data = dict(_np.load(str(pmx_path), allow_pickle=True))
+            existing_data['schema_version'] = 2
+            existing_data['analysis_type'] = 'pleth'
+            existing_data['batch_timestamp'] = ''  # manual save, not batch
+            existing_data['channel_analyzed'] = channel
+            existing_data['summary_json'] = '{}'
+            existing_data['metrics_json'] = '[]'
+            existing_data['version'] = '2.0.0'
+            _np.savez_compressed(str(pmx_path), **existing_data)
+            # numpy auto-appends .npz — rename back to .pmx
+            _npz_actual = Path(str(pmx_path) + '.npz')
+            if _npz_actual.exists() and _npz_actual != pmx_path:
+                if pmx_path.exists():
+                    pmx_path.unlink()
+                _npz_actual.rename(pmx_path)
+
+            elapsed = time.time() - t_start
+            size_mb = pmx_path.stat().st_size / (1024 * 1024)
+            self._log_status_message(
+                f"Saved: {pmx_path.name} ({size_mb:.1f} MB, {elapsed:.1f}s)",
+                timeout=5000,
+            )
+
+            # Update DB results_path if we have an active experiment
+            if active_row is not None and hasattr(self, '_master_file_list'):
+                if active_row < len(self._master_file_list):
+                    eid = self._master_file_list[active_row].get('experiment_id')
+                    if eid is not None:
+                        try:
+                            self._project_viewmodel.service.store.update_experiment(
+                                eid, {'results_path': str(pmx_path), 'status': 'completed'}
+                            )
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            self._log_status_message(f"Save failed: {e}", timeout=5000)
+            print(f"[pmx-save] Error: {e}")
+
     def load_npz_state(self, npz_path: Path, alternative_data_path: Path = None):
-        """Load complete analysis state from .pleth.npz file. Delegates to ViewModel."""
+        """Load complete analysis state from .pleth.npz or .pmx file. Delegates to ViewModel."""
         master_file_list = getattr(self, '_master_file_list', None)
         self._file_load_vm.load_npz_state(
             npz_path,
@@ -3910,6 +4152,30 @@ class MainWindow(QMainWindow):
             self.state = new_state
             st = self.state
 
+            # Debug: write state diagnostics
+            import tempfile, os
+            _dbg_path = os.path.join(tempfile.gettempdir(), "pmx_debug.log")
+            with open(_dbg_path, "a") as _dbg:
+                _dbg.write(f"\n--- _on_npz_loaded_ui ---\n")
+                _dbg.write(f"raw_data_loaded: {npz_result.raw_data_loaded}\n")
+                _dbg.write(f"st.t is None: {st.t is None}\n")
+                _dbg.write(f"st.t type: {type(st.t)}\n")
+                _dbg.write(f"st.sr_hz: {st.sr_hz}\n")
+                _dbg.write(f"st.in_path: {st.in_path}\n")
+                _dbg.write(f"st.channel_names: {st.channel_names}\n")
+                _dbg.write(f"st.analyze_chan: {st.analyze_chan}\n")
+                _dbg.write(f"st.sweeps keys: {list(st.sweeps.keys()) if st.sweeps else 'empty'}\n")
+                _dbg.write(f"st.sweeps shapes: {({k: v.shape for k,v in st.sweeps.items()}) if st.sweeps else 'N/A'}\n")
+                _dbg.write(f"st.peaks_by_sweep keys: {list(st.peaks_by_sweep.keys())}\n")
+                _dbg.write(f"st.all_peaks_by_sweep keys: {list(st.all_peaks_by_sweep.keys())}\n")
+                _dbg.write(f"st.breath_by_sweep keys: {list(st.breath_by_sweep.keys())}\n")
+                n_peaks_0 = len(st.peaks_by_sweep.get(0, []))
+                _dbg.write(f"peaks in sweep 0: {n_peaks_0}\n")
+                _dbg.write(f"single_panel_mode: {getattr(self, 'single_panel_mode', 'N/A')}\n")
+                _dbg.write(f"sweep_idx: {st.sweep_idx}\n")
+                _dbg.write(f"window_start_s: {st.window_start_s}\n")
+                _dbg.write(f"window_dur_s: {st.window_dur_s}\n")
+
             # Update manager references to new state
             self.plot_manager.state = new_state
             self.editing_modes.state = new_state
@@ -3921,6 +4187,68 @@ class MainWindow(QMainWindow):
 
             # Restore channel combos (NPZ restores saved selections, not defaults)
             self._populate_channel_combos_npz(st)
+
+            # Populate channel manager and configure for session restore.
+            # We do NOT call on_analyze_channel_changed() or _apply_auto_detection()
+            # since those clear peaks/breaths. Instead, directly configure visibility.
+            self._populate_channel_manager(st.channel_names)
+
+            # Auto-detect channel types from signal content (sets Pleth/Opto Stim labels)
+            auto = self._file_load_service.auto_detect_channels(st.sweeps, st.channel_names)
+
+            # Apply stim channel from auto-detect if session didn't save one
+            detected_stim = auto.stim_channel if auto else None
+            if detected_stim and (not st.stim_chan or st.stim_chan == 'None'):
+                st.stim_chan = detected_stim
+                # Update stim dropdown
+                if detected_stim in st.channel_names:
+                    stim_idx = st.channel_names.index(detected_stim) + 1
+                    self.StimChanSelect.blockSignals(True)
+                    self.StimChanSelect.setCurrentIndex(stim_idx)
+                    self.StimChanSelect.blockSignals(False)
+
+            if hasattr(self, 'channel_manager') and self.channel_manager:
+                # Mark analyze channel as Pleth
+                if st.analyze_chan:
+                    self.channel_manager.set_channel_type(st.analyze_chan, "Pleth")
+                # Mark stim channel
+                if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.channel_names:
+                    self.channel_manager.set_channel_type(st.stim_chan, "Opto Stim")
+
+                # Hide all channels except analyze + stim + event
+                keep_visible = set()
+                if st.analyze_chan:
+                    keep_visible.add(st.analyze_chan)
+                if st.stim_chan and st.stim_chan != 'None':
+                    keep_visible.add(st.stim_chan)
+                if st.event_channel and st.event_channel != 'None':
+                    keep_visible.add(st.event_channel)
+
+                channels = self.channel_manager.get_channels()
+                for ch_name, ch_cfg in channels.items():
+                    should_show = (ch_name in keep_visible)
+                    ch_cfg.visible = should_show
+                    if ch_name in self.channel_manager._channel_rows:
+                        row_widget = self.channel_manager._channel_rows[ch_name]
+                        row_widget.visibility_checkbox.blockSignals(True)
+                        row_widget.visibility_checkbox.setChecked(should_show)
+                        row_widget.visibility_checkbox.blockSignals(False)
+
+                self.channel_manager._update_summary()
+                self.channel_manager._update_show_all_checkbox()
+                self.channel_manager.channels_changed.emit()
+
+            self.single_panel_mode = True
+
+            # Run stim detection if stim channel is set
+            if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.sweeps:
+                from core.services.stim_service import StimService
+                stim_svc = StimService()
+                stim_svc.detect_all_sweeps(st)
+
+            # Clear pending selections
+            self._pending_analysis_channel = ''
+            self._pending_stim_channels = []
 
             # Restore filter settings
             self.LowPass_checkBox.setChecked(st.use_low)
@@ -6434,6 +6762,16 @@ class MainWindow(QMainWindow):
         else:
             self._log_status_message("Failed to launch Metadata Assistant", 3000)
 
+    def _get_updater_vm(self):
+        """Lazy-create the UpdaterViewModel."""
+        if self._updater_vm is None:
+            from viewmodels.updater_viewmodel import UpdaterViewModel
+            self._updater_vm = UpdaterViewModel(self)
+            self._updater_vm.download_progress.connect(self._on_update_download_progress)
+            self._updater_vm.download_complete.connect(self._on_update_ready)
+            self._updater_vm.download_error.connect(self._on_update_error)
+        return self._updater_vm
+
     def _check_for_updates_on_startup(self):
         """Check for updates in background and update UI if available."""
         from PyQt6.QtCore import QThread, pyqtSignal
@@ -6454,6 +6792,7 @@ class MainWindow(QMainWindow):
             self.update_info = update_info
 
             from core import update_checker
+            from core.auto_updater import is_running_as_bundle
 
             # Check if running beta (even without network)
             is_beta = update_checker.is_prerelease_version(update_checker.VERSION_STRING)
@@ -6468,9 +6807,34 @@ class MainWindow(QMainWindow):
                 banner_info = update_checker.get_main_window_update_message(update_info)
                 if banner_info:
                     text, url = banner_info
-                    self.update_notification_label.setText(
-                        f'<a href="{url}" style="color: #FFD700; text-decoration: underline;">{text}</a>'
-                    )
+
+                    # Check if we can offer one-click update (frozen + asset exists)
+                    asset = None
+                    if is_running_as_bundle():
+                        # Get the asset from whichever update is available
+                        beta_update = update_info.get('beta_update')
+                        stable_update = update_info.get('stable_update')
+                        if is_beta and beta_update:
+                            asset = beta_update.get('asset')
+                        elif stable_update:
+                            asset = stable_update.get('asset')
+
+                    if asset and asset.get('download_url'):
+                        # Show "Update Now" clickable link
+                        self._pending_update_asset = asset
+                        self.update_notification_label.setOpenExternalLinks(False)
+                        self.update_notification_label.setText(
+                            f'<a href="#update" style="color: #FFD700; text-decoration: underline;">'
+                            f'{text} — Click to Update Now</a>'
+                        )
+                        self.update_notification_label.linkActivated.connect(
+                            self._on_update_now_clicked
+                        )
+                    else:
+                        # No asset — fallback to GitHub link
+                        self.update_notification_label.setText(
+                            f'<a href="{url}" style="color: #FFD700; text-decoration: underline;">{text}</a>'
+                        )
                     self.update_notification_label.setVisible(True)
                     print(f"[Update Check] {text}")
                 elif is_beta:
@@ -6500,6 +6864,68 @@ class MainWindow(QMainWindow):
         )
         self.update_notification_label.setVisible(True)
         print(f"[Update Check] Running beta v{VERSION_STRING} - showing beta banner")
+
+    def _on_update_now_clicked(self, link: str = ''):
+        """Handle 'Update Now' banner click — start downloading."""
+        if not self._pending_update_asset:
+            return
+        vm = self._get_updater_vm()
+        if vm.state == 'downloading':
+            return
+        self.update_notification_label.setText(
+            '<span style="color: #FFD700;">Downloading update... 0%</span>'
+        )
+        vm.start_download(self._pending_update_asset)
+
+    def _on_update_download_progress(self, downloaded: int, total: int):
+        """Update banner with download progress."""
+        if total > 0:
+            pct = int(downloaded * 100 / total)
+            dl_mb = downloaded / (1024 * 1024)
+            total_mb = total / (1024 * 1024)
+            self.update_notification_label.setText(
+                f'<span style="color: #FFD700;">Downloading... {pct}% ({dl_mb:.0f}/{total_mb:.0f} MB)</span>'
+            )
+
+    def _on_update_ready(self, script_path: str):
+        """Update downloaded and staged — prompt to restart."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        self.update_notification_label.setOpenExternalLinks(False)
+        self.update_notification_label.setText(
+            '<a href="#restart" style="color: #4CAF50; text-decoration: underline;">'
+            'Update ready — Click to restart</a>'
+        )
+        # Reconnect link for restart
+        try:
+            self.update_notification_label.linkActivated.disconnect()
+        except TypeError:
+            pass
+        self.update_notification_label.linkActivated.connect(self._prompt_restart_for_update)
+
+        self._prompt_restart_for_update()
+
+    def _prompt_restart_for_update(self, link: str = ''):
+        """Show restart confirmation dialog."""
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Update Ready",
+            "The update has been downloaded and is ready to install.\n\n"
+            "PhysioMetrics will close, apply the update, and relaunch.\n\n"
+            "Restart now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._get_updater_vm().apply_and_restart()
+
+    def _on_update_error(self, message: str):
+        """Handle download/update error."""
+        self.update_notification_label.setText(
+            f'<span style="color: #FF6B6B;">Update failed: {message}</span>'
+        )
+        print(f"[Update] Error: {message}")
 
     def on_spectral_analysis_clicked(self):
         """Open spectral analysis dialog and optionally apply notch filter."""
@@ -7865,7 +8291,7 @@ class MainWindow(QMainWindow):
         self._setup_table_delegates(self.discoveredFilesTable)
 
     def _analyze_file_at_row(self, row: int):
-        """Load and analyze file at given row."""
+        """Load and analyze file at given row. If a .pmx exists, auto-load it."""
         if row >= len(self._master_file_list):
             return
 
@@ -7875,7 +8301,8 @@ class MainWindow(QMainWindow):
             return
 
         from pathlib import Path
-        if not Path(file_path).exists():
+        fp = Path(file_path)
+        if not fp.exists():
             self._show_warning("File Not Found", f"File no longer exists:\n{file_path}")
             return
 
@@ -7883,29 +8310,82 @@ class MainWindow(QMainWindow):
 
         # Add to recent files so it appears in Browse dropdown
         self._add_recent_file(str(file_path))
-        self._add_recent_folder(str(Path(file_path).parent))
+        self._add_recent_folder(str(fp.parent))
         self.settings.sync()  # Force save to disk
-        print(f"[master-list] Added to recent files: {file_path}")
 
         # Track which row is being analyzed
         self._active_master_list_row = row
 
         # Store pending channel selections from Project Builder
-        # These will be used after file loads to override auto-detection
         self._pending_analysis_channel = task.get('channel', '')
         self._pending_stim_channels = task.get('stim_channels', [])
 
-        # Log what we're planning to select
         if self._pending_analysis_channel or self._pending_stim_channels:
             print(f"[master-list] Pre-selecting: analysis={self._pending_analysis_channel}, stim={self._pending_stim_channels}")
 
-        # Load the file
-        self.load_file(Path(file_path))
+        # Check for cached .pmx results — auto-load if exists
+        results_path = task.get('results_path', '') or ''
+        pmx_path = None
+        # Debug: write to file since console may not be visible
+        import tempfile, os
+        _dbg_path = os.path.join(tempfile.gettempdir(), "pmx_debug.log")
+        with open(_dbg_path, "a") as _dbg:
+            _dbg.write(f"\n--- _analyze_file_at_row row={row} ---\n")
+            _dbg.write(f"file_path: {file_path}\n")
+            _dbg.write(f"results_path: '{results_path}'\n")
+            _dbg.write(f"animal_id: {task.get('animal_id', '')!r}\n")
+            _dbg.write(f"channel: {task.get('channel', '')!r}\n")
+            _dbg.write(f"task keys: {list(task.keys())}\n")
+        print(f"[pmx-debug] results_path from task: '{results_path}'")
+        print(f"[pmx-debug] task keys: {list(task.keys())}")
+        print(f"[pmx-debug] animal_id={task.get('animal_id', '')!r}, channel={task.get('channel', '')!r}")
+        if results_path:
+            pmx_path = Path(results_path)
+            if not pmx_path.exists():
+                print(f"[pmx-debug] results_path exists=False: {pmx_path}")
+                pmx_path = None
+
+        # Fallback: discover .pmx on disk even if DB doesn't know about it
+        if pmx_path is None:
+            from core.npz_io import get_pmx_path
+            animal_id = task.get('animal_id', '') or ''
+            channel = task.get('channel', '') or ''
+            candidate = get_pmx_path(fp, 'pleth', animal_id, channel)
+            print(f"[pmx-debug] fallback candidate: {candidate}")
+            print(f"[pmx-debug] candidate.exists(): {candidate.exists()}")
+            if candidate.exists():
+                pmx_path = candidate
+            elif candidate.with_suffix('.pmx.npz').exists():
+                # Handle legacy .pmx.npz naming from pre-fix batch runs
+                pmx_path = candidate.with_suffix('.pmx.npz')
+                # Update DB so next time it's found directly
+                eid = task.get('experiment_id')
+                if eid is not None:
+                    try:
+                        self._project_viewmodel.service.store.update_experiment(
+                            eid, {'results_path': str(pmx_path), 'status': 'completed'}
+                        )
+                    except Exception:
+                        pass
+
+        print(f"[pmx-debug] final pmx_path: {pmx_path}")
+        with open(_dbg_path, "a") as _dbg:
+            _dbg.write(f"fallback candidate exists: {candidate.exists() if 'candidate' in dir() else 'N/A'}\n")
+            _dbg.write(f"final pmx_path: {pmx_path}\n")
+        if pmx_path is not None:
+            print(f"[master-list] Loading cached results from: {pmx_path}")
+            self.load_npz_state(pmx_path, alternative_data_path=fp)
+            if hasattr(self, 'Tabs'):
+                self.Tabs.setCurrentIndex(1)
+                print("[master-list] Switched to Analysis tab (from .pmx)")
+            return
+
+        # No cached results — normal file load + detection
+        self.load_file(fp)
 
         # Switch to Analysis tab (tab widget is called 'Tabs' in the UI file)
-        # Tab 0 = Project Builder, Tab 1 = Analysis
         if hasattr(self, 'Tabs'):
-            self.Tabs.setCurrentIndex(1)  # Analysis tab is index 1
+            self.Tabs.setCurrentIndex(1)
             print("[master-list] Switched to Analysis tab")
 
     def _update_autocomplete_history(self, history_key: str, value: str):
@@ -8188,8 +8668,8 @@ class MainWindow(QMainWindow):
         self._project_builder.clean_parent_rows_with_subrows()
 
     def _on_analyze_row(self, row):
-        """Analyze row. Delegates to ProjectBuilderManager."""
-        self._project_builder.on_analyze_row(row)
+        """Analyze row — loads .pmx if available, else loads raw file."""
+        self._analyze_file_at_row(row)
 
     def _on_add_row_for_file(self, source_row, force_override=False):
         """Add row for file. Delegates to ProjectBuilderManager."""
@@ -8724,55 +9204,109 @@ class MainWindow(QMainWindow):
         self._setup_table_delegates(table)
 
     def _on_batch_analyze_clicked(self):
-        """Launch batch analysis (dry run) on selected or all visible experiments."""
-        from PyQt6.QtWidgets import QMessageBox
+        """Launch batch analysis and save .pmx results on selected or all visible experiments."""
+        from PyQt6.QtWidgets import QMessageBox, QCheckBox
 
         selected = self.discoveredFilesTable.selectionModel().selectedRows()
 
-        # If nothing selected, use all visible (non-hidden) rows
+        # Collect visible rows
         if not selected:
             table = self.discoveredFilesTable
             row_count = self._file_table_model.rowCount()
             if row_count == 0:
                 return
-            experiments = []
+            all_rows = []
             for r in range(row_count):
                 if not table.isRowHidden(r):
                     row_data = self._file_table_model.get_row_data(r)
                     if row_data:
-                        experiments.append((r, dict(row_data)))
-            if not experiments:
-                return
-            scope_label = f"all {len(experiments)} visible"
+                        all_rows.append((r, dict(row_data)))
         else:
             table = self.discoveredFilesTable
-            experiments = []
+            all_rows = []
             for idx in selected:
                 r = idx.row()
                 if table.isRowHidden(r):
-                    continue  # Skip hidden (filtered-out) rows
+                    continue
                 row_data = self._file_table_model.get_row_data(r)
                 if row_data:
-                    experiments.append((r, dict(row_data)))
-            scope_label = f"{len(experiments)} selected"
+                    all_rows.append((r, dict(row_data)))
 
-        if not experiments:
+        if not all_rows:
             return
+
+        # Partition into pending / completed / reviewed
+        pending = []
+        already_done = []
+        reviewed = []
+        for row_idx, exp in all_rows:
+            rp = exp.get("results_path", "") or ""
+            rs = exp.get("review_status", "") or ""
+            if rs == "reviewed":
+                reviewed.append((row_idx, exp))
+            elif rp:
+                already_done.append((row_idx, exp))
+            else:
+                pending.append((row_idx, exp))
+
+        experiments = list(pending)  # default: only pending
+        n_excluded_done = len(already_done)
+        n_excluded_reviewed = len(reviewed)
+
+        # Build confirm dialog
+        msg = f"Analyze and save {len(experiments)} experiment(s)?"
+        if n_excluded_done or n_excluded_reviewed:
+            msg += f"\n\nExcluding {n_excluded_done} already-analyzed"
+            if n_excluded_reviewed:
+                msg += f" and {n_excluded_reviewed} reviewed"
+            msg += " file(s)."
 
         # Validate file paths
         missing = [name for _, exp in experiments
                    if not Path(exp.get("file_path", "")).exists()
                    for name in [exp.get("file_name", "?")]]
-
-        msg = f"Run analysis (dry run) on {scope_label} experiment(s)?\n\nNo files will be written to disk."
         if missing:
-            msg += f"\n\nWarning: {len(missing)} file(s) not found on disk — they will show errors."
+            msg += f"\n\nWarning: {len(missing)} file(s) not found on disk."
 
-        reply = QMessageBox.question(
-            self, "Batch Analyze (Dry Run)", msg,
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Batch Analyze")
+        msg_box.setText(msg)
+        msg_box.setIcon(QMessageBox.Icon.Question)
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
+
+        # Advanced checkboxes for including already-done files
+        include_done_cb = None
+        include_reviewed_cb = None
+        if n_excluded_done > 0:
+            include_done_cb = QCheckBox(
+                f"Include {n_excluded_done} already-analyzed (will overwrite results)"
+            )
+            msg_box.setCheckBox(include_done_cb)
+        if n_excluded_reviewed > 0:
+            include_reviewed_cb = QCheckBox(
+                f"Include {n_excluded_reviewed} reviewed (will overwrite verified results)"
+            )
+            # QMessageBox only supports one checkbox; put reviewed warning in text
+            if n_excluded_reviewed and not include_done_cb:
+                msg_box.setCheckBox(include_reviewed_cb)
+
+        reply = msg_box.exec()
         if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        # Check if user opted to include already-done files
+        if include_done_cb and include_done_cb.isChecked():
+            experiments.extend(already_done)
+        if include_reviewed_cb and include_reviewed_cb.isChecked():
+            experiments.extend(reviewed)
+
+        if not experiments:
+            QMessageBox.information(
+                self, "Nothing to Analyze",
+                "All experiments already have results. Check the override box to re-analyze."
+            )
             return
 
         # Store row indices for later update
@@ -8802,7 +9336,7 @@ class MainWindow(QMainWindow):
 
         from core.domain.analysis.models import AnalysisConfig
         exp_dicts = [exp for _, exp in experiments]
-        self._batch_vm.run_batch(exp_dicts, AnalysisConfig(), dry_run=True)
+        self._batch_vm.run_batch(exp_dicts, AnalysisConfig(), dry_run=False, save=True)
 
     def _on_batch_cancel_clicked(self):
         """Cancel the running batch analysis."""
@@ -8871,6 +9405,8 @@ class MainWindow(QMainWindow):
             self._file_table_model.set_cell_value(row_idx, 'batch_progress', 0.0)
             if row_idx < len(self._master_file_list):
                 self._master_file_list[row_idx]['status'] = status
+                if result.session_path:
+                    self._master_file_list[row_idx]['results_path'] = str(result.session_path)
 
     def _on_batch_all_done(self, results):
         """Hide progress, show summary dialog."""
@@ -8886,6 +9422,12 @@ class MainWindow(QMainWindow):
         total_peaks = sum(r.n_peaks_total for _, r in results if r.error is None)
         total_breaths = sum(r.n_breaths_total for _, r in results if r.error is None)
 
+        # Collect output folders
+        output_folders = set()
+        for _, r in results:
+            if r.session_path:
+                output_folders.add(str(r.session_path.parent))
+
         # Build per-file detail lines
         lines = []
         for exp, r in results:
@@ -8893,26 +9435,48 @@ class MainWindow(QMainWindow):
             if r.error:
                 lines.append(f"  {name}: ERROR — {r.error}")
             else:
+                saved = f" → {r.session_path.name}" if r.session_path else ""
                 lines.append(
                     f"  {name}: {r.n_sweeps} sweeps, "
-                    f"{r.n_peaks_total} peaks, {r.n_breaths_total} breaths"
+                    f"{r.n_peaks_total} peaks, {r.n_breaths_total} breaths{saved}"
                 )
 
         detail = "\n".join(lines)
+        has_saves = bool(output_folders)
+        mode_label = "Saved" if has_saves else "Dry Run"
         summary = (
-            f"Batch Analysis Complete (Dry Run)\n\n"
+            f"Batch Analysis Complete ({mode_label})\n\n"
             f"Files: {n_total}  |  OK: {n_ok}  |  Errors: {n_err}\n"
-            f"Total peaks: {total_peaks}  |  Total breaths: {total_breaths}\n\n"
-            f"Per-file results:\n{detail}"
+            f"Total peaks: {total_peaks}  |  Total breaths: {total_breaths}\n"
         )
+        if output_folders:
+            summary += f"\nOutput folder(s):\n"
+            for f in sorted(output_folders):
+                summary += f"  {f}\n"
+        summary += f"\nPer-file results:\n{detail}"
 
-        from PyQt6.QtWidgets import QMessageBox
+        from PyQt6.QtWidgets import QMessageBox, QPushButton
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Batch Analysis Summary")
-        msg_box.setText(f"{n_ok} of {n_total} files analyzed successfully (dry run).")
+        msg_box.setText(f"{n_ok} of {n_total} files analyzed successfully.")
         msg_box.setDetailedText(summary)
         msg_box.setIcon(QMessageBox.Icon.Information if n_err == 0 else QMessageBox.Icon.Warning)
+
+        # Add "Open Folder" button if .pmx files were saved
+        if output_folders:
+            open_folder_btn = msg_box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+        msg_box.addButton(QMessageBox.StandardButton.Ok)
+
         msg_box.exec()
+
+        # Handle "Open Folder" click
+        if output_folders and msg_box.clickedButton() == open_folder_btn:
+            import subprocess
+            folder = sorted(output_folders)[0]
+            try:
+                subprocess.Popen(["explorer", folder.replace("/", "\\")])
+            except Exception:
+                pass
 
         self._batch_results = []
         self._batch_row_map = {}

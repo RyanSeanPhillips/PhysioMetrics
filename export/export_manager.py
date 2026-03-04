@@ -2092,6 +2092,16 @@ class ExportManager:
         if not preview_only:
             # -------------------- (1) NPZ bundle (downsampled) --------------------
             base     = self.window._save_dir / self.window._save_base
+            # Ensure output directory exists (may not exist for photometry paths)
+            base.parent.mkdir(parents=True, exist_ok=True)
+
+            # Guard against Windows MAX_PATH (260 chars) — truncate base name if needed
+            # Longest suffix is "_bundle.npz" (11 chars)
+            max_base_len = 259 - len(str(base.parent)) - 1 - 20  # 20 chars margin for suffixes
+            if len(base.name) > max_base_len > 0:
+                base = base.with_name(base.name[:max_base_len])
+                print(f"[export] Truncated filename to fit Windows path limit: {base.name}")
+
             npz_path = base.with_name(base.name + "_bundle.npz")
     
             # Pack stim spans in KEPT order (align with columns)
@@ -2410,7 +2420,7 @@ class ExportManager:
             if save_timeseries_csv:
                 print(f"[CSV] [OK] Time-series data written in {t_elapsed:.2f}s")
             else:
-                print(f"[CSV] ⊘ Time-series CSV skipped (computed in {t_elapsed:.2f}s)")
+                print(f"[CSV] - Time-series CSV skipped (computed in {t_elapsed:.2f}s)")
 
             # Save enhanced NPZ version 3 with timeseries data (for fast consolidation)
             # Version 3: Added bout_annotations_by_sweep and event_channel
@@ -2893,7 +2903,7 @@ class ExportManager:
             if save_breaths_csv:
                 print(f"[CSV] [OK] Breath data written in {t_elapsed:.2f}s")
             else:
-                print(f"[CSV] ⊘ Breaths CSV skipped (computed in {t_elapsed:.2f}s)")
+                print(f"[CSV] - Breaths CSV skipped (computed in {t_elapsed:.2f}s)")
 
             if progress_dialog:
                 progress_dialog.setLabelText("Writing events CSV...")
@@ -3103,6 +3113,37 @@ class ExportManager:
                         f"{duration:.9g}"
                     ])
 
+            # Add MVVM event markers (user-placed markers from the event marker system)
+            if hasattr(self.window, '_event_marker_viewmodel') and self.window._event_marker_viewmodel:
+                for marker in self.window._event_marker_viewmodel.store.all():
+                    sweep = marker.sweep_idx
+                    if sweep not in kept_sweeps:
+                        continue
+
+                    start_time = marker.start_time
+                    end_time = marker.end_time if marker.end_time is not None else start_time
+
+                    # Convert to relative time if global stim available
+                    if have_global_stim:
+                        start_time_rel = start_time - global_s0
+                        end_time_rel = end_time - global_s0
+                    else:
+                        start_time_rel = start_time
+                        end_time_rel = end_time
+
+                    duration = end_time - start_time
+
+                    # Event type: "marker:{category}/{label}" for clarity
+                    event_type = f"marker:{marker.category}/{marker.label}"
+
+                    events_rows.append([
+                        str(sweep + 1),
+                        event_type,
+                        f"{start_time_rel:.9g}",
+                        f"{end_time_rel:.9g}",
+                        f"{duration:.9g}"
+                    ])
+
             # Optionally write events CSV using pandas
             import pandas as pd
             df_events = pd.DataFrame(
@@ -3126,7 +3167,7 @@ class ExportManager:
             if save_events_csv:
                 print(f"[CSV] [OK] Events data written in {t_elapsed:.2f}s ({event_summary})")
             else:
-                print(f"[CSV] ⊘ Events CSV skipped (computed in {t_elapsed:.2f}s, {event_summary})")
+                print(f"[CSV] - Events CSV skipped (computed in {t_elapsed:.2f}s, {event_summary})")
 
         # -------------------- (4) Summary PDF or Preview --------------------
         t_start = time.time()
@@ -3333,7 +3374,7 @@ class ExportManager:
             if save_pdf:
                 print(f"[PDF] [OK] PDF saved in {t_elapsed:.2f}s")
             else:
-                print(f"[PDF] ⊘ PDF generation skipped ({t_elapsed:.2f}s saved)")
+                print(f"[PDF] - PDF generation skipped ({t_elapsed:.2f}s saved)")
 
             # -------------------- done --------------------
             if progress_dialog:
@@ -3360,7 +3401,12 @@ class ExportManager:
                         'active_eupnea_sniff_classifier': self.window.state.active_eupnea_sniff_classifier
                     }
 
-                    save_state_to_npz(st, session_path, include_raw_data=False, gmm_cache=gmm_cache, app_settings=app_settings)
+                    # Include MVVM event markers in session file
+                    event_markers_data = None
+                    if hasattr(self.window, '_event_marker_viewmodel') and self.window._event_marker_viewmodel:
+                        event_markers_data = self.window._event_marker_viewmodel.save_to_npz()
+
+                    save_state_to_npz(st, session_path, include_raw_data=False, gmm_cache=gmm_cache, app_settings=app_settings, event_markers=event_markers_data)
                     print(f"[session] [OK] Session state saved: {session_path.name}")
                 except Exception as e:
                     print(f"[session] [FAIL] Session save failed: {e}")
@@ -3456,12 +3502,19 @@ class ExportManager:
             except Exception:
                 pass
 
-            # Show success dialog
-            self._show_message_box(
-                QMessageBox.Icon.Information,
-                "Save Successful",
-                f"Files saved successfully to:\n{self.window._save_dir}\n\n{msg}"
-            )
+            # Show success dialog with "Open Folder" option
+            save_dir = self.window._save_dir
+            msg_box = QMessageBox(self.window)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setWindowTitle("Save Successful")
+            msg_box.setText(f"Files saved successfully to:\n{save_dir}\n\n{msg}")
+            msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            open_folder_btn = msg_box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            msg_box.exec()
+            if msg_box.clickedButton() == open_folder_btn:
+                import subprocess
+                subprocess.Popen(['explorer', str(save_dir)])
 
 
 
