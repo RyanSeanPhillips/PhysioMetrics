@@ -400,6 +400,15 @@ def load_data_file(
 # ── Summary statistics ────────────────────────────────────────────
 
 
+def _safe_float(v) -> Optional[float]:
+    """Convert to float, returning None for non-numeric or NaN values."""
+    try:
+        f = float(v)
+        return None if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
 def _compute_summary(
     metrics_rows: List[Dict[str, Any]],
     n_sweeps: int,
@@ -417,13 +426,14 @@ def _compute_summary(
     if not metrics_rows:
         return summary
 
-    # Collect numeric arrays for common metrics
+    # Collect numeric arrays for common metrics (single pass per key)
     metric_keys = ["if", "ti", "te", "amp_insp", "amp_exp", "area_insp", "area_exp"]
     for key in metric_keys:
-        values = [
-            float(r[key]) for r in metrics_rows
-            if key in r and r[key] is not None and not np.isnan(float(r[key]))
-        ]
+        values = []
+        for r in metrics_rows:
+            f = _safe_float(r.get(key))
+            if f is not None:
+                values.append(f)
         if values:
             arr = np.array(values)
             summary[f"mean_{key}"] = float(np.mean(arr))

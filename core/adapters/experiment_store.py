@@ -224,13 +224,15 @@ class ExperimentStore:
         if "results_path" not in existing_cols:
             try:
                 self._conn.execute("ALTER TABLE experiments ADD COLUMN results_path TEXT DEFAULT ''")
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         if "review_status" not in existing_cols:
             try:
                 self._conn.execute("ALTER TABLE experiments ADD COLUMN review_status TEXT DEFAULT 'unreviewed'")
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
         existing = self._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"

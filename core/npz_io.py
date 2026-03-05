@@ -184,7 +184,7 @@ def save_batch_result(
         apd = det.get("all_peaks_data")
         if apd is not None:
             all_peaks_sweep_indices.append(s)
-            data[f"all_peaks_indices_sweep_{s}"] = det["all_peak_indices"]
+            data[f"all_peaks_indices_sweep_{s}"] = det.get("all_peak_indices", np.array([], dtype=int))
             data[f"all_peaks_labels_sweep_{s}"] = apd["labels"]
             data[f"all_peaks_label_source_sweep_{s}"] = apd["label_source"]
             if "breath_type_class" in apd and apd["breath_type_class"] is not None:
@@ -227,7 +227,7 @@ def save_batch_result(
     # ── Navigation defaults ───────────────────────────────────────
     data["sweep_idx"] = 0
     data["window_start_s"] = 0.0
-    data["window_dur_s"] = float(t[-1]) if len(t) > 0 else 10.0
+    data["window_dur_s"] = float(t[-1] - t[0]) if len(t) > 0 else 10.0
 
     # ── Empty defaults for v1 keys the loader expects ─────────────
     data["sigh_sweep_indices"] = np.array([], dtype=int)
@@ -261,9 +261,7 @@ def save_batch_result(
     np.savez_compressed(str(output_path), **data)
     npz_actual = Path(str(output_path) + ".npz")
     if npz_actual.exists() and npz_actual != output_path:
-        if output_path.exists():
-            output_path.unlink()
-        npz_actual.rename(output_path)
+        npz_actual.replace(output_path)  # atomic on same volume
     return output_path
 
 

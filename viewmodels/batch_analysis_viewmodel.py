@@ -130,16 +130,16 @@ class BatchAnalysisViewModel(QObject):
         """Try to load event markers from an existing .pmx for preservation."""
         try:
             from core.npz_io import get_pmx_path
+            import numpy as np
             pmx_path = get_pmx_path(file_path, "pleth", animal_id, channel)
             if not pmx_path.exists():
                 return None
-            import numpy as np
-            data = np.load(str(pmx_path), allow_pickle=True)
-            if "event_markers_version" in data:
-                return {
-                    "event_markers_version": data["event_markers_version"],
-                    "event_markers_json": str(data["event_markers_json"]),
-                }
+            with np.load(str(pmx_path), allow_pickle=True) as data:
+                if "event_markers_version" in data:
+                    return {
+                        "event_markers_version": data["event_markers_version"].item(),
+                        "event_markers_json": str(data["event_markers_json"]),
+                    }
         except Exception:
             pass
         return None
