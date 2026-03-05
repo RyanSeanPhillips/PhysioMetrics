@@ -4125,15 +4125,138 @@ class MainWindow(QMainWindow):
                 f"Failed to load session state:\n\n{str(exc)}\n\n{traceback.format_exc()}"
             )
 
-    def _on_npz_loaded_ui(self, npz_result):
-        """
-        Thin UI handler for NPZ session load completion.
+    def _restore_session_view(self, npz_result):
+        """Configure the view layer for a restored session.
 
-        Replaces the old monolithic _on_npz_loaded. Handles state replacement,
-        UI restoration, and plotting.
+        Called after AppState is fully populated from an NPZ/PMX load.
+        Does NOT clear peaks/breaths -- configures channels, visibility,
+        filters, stim detection, and triggers plot redraw.
+
+        This is the session-restore equivalent of the normal file-load
+        chain: _populate_channel_manager -> _apply_auto_detection ->
+        on_analyze_channel_changed. Those methods clear analysis data,
+        so we replicate their view-setup effects without the clearing.
+        """
+        st = self.state
+
+        # 1. Channel combos (restores dropdown selections without triggering handlers)
+        self._populate_channel_combos_npz(st)
+
+        # 2. Channel manager (creates ChannelConfig objects, all visible by default)
+        self._populate_channel_manager(st.channel_names)
+
+        # 3. Channel type overrides -- the saved analyze_chan IS the Pleth channel
+        if hasattr(self, 'channel_manager') and self.channel_manager:
+            if st.analyze_chan:
+                self.channel_manager.set_channel_type(st.analyze_chan, "Pleth")
+
+        # 4. Stim detection -- auto-detect from signal if session didn't save one
+        auto = self._file_load_service.auto_detect_channels(st.sweeps, st.channel_names)
+        detected_stim = auto.stim_channel if auto else None
+        if detected_stim and (not st.stim_chan or st.stim_chan == 'None'):
+            st.stim_chan = detected_stim
+            if detected_stim in st.channel_names:
+                stim_idx = st.channel_names.index(detected_stim) + 1
+                self.StimChanSelect.blockSignals(True)
+                self.StimChanSelect.setCurrentIndex(stim_idx)
+                self.StimChanSelect.blockSignals(False)
+
+        # Mark stim channel type
+        if hasattr(self, 'channel_manager') and self.channel_manager:
+            if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.channel_names:
+                self.channel_manager.set_channel_type(st.stim_chan, "Opto Stim")
+
+        # 5. Channel visibility -- only analyze + stim + event
+        if hasattr(self, 'channel_manager') and self.channel_manager:
+            keep_visible = set()
+            if st.analyze_chan:
+                keep_visible.add(st.analyze_chan)
+            if st.stim_chan and st.stim_chan != 'None':
+                keep_visible.add(st.stim_chan)
+            if st.event_channel and st.event_channel != 'None':
+                keep_visible.add(st.event_channel)
+
+            channels = self.channel_manager.get_channels()
+            for ch_name, ch_cfg in channels.items():
+                should_show = (ch_name in keep_visible)
+                ch_cfg.visible = should_show
+                if ch_name in self.channel_manager._channel_rows:
+                    row_widget = self.channel_manager._channel_rows[ch_name]
+                    row_widget.visibility_checkbox.blockSignals(True)
+                    row_widget.visibility_checkbox.setChecked(should_show)
+                    row_widget.visibility_checkbox.blockSignals(False)
+
+            self.channel_manager._update_summary()
+            self.channel_manager._update_show_all_checkbox()
+
+        # 6. Single panel mode (session restore always shows focused view)
+        self.single_panel_mode = True
+
+        # 7. Stim service -- detect stim spans for plotting
+        if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.sweeps:
+            from core.services.stim_service import StimService
+            StimService().detect_all_sweeps(st)
+
+        # 8. Filter UI
+        self.LowPass_checkBox.setChecked(st.use_low)
+        self.HighPass_checkBox.setChecked(st.use_high)
+        self.InvertSignal_checkBox.setChecked(st.use_invert)
+        if st.low_hz:
+            self.LowPassVal.setText(str(st.low_hz))
+        if st.high_hz:
+            self.HighPassVal.setText(str(st.high_hz))
+
+        # 9. App settings
+        if npz_result.app_settings is not None:
+            self._restore_app_settings(npz_result.app_settings)
+
+        # 10. Clear caches
+        self._file_load_service.reset_caches(self)
+        self.plot_manager.clear_caches()
+        self._refresh_omit_button_label()
+
+        # Clear pending selections (no longer needed after restore)
+        self._pending_analysis_channel = ''
+        self._pending_stim_channels = []
+
+        # 11. Disable peak apply button (peaks already loaded)
+        self.ApplyPeakFindPushButton.setEnabled(False)
+        self.ApplyPeakFindPushButton.setToolTip(
+            "Peak detection already complete (loaded from session). "
+            "Modify parameters and click to re-detect."
+        )
+
+        # 12. Navigation
+        self._nav_vm.reset_window_state()
+
+        # 13. Event markers
+        if npz_result.event_markers and hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
+            try:
+                count = self._event_marker_viewmodel.load_from_npz(npz_result.event_markers)
+                print(f"[session-restore] Restored {count} event markers")
+            except Exception as e:
+                print(f"[session-restore] Warning: event markers failed: {e}")
+
+        # 14. Emit channels_changed to notify listeners (plot manager, etc.)
+        if hasattr(self, 'channel_manager') and self.channel_manager:
+            self.channel_manager.channels_changed.emit()
+
+        # 15. Redraw
+        self.redraw_main_plot()
+
+        # 16. GMM cache
+        if npz_result.gmm_cache is not None:
+            self._cached_gmm_results = npz_result.gmm_cache
+        elif st.gmm_sniff_probabilities:
+            self._run_automatic_gmm_clustering()
+
+    def _on_npz_loaded_ui(self, npz_result):
+        """UI handler for NPZ/PMX session load completion.
+
+        Replaces state, updates manager references, then delegates
+        view configuration to _restore_session_view().
         """
         import time
-        from core.domain.file_loading.models import NpzLoadResult
 
         new_state = npz_result.new_state
         npz_path = npz_result.npz_path
@@ -4150,31 +4273,6 @@ class MainWindow(QMainWindow):
 
             # Replace current state
             self.state = new_state
-            st = self.state
-
-            # Debug: write state diagnostics
-            import tempfile, os
-            _dbg_path = os.path.join(tempfile.gettempdir(), "pmx_debug.log")
-            with open(_dbg_path, "a") as _dbg:
-                _dbg.write(f"\n--- _on_npz_loaded_ui ---\n")
-                _dbg.write(f"raw_data_loaded: {npz_result.raw_data_loaded}\n")
-                _dbg.write(f"st.t is None: {st.t is None}\n")
-                _dbg.write(f"st.t type: {type(st.t)}\n")
-                _dbg.write(f"st.sr_hz: {st.sr_hz}\n")
-                _dbg.write(f"st.in_path: {st.in_path}\n")
-                _dbg.write(f"st.channel_names: {st.channel_names}\n")
-                _dbg.write(f"st.analyze_chan: {st.analyze_chan}\n")
-                _dbg.write(f"st.sweeps keys: {list(st.sweeps.keys()) if st.sweeps else 'empty'}\n")
-                _dbg.write(f"st.sweeps shapes: {({k: v.shape for k,v in st.sweeps.items()}) if st.sweeps else 'N/A'}\n")
-                _dbg.write(f"st.peaks_by_sweep keys: {list(st.peaks_by_sweep.keys())}\n")
-                _dbg.write(f"st.all_peaks_by_sweep keys: {list(st.all_peaks_by_sweep.keys())}\n")
-                _dbg.write(f"st.breath_by_sweep keys: {list(st.breath_by_sweep.keys())}\n")
-                n_peaks_0 = len(st.peaks_by_sweep.get(0, []))
-                _dbg.write(f"peaks in sweep 0: {n_peaks_0}\n")
-                _dbg.write(f"single_panel_mode: {getattr(self, 'single_panel_mode', 'N/A')}\n")
-                _dbg.write(f"sweep_idx: {st.sweep_idx}\n")
-                _dbg.write(f"window_start_s: {st.window_start_s}\n")
-                _dbg.write(f"window_dur_s: {st.window_dur_s}\n")
 
             # Update manager references to new state
             self.plot_manager.state = new_state
@@ -4185,125 +4283,16 @@ class MainWindow(QMainWindow):
             # Update filename display
             self._update_filename_display()
 
-            # Restore channel combos (NPZ restores saved selections, not defaults)
-            self._populate_channel_combos_npz(st)
-
-            # Populate channel manager and configure for session restore.
-            # We do NOT call on_analyze_channel_changed() or _apply_auto_detection()
-            # since those clear peaks/breaths. Instead, directly configure visibility.
-            self._populate_channel_manager(st.channel_names)
-
-            # Auto-detect channel types from signal content (sets Pleth/Opto Stim labels)
-            auto = self._file_load_service.auto_detect_channels(st.sweeps, st.channel_names)
-
-            # Apply stim channel from auto-detect if session didn't save one
-            detected_stim = auto.stim_channel if auto else None
-            if detected_stim and (not st.stim_chan or st.stim_chan == 'None'):
-                st.stim_chan = detected_stim
-                # Update stim dropdown
-                if detected_stim in st.channel_names:
-                    stim_idx = st.channel_names.index(detected_stim) + 1
-                    self.StimChanSelect.blockSignals(True)
-                    self.StimChanSelect.setCurrentIndex(stim_idx)
-                    self.StimChanSelect.blockSignals(False)
-
-            if hasattr(self, 'channel_manager') and self.channel_manager:
-                # Mark analyze channel as Pleth
-                if st.analyze_chan:
-                    self.channel_manager.set_channel_type(st.analyze_chan, "Pleth")
-                # Mark stim channel
-                if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.channel_names:
-                    self.channel_manager.set_channel_type(st.stim_chan, "Opto Stim")
-
-                # Hide all channels except analyze + stim + event
-                keep_visible = set()
-                if st.analyze_chan:
-                    keep_visible.add(st.analyze_chan)
-                if st.stim_chan and st.stim_chan != 'None':
-                    keep_visible.add(st.stim_chan)
-                if st.event_channel and st.event_channel != 'None':
-                    keep_visible.add(st.event_channel)
-
-                channels = self.channel_manager.get_channels()
-                for ch_name, ch_cfg in channels.items():
-                    should_show = (ch_name in keep_visible)
-                    ch_cfg.visible = should_show
-                    if ch_name in self.channel_manager._channel_rows:
-                        row_widget = self.channel_manager._channel_rows[ch_name]
-                        row_widget.visibility_checkbox.blockSignals(True)
-                        row_widget.visibility_checkbox.setChecked(should_show)
-                        row_widget.visibility_checkbox.blockSignals(False)
-
-                self.channel_manager._update_summary()
-                self.channel_manager._update_show_all_checkbox()
-                self.channel_manager.channels_changed.emit()
-
-            self.single_panel_mode = True
-
-            # Run stim detection if stim channel is set
-            if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.sweeps:
-                from core.services.stim_service import StimService
-                stim_svc = StimService()
-                stim_svc.detect_all_sweeps(st)
-
-            # Clear pending selections
-            self._pending_analysis_channel = ''
-            self._pending_stim_channels = []
-
-            # Restore filter settings
-            self.LowPass_checkBox.setChecked(st.use_low)
-            self.HighPass_checkBox.setChecked(st.use_high)
-            self.InvertSignal_checkBox.setChecked(st.use_invert)
-
-            if st.low_hz:
-                self.LowPassVal.setText(str(st.low_hz))
-            if st.high_hz:
-                self.HighPassVal.setText(str(st.high_hz))
-
-            # Restore app-level settings
-            if npz_result.app_settings is not None:
-                self._restore_app_settings(npz_result.app_settings)
-
-            # Clear caches
-            self._file_load_service.reset_caches(self)
-            self.plot_manager.clear_caches()
-            self._refresh_omit_button_label()
-
-            # Disable peak apply button (peaks already loaded from session)
-            self.ApplyPeakFindPushButton.setEnabled(False)
-            self.ApplyPeakFindPushButton.setToolTip(
-                "Peak detection already complete (loaded from session). Modify parameters and click to re-detect."
-            )
-
-            # Restore navigation and plot
-            self._nav_vm.reset_window_state()
-
-            # Restore event markers from NPZ if present
-            if npz_result.event_markers and hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
-                try:
-                    count = self._event_marker_viewmodel.load_from_npz(npz_result.event_markers)
-                    print(f"[npz-load] Restored {count} event markers from session file")
-                except Exception as e:
-                    print(f"[npz-load] Warning: Failed to restore event markers: {e}")
-
-            # Redraw plot
-            self.redraw_main_plot()
-
-            # Restore GMM cache
-            if npz_result.gmm_cache is not None:
-                print("[npz-load] Restoring GMM cache from session file...")
-                self._cached_gmm_results = npz_result.gmm_cache
-            elif st.gmm_sniff_probabilities:
-                print("[npz-load] Rebuilding GMM cache from loaded probabilities (legacy fallback)...")
-                self._run_automatic_gmm_clustering()
+            # Configure view layer (channels, visibility, filters, plot)
+            self._restore_session_view(npz_result)
 
             # Show success message
             t_elapsed = time.time() - self._file_load_vm._loading_t_start
             file_size_mb = npz_path.stat().st_size / (1024 * 1024)
-
+            n_peaks = sum(len(v) for v in new_state.peaks_by_sweep.values())
             self._log_status_message(
                 f"Session loaded: {npz_path.name} ({file_size_mb:.1f} MB, {t_elapsed:.1f}s) - "
-                f"Channel: {st.analyze_chan}, {metadata.get('n_peaks', '?')} peaks",
+                f"Channel: {new_state.analyze_chan}, {n_peaks} peaks",
                 timeout=8000,
             )
 
@@ -8326,23 +8315,9 @@ class MainWindow(QMainWindow):
         # Check for cached .pmx results — auto-load if exists
         results_path = task.get('results_path', '') or ''
         pmx_path = None
-        # Debug: write to file since console may not be visible
-        import tempfile, os
-        _dbg_path = os.path.join(tempfile.gettempdir(), "pmx_debug.log")
-        with open(_dbg_path, "a") as _dbg:
-            _dbg.write(f"\n--- _analyze_file_at_row row={row} ---\n")
-            _dbg.write(f"file_path: {file_path}\n")
-            _dbg.write(f"results_path: '{results_path}'\n")
-            _dbg.write(f"animal_id: {task.get('animal_id', '')!r}\n")
-            _dbg.write(f"channel: {task.get('channel', '')!r}\n")
-            _dbg.write(f"task keys: {list(task.keys())}\n")
-        print(f"[pmx-debug] results_path from task: '{results_path}'")
-        print(f"[pmx-debug] task keys: {list(task.keys())}")
-        print(f"[pmx-debug] animal_id={task.get('animal_id', '')!r}, channel={task.get('channel', '')!r}")
         if results_path:
             pmx_path = Path(results_path)
             if not pmx_path.exists():
-                print(f"[pmx-debug] results_path exists=False: {pmx_path}")
                 pmx_path = None
 
         # Fallback: discover .pmx on disk even if DB doesn't know about it
@@ -8351,8 +8326,6 @@ class MainWindow(QMainWindow):
             animal_id = task.get('animal_id', '') or ''
             channel = task.get('channel', '') or ''
             candidate = get_pmx_path(fp, 'pleth', animal_id, channel)
-            print(f"[pmx-debug] fallback candidate: {candidate}")
-            print(f"[pmx-debug] candidate.exists(): {candidate.exists()}")
             if candidate.exists():
                 pmx_path = candidate
             elif candidate.with_suffix('.pmx.npz').exists():
@@ -8368,10 +8341,6 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-        print(f"[pmx-debug] final pmx_path: {pmx_path}")
-        with open(_dbg_path, "a") as _dbg:
-            _dbg.write(f"fallback candidate exists: {candidate.exists() if 'candidate' in dir() else 'N/A'}\n")
-            _dbg.write(f"final pmx_path: {pmx_path}\n")
         if pmx_path is not None:
             print(f"[master-list] Loading cached results from: {pmx_path}")
             self.load_npz_state(pmx_path, alternative_data_path=fp)

@@ -397,6 +397,46 @@ def load_data_file(
     }
 
 
+# ── Summary statistics ────────────────────────────────────────────
+
+
+def _compute_summary(
+    metrics_rows: List[Dict[str, Any]],
+    n_sweeps: int,
+) -> Dict[str, Any]:
+    """Compute one-row summary from per-breath metrics.
+
+    Returns a dict with mean_freq, mean_ti, mean_te, mean_amp, n_breaths,
+    n_sweeps, and other aggregate stats useful for grouping.
+    """
+    summary: Dict[str, Any] = {
+        "n_breaths": len(metrics_rows),
+        "n_sweeps": n_sweeps,
+    }
+
+    if not metrics_rows:
+        return summary
+
+    # Collect numeric arrays for common metrics
+    metric_keys = ["if", "ti", "te", "amp_insp", "amp_exp", "area_insp", "area_exp"]
+    for key in metric_keys:
+        values = [
+            float(r[key]) for r in metrics_rows
+            if key in r and r[key] is not None and not np.isnan(float(r[key]))
+        ]
+        if values:
+            arr = np.array(values)
+            summary[f"mean_{key}"] = float(np.mean(arr))
+            summary[f"std_{key}"] = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+            summary[f"median_{key}"] = float(np.median(arr))
+
+    # Frequency is 1/if for instantaneous frequency → derive mean_freq
+    if "mean_if" in summary and summary["mean_if"] > 0:
+        summary["mean_freq"] = 1.0 / summary["mean_if"]
+
+    return summary
+
+
 # ── Batch analysis ───────────────────────────────────────────────
 
 
@@ -406,7 +446,10 @@ def analyze_file(
     output_dir: Optional[Path] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     write_csv: bool = True,
+    save_session: bool = False,
     analyze_channel: Optional[str] = None,
+    animal_id: str = "",
+    existing_event_markers: Optional[Dict] = None,
 ) -> AnalysisResult:
     """Headless analysis of a single recording file.
 
@@ -417,7 +460,7 @@ def analyze_file(
     4. Auto-detect threshold (if not in config)
     5. Filter + detect peaks per sweep
     6. Compute per-breath metrics
-    7. Save results CSV
+    7. Save results CSV and/or .pmx session
 
     Args:
         path: Path to recording file (ABF, SMRX, EDF, MAT)
@@ -425,7 +468,10 @@ def analyze_file(
         output_dir: Where to write results. Defaults to same folder as input.
         progress_callback: Optional status message callback
         write_csv: If False, skip CSV writing (dry run). Still returns full metrics.
+        save_session: If True, save .pmx session file in physiometrics/ subfolder.
         analyze_channel: If provided (e.g. "IN 0"), use that channel instead of auto-detect.
+        animal_id: Animal ID for .pmx file naming and metadata.
+        existing_event_markers: Event markers to carry over on re-analysis.
 
     Returns:
         AnalysisResult with paths to output files.
@@ -450,15 +496,17 @@ def analyze_file(
         ch_names = data["channel_names"]
         t = data["t"]
 
-        # 2. Select analysis channel
+        # 2. Select analysis channel + detect stim
+        from core.abf_io import auto_select_channels
+        stim_ch, auto_analyze_ch = auto_select_channels(sweeps, ch_names)
+
         if analyze_channel and analyze_channel in ch_names:
             analyze_ch = analyze_channel
         elif analyze_channel and analyze_channel not in ch_names:
             result.error = f"Channel '{analyze_channel}' not found in {ch_names}"
             return result
         else:
-            from core.abf_io import auto_select_channels
-            stim_ch, analyze_ch = auto_select_channels(sweeps, ch_names)
+            analyze_ch = auto_analyze_ch
             if analyze_ch is None:
                 non_stim = [c for c in ch_names if c != stim_ch]
                 analyze_ch = non_stim[0] if non_stim else ch_names[0]
@@ -534,7 +582,39 @@ def analyze_file(
 
                     all_metrics_rows.append(row)
 
-        # 7. Save results CSV (skip in dry-run mode)
+        # 7. Compute summary statistics
+        summary = _compute_summary(all_metrics_rows, n_sweeps)
+        result.summary = summary
+
+        # 8. Save .pmx session file
+        if save_session:
+            from core.npz_io import get_pmx_path, save_batch_result
+
+            pmx_path = get_pmx_path(
+                path,
+                analysis_type="pleth",
+                animal_id=animal_id,
+                channel=analyze_ch,
+            )
+            _log(f"Saving session to {pmx_path.name}...")
+            save_batch_result(
+                output_path=pmx_path,
+                original_file=path,
+                channel=analyze_ch,
+                sr_hz=sr_hz,
+                t=t,
+                config=config,
+                filter_config=fc,
+                detection_results=all_results,
+                metrics_rows=all_metrics_rows,
+                summary=summary,
+                event_markers=existing_event_markers,
+                stim_chan=stim_ch if stim_ch else "None",
+            )
+            result.session_path = pmx_path
+            _log(f"Saved {pmx_path.name}")
+
+        # 9. Save results CSV (skip in dry-run mode)
         if all_metrics_rows and write_csv:
             import csv
             csv_path = output_dir / f"{path.stem}_results.csv"

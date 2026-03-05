@@ -532,6 +532,27 @@ class ProjectBuilderManager:
         except Exception as e:
             print(f"[project-builder] Error refreshing verification cache: {e}")
 
+    def _reanalyze_row(self, row: int):
+        """Force fresh analysis on a row, ignoring its cached .pmx."""
+        if row >= len(self.mw._master_file_list):
+            return
+        task = self.mw._master_file_list[row]
+        file_path = task.get('file_path', '')
+        if not file_path:
+            return
+
+        from pathlib import Path
+        fp = Path(file_path)
+        if not fp.exists():
+            return
+
+        # Temporarily clear results_path so _analyze_file_at_row loads fresh
+        original_rp = task.get('results_path', '')
+        self.mw._master_file_list[row]['results_path'] = ''
+        self.mw._analyze_file_at_row(row)
+        # Restore — it will be overwritten on next save anyway
+        self.mw._master_file_list[row]['results_path'] = original_rp
+
     def _select_all_visible_rows(self):
         """Select all currently visible rows in the table."""
         from PyQt6.QtCore import QItemSelection, QItemSelectionModel
@@ -1208,16 +1229,26 @@ class ProjectBuilderManager:
 
         menu.addSeparator()
 
-        # Review Sources (single row only, requires animal_id)
+        # Single-row actions
         if len(selected_rows) == 1:
             row = next(iter(selected_rows))
             if row < len(self.mw._master_file_list):
                 task = self.mw._master_file_list[row]
                 animal_id = task.get('animal_id', '')
+
+                # Review Sources (requires animal_id)
                 review_action = QAction("Review Sources...", self.mw)
                 review_action.setEnabled(bool(animal_id))
                 review_action.triggered.connect(lambda: self.mw._open_source_review(row))
                 menu.addAction(review_action)
+
+                # Re-analyze (force fresh analysis, ignoring cached .pmx)
+                results_path = task.get('results_path', '') or ''
+                reanalyze_action = QAction("Re-analyze (ignore cached results)...", self.mw)
+                reanalyze_action.setEnabled(bool(results_path))
+                reanalyze_action.triggered.connect(lambda _, r=row: self._reanalyze_row(r))
+                menu.addAction(reanalyze_action)
+
                 menu.addSeparator()
 
         # Bulk edit options

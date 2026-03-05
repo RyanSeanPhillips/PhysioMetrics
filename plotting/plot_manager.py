@@ -669,6 +669,9 @@ class PlotManager:
             plots = list(self.plot_host._subplots)
             for plot in plots:
                 plot.clear()  # Removes curves/scatter/regions but keeps axes, labels, x-link
+                # Re-setup axis drag handlers (plot.clear() can drop event overrides)
+                if hasattr(self.plot_host, '_setup_axis_drag'):
+                    self.plot_host._setup_axis_drag(plot)
         else:
             # Full rebuild: panel config changed (different channels, added/removed panels)
             self.plot_host.ax_main = None
@@ -728,6 +731,8 @@ class PlotManager:
         ax_main = None
         ax_event = None
         primary_y_data = None
+        first_y_data = None  # Fallback for minimap when no primary pleth
+        minimap_channels = []  # (y_data, color) tuples for minimap
 
         for i, config in enumerate(channel_configs):
             plot = plots[i]
@@ -759,6 +764,10 @@ class PlotManager:
             if config.is_primary_pleth:
                 primary_y_data = y_data
 
+            # Capture first non-event channel data as minimap fallback
+            if first_y_data is None and not config.is_event_channel:
+                first_y_data = y_data
+
             # Choose trace color based on channel type and name
             ch_lower = config.name.lower()
             if 'iso' in ch_lower or '415' in ch_lower:
@@ -773,6 +782,10 @@ class PlotManager:
                 channel_trace_color = opto_trace_color
             else:
                 channel_trace_color = trace_color
+
+            # Collect channel data for minimap (skip event channels)
+            if not config.is_event_channel:
+                minimap_channels.append((y_data, channel_trace_color))
 
             # Plot trace: clipToView sends only visible data to GPU
             curve = plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
@@ -872,6 +885,60 @@ class PlotManager:
         if plots and (view_was_restored or force_autorange):
             if hasattr(self.plot_host, 'disable_autorange'):
                 self.plot_host.disable_autorange()
+
+        # Update navigation bars with data range
+        if hasattr(self.plot_host, 'update_nav_bars') and t_plot is not None and len(t_plot) > 0:
+            t_min, t_max = float(t_plot[0]), float(t_plot[-1])
+            # Collect all minimap markers: stim spans + opto spans + event markers
+            nav_markers = []
+            # Add stim spans (already in plot coordinates)
+            for (a, b) in spans_plot:
+                nav_markers.append({
+                    'start_time': a, 'end_time': b, 'color': '#4682E0',
+                })
+            # Add opto stim spans (blue shading)
+            for (a, b) in opto_spans_plot:
+                nav_markers.append({
+                    'start_time': a, 'end_time': b, 'color': '#007acc',
+                })
+            # Add user-created event markers
+            nav_markers.extend(self._collect_minimap_markers(s, t0=t0))
+            self.plot_host.update_nav_bars(
+                t_min, t_max, t_plot,
+                minimap_channels=minimap_channels if minimap_channels else None,
+                markers=nav_markers if nav_markers else None,
+            )
+            # Reconnect nav sync in case subplots were rebuilt
+            if not can_reuse:
+                self.plot_host._connect_nav_to_primary()
+
+    def _collect_minimap_markers(self, sweep_idx, t0=0.0):
+        """Collect event markers for the current sweep to display on minimap.
+
+        Args:
+            sweep_idx: Current sweep index
+            t0: Time offset applied to plot coordinates (stim alignment)
+        """
+        try:
+            mw = self.window
+            if mw is None:
+                return []
+            vm = getattr(mw, '_event_marker_viewmodel', None)
+            if vm is None or vm.marker_count == 0:
+                return []
+            markers = vm.get_markers_for_sweep(sweep_idx)
+            result = []
+            for m in markers:
+                color = vm.get_color_for_marker(m)
+                end = (m.end_time - t0) if m.end_time is not None else None
+                result.append({
+                    'start_time': m.start_time - t0,
+                    'end_time': end,
+                    'color': color,
+                })
+            return result
+        except Exception:
+            return []
 
     def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw peak markers on PyQtGraph plot, with gray markers for omitted regions."""

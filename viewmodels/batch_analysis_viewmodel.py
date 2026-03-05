@@ -43,7 +43,8 @@ class BatchAnalysisViewModel(QObject):
         self,
         experiments: List[Dict[str, Any]],
         config: AnalysisConfig,
-        dry_run: bool = True,
+        dry_run: bool = False,
+        save: bool = True,
     ):
         """Start batch analysis on a list of experiment dicts.
 
@@ -53,7 +54,8 @@ class BatchAnalysisViewModel(QObject):
         Args:
             experiments: List of experiment row dicts from the DB/model.
             config: Analysis configuration to apply to all files.
-            dry_run: If True, skip CSV writing.
+            dry_run: If True, skip CSV and .pmx writing.
+            save: If True, write .pmx session files (default). Overrides dry_run.
         """
         if self._worker is not None and self._worker.isRunning():
             self.batch_error.emit("Batch analysis already running")
@@ -64,7 +66,7 @@ class BatchAnalysisViewModel(QObject):
         from core.file_load_worker import FileLoadWorker
         self._worker = FileLoadWorker(
             self._run_parallel,
-            experiments, config, dry_run,
+            experiments, config, dry_run, save,
             inject_progress=False,
         )
         self._worker.finished.connect(self._on_worker_finished)
@@ -81,7 +83,8 @@ class BatchAnalysisViewModel(QObject):
         return self._worker is not None and self._worker.isRunning()
 
     def _analyze_one(
-        self, idx: int, exp: Dict[str, Any], config: AnalysisConfig, dry_run: bool
+        self, idx: int, exp: Dict[str, Any], config: AnalysisConfig,
+        dry_run: bool, save: bool,
     ) -> tuple:
         """Analyze a single experiment. Called from thread pool workers."""
         from core.services.analysis_service import analyze_file
@@ -89,6 +92,7 @@ class BatchAnalysisViewModel(QObject):
         file_path = Path(exp.get("file_path", ""))
         file_name = exp.get("file_name", file_path.name)
         channel = exp.get("channel") or None
+        animal_id = exp.get("animal_id", "") or ""
 
         self.file_started.emit(idx, file_name)
 
@@ -98,33 +102,64 @@ class BatchAnalysisViewModel(QObject):
         else:
             def _progress(msg, _idx=idx, _name=file_name):
                 self.progress_message.emit(f"[{_idx+1}] {_name}: {msg}")
-                # Emit per-file stage for row-level progress
                 self.file_progress.emit(_idx, msg)
+
+            # Load existing event markers when re-analyzing
+            existing_markers = None
+            if save and not dry_run:
+                existing_markers = self._load_existing_event_markers(
+                    file_path, channel or "", animal_id
+                )
 
             result = analyze_file(
                 path=file_path,
                 config=config,
                 write_csv=not dry_run,
+                save_session=save and not dry_run,
                 analyze_channel=channel,
+                animal_id=animal_id,
+                existing_event_markers=existing_markers,
                 progress_callback=_progress,
             )
 
         return idx, exp, result
+
+    def _load_existing_event_markers(
+        self, file_path: Path, channel: str, animal_id: str,
+    ) -> Optional[Dict]:
+        """Try to load event markers from an existing .pmx for preservation."""
+        try:
+            from core.npz_io import get_pmx_path
+            pmx_path = get_pmx_path(file_path, "pleth", animal_id, channel)
+            if not pmx_path.exists():
+                return None
+            import numpy as np
+            data = np.load(str(pmx_path), allow_pickle=True)
+            if "event_markers_version" in data:
+                return {
+                    "event_markers_version": data["event_markers_version"],
+                    "event_markers_json": str(data["event_markers_json"]),
+                }
+        except Exception:
+            pass
+        return None
 
     def _run_parallel(
         self,
         experiments: List[Dict[str, Any]],
         config: AnalysisConfig,
         dry_run: bool,
+        save: bool = True,
     ) -> List[tuple]:
         """Worker function — runs in FileLoadWorker thread, dispatches to pool."""
         n_workers = min(MAX_WORKERS, len(experiments))
         # For very small batches, just run sequentially (less overhead)
         if n_workers <= 1:
-            return self._run_sequential(experiments, config, dry_run)
+            return self._run_sequential(experiments, config, dry_run, save)
 
+        mode = "dry run" if dry_run else "save"
         self.progress_message.emit(
-            f"Analyzing {len(experiments)} files with {n_workers} workers..."
+            f"Analyzing {len(experiments)} files ({mode}) with {n_workers} workers..."
         )
 
         # results keyed by idx for ordered output
@@ -135,7 +170,7 @@ class BatchAnalysisViewModel(QObject):
             for idx, exp in enumerate(experiments):
                 if self._cancel_event.is_set():
                     break
-                future = pool.submit(self._analyze_one, idx, exp, config, dry_run)
+                future = pool.submit(self._analyze_one, idx, exp, config, dry_run, save)
                 futures[future] = idx
 
             for future in as_completed(futures):
@@ -147,13 +182,14 @@ class BatchAnalysisViewModel(QObject):
                 results_by_idx[idx] = (exp, result)
                 self.file_completed.emit(idx, exp, result)
 
-                # Update DB status
-                if self._store and exp.get("id"):
-                    status = "completed" if result.error is None else "error"
+                # Update DB status + results_path
+                eid = exp.get("experiment_id") or exp.get("id")
+                if self._store and eid:
+                    updates = {"status": "completed" if result.error is None else "error"}
+                    if result.session_path:
+                        updates["results_path"] = str(result.session_path)
                     try:
-                        self._store.update_experiment(
-                            exp["id"], {"status": status}
-                        )
+                        self._store.update_experiment(eid, updates)
                     except Exception:
                         pass
 
@@ -165,21 +201,23 @@ class BatchAnalysisViewModel(QObject):
         experiments: List[Dict[str, Any]],
         config: AnalysisConfig,
         dry_run: bool,
+        save: bool = True,
     ) -> List[tuple]:
         """Fallback sequential execution."""
         results = []
         for idx, exp in enumerate(experiments):
             if self._cancel_event.is_set():
                 break
-            _, exp_out, result = self._analyze_one(idx, exp, config, dry_run)
+            _, exp_out, result = self._analyze_one(idx, exp, config, dry_run, save)
             results.append((exp_out, result))
 
-            if self._store and exp.get("id"):
-                status = "completed" if result.error is None else "error"
+            eid = exp.get("experiment_id") or exp.get("id")
+            if self._store and eid:
+                updates = {"status": "completed" if result.error is None else "error"}
+                if result.session_path:
+                    updates["results_path"] = str(result.session_path)
                 try:
-                    self._store.update_experiment(
-                        exp["id"], {"status": status}
-                    )
+                    self._store.update_experiment(eid, updates)
                 except Exception:
                     pass
 

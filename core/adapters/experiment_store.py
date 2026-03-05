@@ -140,6 +140,7 @@ STANDARD_COLUMNS = {
     'group_name', 'status', 'protocol', 'channel_count', 'sweep_count',
     'keywords_display', 'stim_channel', 'events_channel', 'tags',
     'notes', 'weight', 'age', 'date_recorded',
+    'results_path', 'review_status',
 }
 
 # Map between legacy dict key names and DB column names
@@ -217,6 +218,19 @@ class ExperimentStore:
             self._conn.execute(FTS_SQL)
         except sqlite3.OperationalError:
             pass
+
+        # Ensure results_path and review_status columns exist (added in v2.1)
+        existing_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(experiments)").fetchall()}
+        if "results_path" not in existing_cols:
+            try:
+                self._conn.execute("ALTER TABLE experiments ADD COLUMN results_path TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+        if "review_status" not in existing_cols:
+            try:
+                self._conn.execute("ALTER TABLE experiments ADD COLUMN review_status TEXT DEFAULT 'unreviewed'")
+            except sqlite3.OperationalError:
+                pass
 
         existing = self._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"

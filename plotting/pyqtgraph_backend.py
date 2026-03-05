@@ -242,14 +242,43 @@ class PyQtGraphPlotHost(QWidget):
         # Make widget focusable for keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # --- Navigation bars ---
+        from plotting.navigation_bar import (
+            ScrollBarNavigation, MinimapNavigation, load_nav_settings,
+        )
+        nav_prefs = load_nav_settings()
+        self._scrollbar_nav = ScrollBarNavigation(self)
+        self._minimap_nav = MinimapNavigation(self)
+        self._nav_bar_mode = nav_prefs['bar_mode']   # 'scrollbar' | 'minimap'
+        self._nav_bar_visible = nav_prefs['bar_visible']
+        self._nav_expandable = nav_prefs.get('expandable', True)
+        self._minimap_nav.set_expandable(self._nav_expandable)
+        self._wheel_mode = nav_prefs['wheel_mode']   # 'zoom' | 'pan'
+        self._nav_sync_guard = False
+        self._nav_signal_connection = None  # Track sigXRangeChanged connection
+        self._nav_has_data = False  # Whether nav bars have data to show
+
+        # Connect nav bar signals
+        self._scrollbar_nav.view_range_requested.connect(self._on_nav_bar_requested_range)
+        self._minimap_nav.view_range_requested.connect(self._on_nav_bar_requested_range)
+
+        # Hidden until data is loaded
+        self._scrollbar_nav.setVisible(False)
+        self._minimap_nav.setVisible(False)
+
         # Layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.graphics_layout)
+        layout.addWidget(self._scrollbar_nav)
+        layout.addWidget(self._minimap_nav)
 
         # Store subplots for multi-panel mode
         self._subplots = [self.plot_widget]
+
+        # Connect nav sync to primary plot
+        self._connect_nav_to_primary()
 
     # ------- Theme Support -------
     def _get_theme_colors(self):
@@ -1354,29 +1383,31 @@ class PyQtGraphPlotHost(QWidget):
         # Override wheel event: normal = zoom X, shift = pan X
         original_wheel = vb.wheelEvent
 
-        def smart_wheel(ev, axis=None, _vb=vb, _orig=original_wheel):
-            """Wheel = zoom X-axis, Shift+Wheel = pan X-axis (horizontal scroll)."""
-            modifiers = ev.modifiers() if hasattr(ev, 'modifiers') else QtCore_Qt.KeyboardModifier.NoModifier
+        def smart_wheel(ev, axis=None, _vb=vb, _orig=original_wheel, _host=self):
+            """Wheel behavior depends on wheel_mode setting.
 
-            if modifiers & QtCore_Qt.KeyboardModifier.ShiftModifier:
-                # Shift+Wheel: Pan horizontally
+            zoom mode: Wheel = zoom X, Shift+Wheel = pan X
+            pan mode:  Wheel = pan X, Shift+Wheel = zoom X
+            """
+            modifiers = ev.modifiers() if hasattr(ev, 'modifiers') else QtCore_Qt.KeyboardModifier.NoModifier
+            shift_held = bool(modifiers & QtCore_Qt.KeyboardModifier.ShiftModifier)
+
+            # Determine action: in 'pan' mode, swap the shift logic
+            wheel_mode = getattr(_host, '_wheel_mode', 'zoom')
+            want_pan = (wheel_mode == 'zoom' and shift_held) or (wheel_mode == 'pan' and not shift_held)
+
+            if want_pan:
+                # Pan horizontally
                 delta = ev.delta()
-                # Get current view range
                 view_range = _vb.viewRange()
                 x_min, x_max = view_range[0]
                 x_span = x_max - x_min
-
-                # Pan amount: 10% of visible range per wheel notch
-                # delta is typically 120 per notch
                 pan_fraction = 0.1 * (delta / 120.0)
                 pan_amount = x_span * pan_fraction
-
-                # Pan the view (negative because wheel up = scroll left feels natural)
                 _vb.translateBy(x=-pan_amount, y=0)
                 ev.accept()
             else:
-                # Normal wheel: Zoom X-axis only
-                # Force axis=0 (X-axis) regardless of mouse position
+                # Zoom X-axis only
                 _orig(ev, axis=0)
 
         vb.wheelEvent = smart_wheel
@@ -1602,6 +1633,40 @@ class PyQtGraphPlotHost(QWidget):
 
         menu.addSeparator()
 
+        # --- Navigation submenu ---
+        action_nav_visible = action_style_scrollbar = action_style_minimap = None
+        action_wheel_zoom = action_wheel_pan = action_nav_help = None
+        try:
+            nav_menu = menu.addMenu("Navigation")
+
+            action_nav_visible = nav_menu.addAction("Show Navigation Bar")
+            action_nav_visible.setCheckable(True)
+            action_nav_visible.setChecked(getattr(self, '_nav_bar_visible', True))
+
+            style_menu = nav_menu.addMenu("Navigation Style")
+            action_style_scrollbar = style_menu.addAction("Scrollbar")
+            action_style_scrollbar.setCheckable(True)
+            action_style_scrollbar.setChecked(getattr(self, '_nav_bar_mode', 'scrollbar') == 'scrollbar')
+            action_style_minimap = style_menu.addAction("Minimap")
+            action_style_minimap.setCheckable(True)
+            action_style_minimap.setChecked(getattr(self, '_nav_bar_mode', 'scrollbar') == 'minimap')
+
+            wheel_menu = nav_menu.addMenu("Scroll Wheel")
+            action_wheel_zoom = wheel_menu.addAction("Zoom (Shift+Wheel = Pan)")
+            action_wheel_zoom.setCheckable(True)
+            action_wheel_zoom.setChecked(getattr(self, '_wheel_mode', 'zoom') == 'zoom')
+            action_wheel_pan = wheel_menu.addAction("Pan (Shift+Wheel = Zoom)")
+            action_wheel_pan.setCheckable(True)
+            action_wheel_pan.setChecked(getattr(self, '_wheel_mode', 'zoom') == 'pan')
+
+            nav_menu.addSeparator()
+            action_nav_help = nav_menu.addAction("Navigation Help...")
+            pass  # Success
+        except Exception:
+            pass  # Nav submenu is optional
+
+        menu.addSeparator()
+
         # Export Plot
         action_export = menu.addAction("Export Plot...")
         action_export.setToolTip("Export plot to PDF, SVG, or PNG (vector graphics)")
@@ -1609,7 +1674,9 @@ class PyQtGraphPlotHost(QWidget):
         # Execute menu at cursor position
         action = menu.exec(QCursor.pos())
 
-        if action == action_auto_y:
+        if action is None:
+            return
+        elif action == action_auto_y:
             self._auto_scale_y_for_plot(plot)
         elif action == action_auto_all:
             self._auto_scale_y_all_panels()
@@ -1635,6 +1702,39 @@ class PyQtGraphPlotHost(QWidget):
             if hasattr(_mw, '_log_status_message'):
                 _mw._log_status_message(msg, 4000)
             pm.redraw_main_plot()
+        # Navigation actions
+        elif action == action_nav_visible:
+            self.set_nav_bar_visible(not self._nav_bar_visible)
+        elif action == action_style_scrollbar:
+            self.set_nav_bar_mode('scrollbar')
+        elif action == action_style_minimap:
+            self.set_nav_bar_mode('minimap')
+        elif action == action_wheel_zoom:
+            self.set_wheel_mode('zoom')
+        elif action == action_wheel_pan:
+            self.set_wheel_mode('pan')
+        elif action == action_nav_help:
+            self._show_navigation_help()
+
+    def _show_navigation_help(self):
+        """Show navigation shortcuts help dialog."""
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Navigation Help")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            "<b>Mouse Navigation</b><br><br>"
+            "<b>Wheel:</b> Zoom X-axis (or Pan, if configured)<br>"
+            "<b>Shift+Wheel:</b> Pan X-axis (or Zoom, if configured)<br>"
+            "<b>Shift+Drag on plot:</b> Pan X-axis<br>"
+            "<b>Drag X-axis:</b> Pan horizontally<br>"
+            "<b>Drag Y-axis:</b> Pan vertically<br><br>"
+            "<b>Navigation Bar</b><br>"
+            "Right-click plot → Navigation → choose Scrollbar or Minimap<br>"
+            "Drag the scrollbar or minimap viewport to navigate<br><br>"
+            "<b>Tip:</b> Switch wheel to Pan mode for scroll-style browsing"
+        )
+        msg.exec()
 
     def _auto_scale_y_for_plot(self, plot):
         """Auto-scale Y-axis for a specific plot to fit visible X range data."""
@@ -1791,6 +1891,121 @@ class PyQtGraphPlotHost(QWidget):
         except:
             pass
 
+    # ------- Navigation Bar Methods -------
+    def _connect_nav_to_primary(self):
+        """(Re)connect sigXRangeChanged on primary subplot to nav bar sync."""
+        # Disconnect previous connection if any
+        if self._nav_signal_connection is not None:
+            try:
+                self._nav_signal_connection[0].sigXRangeChanged.disconnect(self._nav_signal_connection[1])
+            except (TypeError, RuntimeError):
+                pass
+            self._nav_signal_connection = None
+
+        if not self._subplots:
+            return
+
+        primary_vb = self._subplots[0].vb
+
+        def on_range_changed(vb, ranges):
+            self._on_view_range_changed(vb, ranges)
+
+        primary_vb.sigXRangeChanged.connect(on_range_changed)
+        self._nav_signal_connection = (primary_vb, on_range_changed)
+
+    def _on_view_range_changed(self, vb, ranges):
+        """Called when the primary plot's X range changes — syncs to active nav bar."""
+        if self._nav_sync_guard:
+            return
+        x_min, x_max = ranges[0], ranges[1]
+        self._nav_sync_guard = True
+        try:
+            if self._nav_bar_mode == 'scrollbar':
+                self._scrollbar_nav.set_view_range(x_min, x_max)
+            else:
+                self._minimap_nav.set_view_range(x_min, x_max)
+        finally:
+            self._nav_sync_guard = False
+
+    def _on_nav_bar_requested_range(self, x_min, x_max):
+        """Called when user drags scrollbar/minimap — update plot view."""
+        if self._nav_sync_guard:
+            return
+        if not self._subplots:
+            return
+        self._nav_sync_guard = True
+        try:
+            self._subplots[0].setXRange(x_min, x_max, padding=0)
+        finally:
+            self._nav_sync_guard = False
+
+    def update_nav_bars(self, t_min, t_max, t_array=None, signal_array=None,
+                         minimap_channels=None, markers=None):
+        """Update navigation bars after data is plotted.
+
+        Args:
+            t_min: Start time of recording
+            t_max: End time of recording
+            t_array: Full time array (for minimap waveform)
+            signal_array: Single signal array (legacy, for minimap waveform)
+            minimap_channels: List of (y_array, color_hex) for multi-channel minimap
+            markers: List of dicts {start_time, end_time, color} for event markers
+        """
+        self._scrollbar_nav.set_data_range(t_min, t_max)
+        self._minimap_nav.set_data_range(t_min, t_max)
+        if minimap_channels and t_array is not None:
+            self._minimap_nav.set_multi_data(t_array, minimap_channels)
+        elif t_array is not None and signal_array is not None:
+            self._minimap_nav.set_data(t_array, signal_array)
+        if markers is not None:
+            self._minimap_nav.set_markers(markers)
+
+        # Sync current view range
+        if self._subplots:
+            try:
+                vr = self._subplots[0].viewRange()
+                self._scrollbar_nav.set_view_range(vr[0][0], vr[0][1])
+                self._minimap_nav.set_view_range(vr[0][0], vr[0][1])
+            except Exception:
+                pass
+
+        # Show/hide based on mode
+        self._nav_has_data = True
+        self._update_nav_visibility()
+
+    def _update_nav_visibility(self):
+        """Centralized nav bar show/hide logic."""
+        show = self._nav_bar_visible and self._nav_has_data
+        self._scrollbar_nav.setVisible(show and self._nav_bar_mode == 'scrollbar')
+        self._minimap_nav.setVisible(show and self._nav_bar_mode == 'minimap')
+
+    def set_nav_bar_mode(self, mode):
+        """Switch between 'scrollbar' and 'minimap'."""
+        from plotting.navigation_bar import save_nav_settings
+        self._nav_bar_mode = mode
+        save_nav_settings(bar_mode=mode)
+        self._update_nav_visibility()
+
+    def set_nav_bar_visible(self, visible):
+        """Toggle navigation bar visibility."""
+        from plotting.navigation_bar import save_nav_settings
+        self._nav_bar_visible = visible
+        save_nav_settings(bar_visible=visible)
+        self._update_nav_visibility()
+
+    def set_nav_expandable(self, expandable):
+        """Toggle hover-to-expand waveform preview."""
+        from plotting.navigation_bar import save_nav_settings
+        self._nav_expandable = expandable
+        self._minimap_nav.set_expandable(expandable)
+        save_nav_settings(expandable=expandable)
+
+    def set_wheel_mode(self, mode):
+        """Switch wheel behavior between 'zoom' and 'pan'."""
+        from plotting.navigation_bar import save_nav_settings
+        self._wheel_mode = mode
+        save_nav_settings(wheel_mode=mode)
+
     # ------- Compatibility Methods -------
     def clear(self):
         """Clear all plots - compatibility with matplotlib figure.clear()."""
@@ -1810,6 +2025,12 @@ class PyQtGraphPlotHost(QWidget):
         self.plot_widget.setMenuEnabled(False)
         # Reconnect click handler
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+        # Reconnect nav bar to new primary plot
+        self._connect_nav_to_primary()
+        # Hide nav bars until new data is plotted
+        self._nav_has_data = False
+        self._update_nav_visibility()
+
 
     def add_subplot(self, gs_item):
         """Compatibility method for matplotlib add_subplot - returns a PlotItem.

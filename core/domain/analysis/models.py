@@ -256,8 +256,9 @@ class AnalysisResult:
     n_sweeps: int = 0
     n_peaks_total: int = 0
     n_breaths_total: int = 0
-    session_path: Optional[Path] = None   # NPZ path
+    session_path: Optional[Path] = None   # .pmx / NPZ path
     results_path: Optional[Path] = None   # CSV path
+    summary: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
 
@@ -273,6 +274,7 @@ class AnalysisResult:
             "n_breaths_total": self.n_breaths_total,
             "session_path": str(self.session_path) if self.session_path else None,
             "results_path": str(self.results_path) if self.results_path else None,
+            "summary": self.summary,
             "error": self.error,
             "warnings": self.warnings,
         }

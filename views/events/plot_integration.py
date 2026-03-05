@@ -679,6 +679,50 @@ class EventMarkerPlotIntegration(QObject):
             action_fast.triggered.connect(lambda: pm.toggle_auto_downsample(force=True))
             action_full.triggered.connect(lambda: pm.toggle_auto_downsample(force=False))
 
+        # Navigation submenu
+        ph = self._plot_host
+        if hasattr(ph, '_nav_bar_visible'):
+            menu.addSeparator()
+            nav_menu = menu.addMenu("Navigation")
+
+            nav_visible = getattr(ph, '_nav_bar_visible', True)
+            action_nav_vis = nav_menu.addAction("Show Navigation Bar")
+            action_nav_vis.setCheckable(True)
+            action_nav_vis.setChecked(nav_visible)
+            action_nav_vis.triggered.connect(lambda: ph.set_nav_bar_visible(not ph._nav_bar_visible))
+
+            nav_expand = getattr(ph, '_nav_expandable', True)
+            action_expandable = nav_menu.addAction("Expand on Hover")
+            action_expandable.setCheckable(True)
+            action_expandable.setChecked(nav_expand)
+            action_expandable.triggered.connect(lambda: ph.set_nav_expandable(not ph._nav_expandable))
+
+            style_menu = nav_menu.addMenu("Navigation Style")
+            nav_mode = getattr(ph, '_nav_bar_mode', 'scrollbar')
+            a_scroll = style_menu.addAction("Scrollbar")
+            a_scroll.setCheckable(True)
+            a_scroll.setChecked(nav_mode == 'scrollbar')
+            a_scroll.triggered.connect(lambda: ph.set_nav_bar_mode('scrollbar'))
+            a_mini = style_menu.addAction("Minimap")
+            a_mini.setCheckable(True)
+            a_mini.setChecked(nav_mode == 'minimap')
+            a_mini.triggered.connect(lambda: ph.set_nav_bar_mode('minimap'))
+
+            wheel_menu = nav_menu.addMenu("Scroll Wheel")
+            wm = getattr(ph, '_wheel_mode', 'zoom')
+            a_wz = wheel_menu.addAction("Zoom (Shift+Wheel = Pan)")
+            a_wz.setCheckable(True)
+            a_wz.setChecked(wm == 'zoom')
+            a_wz.triggered.connect(lambda: ph.set_wheel_mode('zoom'))
+            a_wp = wheel_menu.addAction("Pan (Shift+Wheel = Zoom)")
+            a_wp.setCheckable(True)
+            a_wp.setChecked(wm == 'pan')
+            a_wp.triggered.connect(lambda: ph.set_wheel_mode('pan'))
+
+            nav_menu.addSeparator()
+            a_help = nav_menu.addAction("Navigation Help...")
+            a_help.triggered.connect(ph._show_navigation_help)
+
         # Show menu
         menu.exec(QCursor.pos())
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from core.state import AppState
 
 
@@ -71,6 +71,200 @@ def get_ml_npz_path_for_channel(data_path: Path, channel_name: str) -> Path:
     ml_folder = data_path.parent / "ML"
 
     return ml_folder / f"{base}.{safe_channel}.ml.npz"
+
+
+def get_pmx_path(
+    data_path: Path,
+    analysis_type: str = "pleth",
+    animal_id: str = "",
+    channel: str = "",
+) -> Path:
+    """Get .pmx output path for a recording file.
+
+    Output goes into a ``physiometrics/`` subfolder next to the data file.
+
+    Naming: ``{stem}.{analysis_type}.{id}.pmx``
+    where *id* is ``animal_id`` (preferred) or sanitised channel name.
+
+    Args:
+        data_path: Path to original data file (.abf, .smrx, .edf)
+        analysis_type: e.g. "pleth", "photometry", "hargreaves"
+        animal_id: Animal ID from experiment metadata (preferred identifier)
+        channel: Channel name fallback (e.g. "IN 0")
+
+    Returns:
+        Path to .pmx file inside ``physiometrics/`` subfolder.
+    """
+    stem = data_path.stem
+    id_part = animal_id.strip() if animal_id and animal_id.strip() else ""
+    if not id_part:
+        id_part = channel.replace(" ", "").replace("/", "_").replace("\\", "_")
+    if not id_part:
+        id_part = "default"
+
+    out_dir = data_path.parent / "physiometrics"
+    return out_dir / f"{stem}.{analysis_type}.{id_part}.pmx"
+
+
+def save_batch_result(
+    output_path: Path,
+    original_file: Path,
+    channel: str,
+    sr_hz: float,
+    t: np.ndarray,
+    config: Any,
+    filter_config: Any,
+    detection_results: Dict[int, Dict],
+    metrics_rows: List[Dict],
+    summary: Dict[str, float],
+    event_markers: Optional[Dict] = None,
+    analysis_type: str = "pleth",
+    stim_chan: str = "None",
+) -> Path:
+    """Save batch analysis results to a .pmx (PhysioMetrics eXperiment) file.
+
+    The .pmx format is NPZ under the hood, extending the existing .pleth.npz
+    keys with v2 schema fields (schema_version, summary, metrics, config).
+
+    Args:
+        output_path: Where to write the .pmx file.
+        original_file: Path to original recording file.
+        channel: Channel analysed (e.g. "IN 0").
+        sr_hz: Sample rate in Hz.
+        t: Time array.
+        config: AnalysisConfig used for detection (has .to_dict()).
+        filter_config: FilterConfig used (has .to_dict()).
+        detection_results: sweep_idx -> detect_single_sweep output dict.
+        metrics_rows: List of per-breath metric dicts.
+        summary: One-row summary dict (mean_freq, mean_ti, etc.).
+        event_markers: Optional event marker data from EventMarkerService.
+        analysis_type: e.g. "pleth" (future: other modalities).
+
+    Returns:
+        The output_path written to.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: Dict[str, Any] = {}
+
+    # ── v2 metadata ───────────────────────────────────────────────
+    data["schema_version"] = 2
+    data["analysis_type"] = analysis_type
+    data["analysis_config_json"] = json.dumps(config.to_dict())
+    data["batch_timestamp"] = datetime.now().isoformat()
+    data["channel_analyzed"] = channel
+    data["summary_json"] = json.dumps(summary)
+    data["metrics_json"] = json.dumps(metrics_rows)
+
+    # ── Standard v1-compatible metadata ───────────────────────────
+    data["version"] = "2.0.0"
+    data["saved_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data["original_file_path"] = str(original_file)
+    data["sr_hz"] = sr_hz
+    data["analyze_chan"] = channel
+    data["stim_chan"] = stim_chan
+    data["event_channel"] = "None"
+
+    # ── Per-sweep peaks, labels, breath features ──────────────────
+    sweep_indices = sorted(detection_results.keys())
+    data["peak_sweep_indices"] = np.array(sweep_indices, dtype=int)
+
+    all_peaks_sweep_indices = []
+    breath_sweep_indices = []
+    peak_metrics_sweep_indices = []
+
+    for s in sweep_indices:
+        det = detection_results[s]
+
+        # Labeled peaks (filtered — what the user sees)
+        labeled_idx = det.get("labeled_indices", np.array([]))
+        data[f"peaks_sweep_{s}"] = labeled_idx
+
+        # All peaks (master list with labels)
+        apd = det.get("all_peaks_data")
+        if apd is not None:
+            all_peaks_sweep_indices.append(s)
+            data[f"all_peaks_indices_sweep_{s}"] = det["all_peak_indices"]
+            data[f"all_peaks_labels_sweep_{s}"] = apd["labels"]
+            data[f"all_peaks_label_source_sweep_{s}"] = apd["label_source"]
+            if "breath_type_class" in apd and apd["breath_type_class"] is not None:
+                data[f"all_peaks_breath_type_class_sweep_{s}"] = apd["breath_type_class"]
+
+        # Labeled breath features
+        labeled_br = det.get("labeled_breaths", {})
+        if labeled_br:
+            breath_sweep_indices.append(s)
+            breath_json = json.dumps({
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in labeled_br.items()
+                if k in ("onsets", "offsets", "expmins", "expoffs")
+            })
+            data[f"breath_sweep_{s}_json"] = breath_json
+
+        # Peak candidate metrics
+        cm = det.get("current_metrics")
+        if cm:
+            peak_metrics_sweep_indices.append(s)
+            data[f"peak_metrics_sweep_{s}_json"] = json.dumps(cm)
+
+    if all_peaks_sweep_indices:
+        data["all_peaks_sweep_indices"] = np.array(all_peaks_sweep_indices, dtype=int)
+    if breath_sweep_indices:
+        data["breath_sweep_indices"] = np.array(breath_sweep_indices, dtype=int)
+    if peak_metrics_sweep_indices:
+        data["peak_metrics_sweep_indices"] = np.array(peak_metrics_sweep_indices, dtype=int)
+
+    # ── Filter settings (v1 compatible) ───────────────────────────
+    fc = filter_config
+    data["use_low"] = fc.use_low
+    data["use_high"] = fc.use_high
+    data["use_mean_sub"] = fc.use_mean_sub
+    data["use_invert"] = fc.use_invert
+    data["low_hz"] = fc.low_hz if fc.low_hz else 0.0
+    data["high_hz"] = fc.high_hz if fc.high_hz else 0.0
+    data["mean_val"] = fc.mean_val
+
+    # ── Navigation defaults ───────────────────────────────────────
+    data["sweep_idx"] = 0
+    data["window_start_s"] = 0.0
+    data["window_dur_s"] = float(t[-1]) if len(t) > 0 else 10.0
+
+    # ── Empty defaults for v1 keys the loader expects ─────────────
+    data["sigh_sweep_indices"] = np.array([], dtype=int)
+    data["omitted_sweeps"] = np.array([], dtype=int)
+    data["omitted_points_indices"] = np.array([], dtype=int)
+    data["omitted_ranges_indices"] = np.array([], dtype=int)
+    data["sniff_sweep_indices"] = np.array([], dtype=int)
+    data["bout_sweep_indices"] = np.array([], dtype=int)
+    data["gmm_sweep_indices"] = np.array([], dtype=int)
+    data["has_gmm_cache"] = False
+    data["stim_onset_sweep_indices"] = np.array([], dtype=int)
+    data["stim_offset_sweep_indices"] = np.array([], dtype=int)
+    data["stim_spans_sweep_indices"] = np.array([], dtype=int)
+    data["stim_metrics_sweep_indices"] = np.array([], dtype=int)
+
+    # ── App settings ──────────────────────────────────────────────
+    data["has_app_settings"] = True
+    data["filter_order"] = fc.filter_order
+    data["use_zscore_normalization"] = fc.use_zscore
+    data["notch_filter_lower"] = fc.notch_lower if fc.notch_lower is not None else 0.0
+    data["notch_filter_upper"] = fc.notch_upper if fc.notch_upper is not None else 0.0
+    data["apnea_threshold"] = 0.5
+
+    # ── Event markers (carried over from existing .pmx on re-analyze) ─
+    if event_markers is not None:
+        for key, value in event_markers.items():
+            data[key] = value
+
+    # ── Write ─────────────────────────────────────────────────────
+    # np.savez_compressed auto-appends .npz — save then rename to .pmx
+    np.savez_compressed(str(output_path), **data)
+    npz_actual = Path(str(output_path) + ".npz")
+    if npz_actual.exists() and npz_actual != output_path:
+        if output_path.exists():
+            output_path.unlink()
+        npz_actual.rename(output_path)
+    return output_path
 
 
 def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None) -> None:
@@ -337,10 +531,14 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
 def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                         alternative_data_path: Path = None) -> Tuple[AppState, bool, Optional[Dict], Optional[Dict], Optional[Dict]]:
     """
-    Load complete analysis state from .pleth.npz file.
+    Load complete analysis state from .pleth.npz or .pmx file.
+
+    Supports both v1 (.pleth.npz) and v2 (.pmx) formats. The v2 format
+    includes additional keys (schema_version, summary_json, metrics_json,
+    analysis_config_json) but is otherwise backwards-compatible.
 
     Args:
-        npz_path: Path to .pleth.npz file
+        npz_path: Path to .pleth.npz or .pmx file
         reload_raw_data: If True, reload raw data from original file
                         If False, only load if embedded in NPZ
         alternative_data_path: If provided, use this path instead of the original
@@ -390,12 +588,12 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
         print(f"[npz_io] Original path not found: {original_file_path}")
         print(f"[npz_io] Searching for {original_filename} relative to NPZ location...")
 
-        # Common locations to check (relative to NPZ file):
-        # 1. Parent folder of NPZ (if NPZ is in Pleth_App_analysis/)
+        # Common locations to check (relative to NPZ/PMX file):
+        # 1. Parent folder of NPZ (if NPZ is in Pleth_App_analysis/ or physiometrics/)
         # 2. Grandparent folder (../.. from NPZ)
         # 3. Same folder as NPZ
         search_paths = [
-            npz_path.parent.parent / original_filename,  # One folder up from Pleth_App_analysis
+            npz_path.parent.parent / original_filename,  # One folder up from Pleth_App_analysis or physiometrics
             npz_path.parent.parent.parent / original_filename,  # Two folders up
             npz_path.parent / original_filename,  # Same folder as NPZ
         ]
@@ -694,15 +892,16 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
 
 def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:
     """
-    Get metadata from .pleth.npz file without loading full state.
+    Get metadata from .pleth.npz or .pmx file without loading full state.
 
     Useful for displaying info in load dialogs.
 
     Args:
-        npz_path: Path to .pleth.npz file
+        npz_path: Path to .pleth.npz or .pmx file
 
     Returns:
         Dict with metadata: version, timestamp, n_peaks, n_sweeps, etc.
+        For v2 (.pmx) files, also includes schema_version, analysis_type, summary.
     """
     try:
         data = np.load(npz_path, allow_pickle=True)
@@ -729,7 +928,7 @@ def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:
                 val = val.item()
             return str(val)
 
-        return {
+        result = {
             'version': safe_str(data.get('version'), 'unknown'),
             'saved_timestamp': safe_str(data.get('saved_timestamp'), 'unknown'),
             'modified_time': mtime.strftime('%Y-%m-%d %H:%M'),
@@ -740,6 +939,21 @@ def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:
             'has_gmm': len(data.get('gmm_sweep_indices', [])) > 0,
             'has_edits': True  # Assume true if NPZ exists (could be more sophisticated)
         }
+
+        # v2 (.pmx) fields
+        schema_ver = data.get('schema_version')
+        if schema_ver is not None:
+            if hasattr(schema_ver, 'item'):
+                schema_ver = schema_ver.item()
+            result['schema_version'] = int(schema_ver)
+            result['analysis_type'] = safe_str(data.get('analysis_type'), 'pleth')
+            summary_str = safe_str(data.get('summary_json'), '{}')
+            try:
+                result['summary'] = json.loads(summary_str)
+            except (json.JSONDecodeError, TypeError):
+                result['summary'] = {}
+
+        return result
     except Exception as e:
         return {
             'error': str(e),
