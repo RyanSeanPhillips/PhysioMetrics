@@ -121,16 +121,18 @@ class PhotometryCTADialog(ExportMixin, QDialog):
 
         window_layout.addWidget(QLabel("Before (s):"))
         self._spin_before = QDoubleSpinBox()
-        self._spin_before.setRange(0.1, 120.0)
-        self._spin_before.setSingleStep(1.0)
+        self._spin_before.setRange(0.1, 99999.9)
+        self._spin_before.setSingleStep(5.0)
         self._spin_before.setDecimals(1)
+        self._spin_before.setToolTip("Time window before event (seconds)")
         window_layout.addWidget(self._spin_before)
 
         window_layout.addWidget(QLabel("After (s):"))
         self._spin_after = QDoubleSpinBox()
-        self._spin_after.setRange(0.1, 120.0)
-        self._spin_after.setSingleStep(1.0)
+        self._spin_after.setRange(0.1, 99999.9)
+        self._spin_after.setSingleStep(5.0)
         self._spin_after.setDecimals(1)
+        self._spin_after.setToolTip("Time window after event (seconds)")
         window_layout.addWidget(self._spin_after)
 
         # Set values and connect signals after both spinboxes exist
@@ -151,7 +153,7 @@ class PhotometryCTADialog(ExportMixin, QDialog):
 
         zscore_layout.addWidget(QLabel("Start (s):"))
         self._spin_baseline_start = QDoubleSpinBox()
-        self._spin_baseline_start.setRange(-120.0, 0.0)
+        self._spin_baseline_start.setRange(-99999.9, 0.0)
         self._spin_baseline_start.setSingleStep(0.5)
         self._spin_baseline_start.setDecimals(2)
         self._spin_baseline_start.setValue(self._viewmodel.config.baseline_start)
@@ -161,7 +163,7 @@ class PhotometryCTADialog(ExportMixin, QDialog):
 
         zscore_layout.addWidget(QLabel("End (s):"))
         self._spin_baseline_end = QDoubleSpinBox()
-        self._spin_baseline_end.setRange(-120.0, 120.0)
+        self._spin_baseline_end.setRange(-99999.9, 99999.9)
         self._spin_baseline_end.setSingleStep(0.25)
         self._spin_baseline_end.setDecimals(2)
         self._spin_baseline_end.setValue(self._viewmodel.config.baseline_end)
@@ -516,6 +518,20 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         if self._time_array is None or len(self._signals) == 0:
             QMessageBox.warning(self, "No Data", "No signal data available for CTA calculation.")
             return
+
+        # Warn about large windows (traces are serialized to JSON — very large
+        # windows can use significant memory). Future: downsample traces for storage.
+        total_window = self._spin_before.value() + self._spin_after.value()
+        if total_window > 120:
+            reply = QMessageBox.question(
+                self, "Large Time Window",
+                f"Total window is {total_window:.0f}s. Large windows may use "
+                f"significant memory and slow down saving.\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         # Check if any withdrawal alignment is selected
         alignments = self._get_selected_alignments()

@@ -79,6 +79,13 @@ class CTAService:
         window_before = float(config.window_before)
         window_after = float(config.window_after)
         n_points = int(config.n_points)  # Ensure integer for np.linspace
+
+        # Auto-scale n_points for large windows to maintain ~16.7 Hz resolution
+        # Default: 1000 points over 60s = 16.7 pts/s
+        total_window = window_before + window_after
+        min_points = int(total_window * 16.7)
+        if min_points > n_points:
+            n_points = min_points
         zscore_baseline = config.zscore_baseline
         baseline_start = float(config.baseline_start)
         baseline_end = float(config.baseline_end)
