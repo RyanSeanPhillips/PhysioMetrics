@@ -2959,7 +2959,8 @@ class ExportManager:
                             "stimulus",
                             f"{start_time:.9g}",
                             f"{end_time:.9g}" if np.isfinite(end_time) else "",
-                            f"{duration:.9g}" if np.isfinite(duration) else ""
+                            f"{duration:.9g}" if np.isfinite(duration) else "",
+                            "", "",
                         ])
 
                 # Apnea and eupnea events (only if we have breath data)
@@ -3019,7 +3020,8 @@ class ExportManager:
                             "apnea",
                             f"{start_time:.9g}",
                             f"{end_time:.9g}",
-                            f"{duration:.9g}"
+                            f"{duration:.9g}",
+                            "", "",
                         ])
 
                     # Add eupnea intervals
@@ -3040,7 +3042,8 @@ class ExportManager:
                             "eupnea",
                             f"{start_time:.9g}",
                             f"{end_time:.9g}",
-                            f"{duration:.9g}"
+                            f"{duration:.9g}",
+                            "", "",
                         ])
 
                 # Add sniffing bout intervals (GMM-based)
@@ -3063,7 +3066,8 @@ class ExportManager:
                         "sniffing",
                         f"{start_time_rel:.9g}",
                         f"{end_time_rel:.9g}",
-                        f"{duration:.9g}"
+                        f"{duration:.9g}",
+                        "", "",
                     ])
 
                 # Add eupnea regions (GMM-based) if available
@@ -3083,10 +3087,11 @@ class ExportManager:
 
                     events_rows.append([
                         str(s + 1),
-                        "eupnea_gmm",  # Different label to distinguish from frequency-based eupnea
+                        "eupnea_gmm",
                         f"{start_time_rel:.9g}",
                         f"{end_time_rel:.9g}",
-                        f"{duration:.9g}"
+                        f"{duration:.9g}",
+                        "", "",
                     ])
 
                 # Add bout annotations (user-marked event channel markers)
@@ -3110,7 +3115,8 @@ class ExportManager:
                         "bout",
                         f"{start_time_rel:.9g}",
                         f"{end_time_rel:.9g}",
-                        f"{duration:.9g}"
+                        f"{duration:.9g}",
+                        "", "",
                     ])
 
             # Add MVVM event markers (user-placed markers from the event marker system)
@@ -3141,15 +3147,17 @@ class ExportManager:
                         event_type,
                         f"{start_time_rel:.9g}",
                         f"{end_time_rel:.9g}",
-                        f"{duration:.9g}"
+                        f"{duration:.9g}",
+                        marker.condition or "",
+                        marker.notes or "",
                     ])
 
             # Optionally write events CSV using pandas
             import pandas as pd
             df_events = pd.DataFrame(
                 events_rows,
-                columns=["sweep", "event_type", "start_time", "end_time", "duration"]
-            ) if events_rows else pd.DataFrame(columns=["sweep", "event_type", "start_time", "end_time", "duration"])
+                columns=["sweep", "event_type", "start_time", "end_time", "duration", "condition", "notes"]
+            ) if events_rows else pd.DataFrame(columns=["sweep", "event_type", "start_time", "end_time", "duration", "condition", "notes"])
             if save_events_csv:
                 df_events.to_csv(events_path, index=False, na_rep='')
 

@@ -763,6 +763,22 @@ class MarkerRenderer:
         # NOTE: Do NOT clear intersection lines here - they should persist during drag
         # They are cleared explicitly when drag ends in _handle_region_moved/_handle_line_moved
 
+    @staticmethod
+    def _build_tooltip(marker: EventMarker) -> str:
+        """Build a tooltip string for a marker."""
+        cat = marker.category.replace('_', ' ').title()
+        label = marker.label.replace('_', ' ').title()
+        parts = [f"{cat}: {label}"]
+        if marker.condition:
+            parts.append(f"Condition: {marker.condition}")
+        if marker.is_paired and marker.end_time is not None:
+            parts.append(f"{marker.start_time:.3f}s - {marker.end_time:.3f}s ({marker.duration:.3f}s)")
+        else:
+            parts.append(f"{marker.start_time:.3f}s")
+        if marker.notes:
+            parts.append(f"\n{marker.notes}")
+        return "\n".join(parts)
+
     def _render_marker(self, marker: EventMarker) -> None:
         """Render a single marker."""
         color = self._viewmodel.get_color_for_marker(marker)
@@ -809,6 +825,7 @@ class MarkerRenderer:
             )
             line.setZValue(1000)  # High z-value to ensure visibility
             line.marker_id = marker.id
+            line.setToolTip(self._build_tooltip(marker))
             # Widen hover/grab area without affecting visual line width
             line._maxMarkerSize = 20
 
@@ -964,6 +981,7 @@ class MarkerRenderer:
             )
             region.setZValue(900)  # High z-value for visibility
             region.marker_id = marker.id
+            region.setToolTip(self._build_tooltip(marker))
 
             # Customize the internal edge lines' hover pen to match single markers
             # and increase the grab tolerance (hoverable width around the line)

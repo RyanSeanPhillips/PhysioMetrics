@@ -119,6 +119,22 @@ CREATE TABLE IF NOT EXISTS backups (
     created_at       TEXT NOT NULL
 );
 
+-- Experiment groups (for consolidation/comparison)
+CREATE TABLE IF NOT EXISTS groups (
+    group_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_name       TEXT NOT NULL,
+    group_path       TEXT NOT NULL DEFAULT '',
+    metadata_json    TEXT DEFAULT '{}',
+    n_experiments    INTEGER DEFAULT 0,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id         INTEGER NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    experiment_id    INTEGER NOT NULL REFERENCES experiments(experiment_id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, experiment_id)
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version          INTEGER PRIMARY KEY,
     applied_at       TEXT NOT NULL
@@ -1105,6 +1121,66 @@ class ExperimentStore:
             "SELECT * FROM backups ORDER BY created_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Groups (for consolidation/comparison)
+    # ------------------------------------------------------------------
+
+    def create_group(self, group_name: str, experiment_ids: List[int],
+                     group_path: str = '', metadata: Optional[Dict] = None) -> int:
+        """Create a group linking multiple experiments. Returns group_id."""
+        now = _now()
+        cur = self._conn.execute(
+            "INSERT INTO groups (group_name, group_path, metadata_json, n_experiments, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_name, group_path, json.dumps(metadata or {}), len(experiment_ids), now),
+        )
+        group_id = cur.lastrowid
+        for eid in experiment_ids:
+            try:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO group_members (group_id, experiment_id) VALUES (?, ?)",
+                    (group_id, eid),
+                )
+            except sqlite3.IntegrityError:
+                pass
+        return group_id
+
+    def get_groups(self) -> List[Dict[str, Any]]:
+        """List all groups with member count."""
+        rows = self._conn.execute(
+            "SELECT g.*, COUNT(gm.experiment_id) as member_count "
+            "FROM groups g LEFT JOIN group_members gm ON g.group_id = gm.group_id "
+            "GROUP BY g.group_id ORDER BY g.created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_group_members(self, group_id: int) -> List[Dict[str, Any]]:
+        """Get experiments belonging to a group."""
+        rows = self._conn.execute(
+            "SELECT e.* FROM experiments e "
+            "JOIN group_members gm ON e.experiment_id = gm.experiment_id "
+            "WHERE gm.group_id = ?",
+            (group_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_group(self, group_id: int) -> None:
+        """Delete a group and its member links (not the experiments themselves)."""
+        self._conn.execute("DELETE FROM group_members WHERE group_id = ?", (group_id,))
+        self._conn.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
+
+    def update_group(self, group_id: int, updates: Dict[str, Any]) -> None:
+        """Update group metadata."""
+        allowed = {"group_name", "group_path", "metadata_json", "n_experiments"}
+        valid = {k: v for k, v in updates.items() if k in allowed}
+        if not valid:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in valid)
+        self._conn.execute(
+            f"UPDATE groups SET {set_clause} WHERE group_id = ?",
+            (*valid.values(), group_id),
+        )
 
     # ------------------------------------------------------------------
     # Utilities

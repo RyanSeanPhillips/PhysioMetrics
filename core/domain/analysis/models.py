@@ -278,3 +278,25 @@ class AnalysisResult:
             "error": self.error,
             "warnings": self.warnings,
         }
+
+
+@dataclass
+class GroupResult:
+    """Result from grouping multiple experiments.
+
+    Holds the mean +/- SEM for continuous metrics aligned to a common time grid.
+    Saved as group .npz files for comparison plotting.
+    """
+
+    group_name: str
+    group_path: Optional[Path] = None
+    source_files: List[str] = field(default_factory=list)
+    source_animal_ids: List[str] = field(default_factory=list)
+    n_experiments: int = 0
+    metric_keys: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None

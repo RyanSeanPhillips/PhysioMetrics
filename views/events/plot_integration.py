@@ -8,7 +8,7 @@ and the existing plot backend.
 
 from typing import Optional, Callable, List, Tuple
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtWidgets import QMenu, QColorDialog
+from PyQt6.QtWidgets import QMenu, QColorDialog, QInputDialog
 from PyQt6.QtGui import QCursor, QColor, QPen
 import pyqtgraph as pg
 
@@ -313,6 +313,11 @@ class EventMarkerPlotIntegration(QObject):
                 self._update_preview_position(event.scenePos())
 
         elif event.type() == QEvent.Type.KeyPress:
+            # Ignore keyboard shortcuts when a dialog (notes, edit, color picker) is active
+            active_modal = QApplication.activeModalWidget()
+            if active_modal is not None:
+                return False
+
             key = event.key()
             modifiers = event.modifiers()
 
@@ -1258,17 +1263,28 @@ class EventMarkerPlotIntegration(QObject):
                 writer.writerow([])  # Blank line between channels
 
     def _on_edit_marker_requested(self, marker_id: str) -> None:
-        """Handle edit marker request."""
-        # TODO: Show edit dialog
-        pass
+        """Handle edit marker request — opens a dialog to edit notes and color."""
+        marker = self._viewmodel.store.get(marker_id)
+        if marker is None:
+            return
+
+        from dialogs.marker_edit_dialog import MarkerEditDialog
+        dialog = MarkerEditDialog(marker, self._viewmodel, parent=None)
+        if dialog.exec() == MarkerEditDialog.DialogCode.Accepted:
+            kwargs = dialog.get_changes()
+            if kwargs:
+                self._viewmodel.update_marker(marker_id, **kwargs)
+                self.refresh()
 
     def _on_category_changed(self, marker_id: str, new_category: str) -> None:
         """Handle category change."""
         self._viewmodel.update_marker(marker_id, category=new_category)
+        self.refresh()
 
     def _on_label_changed(self, marker_id: str, new_label: str) -> None:
         """Handle label change."""
         self._viewmodel.update_marker(marker_id, label=new_label)
+        self.refresh()
 
     def _on_color_requested(self, marker_id: str) -> None:
         """Handle color picker request."""
@@ -1302,8 +1318,20 @@ class EventMarkerPlotIntegration(QObject):
 
     def _on_note_requested(self, marker_id: str) -> None:
         """Handle add note request."""
-        # TODO: Show note dialog
-        pass
+        marker = self._viewmodel.store.get(marker_id)
+        if marker is None:
+            return
+
+        current_notes = marker.notes or ""
+        text, ok = QInputDialog.getMultiLineText(
+            None,
+            "Marker Notes",
+            f"Notes for {marker.category}/{marker.label}:",
+            current_notes,
+        )
+        if ok:
+            self._viewmodel.update_marker(marker_id, notes=text)
+            self.refresh()
 
     def _on_convert_requested(self, marker_id: str, new_type: str) -> None:
         """Handle convert type request."""

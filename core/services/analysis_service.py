@@ -592,11 +592,46 @@ def analyze_file(
 
                     all_metrics_rows.append(row)
 
-        # 7. Compute summary statistics
+        # 7. Compute continuous y2 metrics per sweep (for grouping/consolidation)
+        y2_by_sweep = {}  # sweep_idx -> {metric_key: 1D array}
+        _Y2_METRICS = {
+            'if': 'compute_if',
+            'ti': 'compute_ti',
+            'te': 'compute_te',
+            'amp_insp': 'compute_amp_insp',
+            'amp_exp': 'compute_amp_exp',
+            'area_insp': 'compute_area_insp',
+            'area_exp': 'compute_area_exp',
+            'vent_proxy': 'compute_vent_proxy',
+        }
+        try:
+            from core import metrics as _metrics_mod
+            for s in range(n_sweeps):
+                det = all_results[s]
+                labeled_idx = det["labeled_indices"]
+                if len(labeled_idx) < 2:
+                    continue
+                labeled_br = det.get("labeled_breaths", {})
+                onsets = labeled_br.get("onsets", np.array([]))
+                offsets = labeled_br.get("offsets", np.array([]))
+                expmins = labeled_br.get("expmins", np.array([]))
+                expoffs = labeled_br.get("expoffs", np.array([]))
+                if len(onsets) < 2:
+                    continue
+                y_proc = get_processed_signal(Y[:, s], sr_hz, fc)
+                sweep_y2 = {}
+                for key, fn_name in _Y2_METRICS.items():
+                    fn = getattr(_metrics_mod, fn_name)
+                    sweep_y2[key] = fn(t, y_proc, sr_hz, labeled_idx, onsets, offsets, expmins, expoffs)
+                y2_by_sweep[s] = sweep_y2
+        except Exception as e:
+            _log(f"Warning: y2 metric computation failed: {e}")
+
+        # 8. Compute summary statistics
         summary = _compute_summary(all_metrics_rows, n_sweeps)
         result.summary = summary
 
-        # 8. Save .pmx session file
+        # 9. Save .pmx session file
         if save_session:
             from core.npz_io import get_pmx_path, save_batch_result
 
@@ -620,11 +655,12 @@ def analyze_file(
                 summary=summary,
                 event_markers=existing_event_markers,
                 stim_chan=stim_ch if stim_ch else "None",
+                y2_by_sweep=y2_by_sweep,
             )
             result.session_path = pmx_path
             _log(f"Saved {pmx_path.name}")
 
-        # 9. Save results CSV (skip in dry-run mode)
+        # 10. Save results CSV (skip in dry-run mode)
         if all_metrics_rows and write_csv:
             import csv
             csv_path = output_dir / f"{path.stem}_results.csv"

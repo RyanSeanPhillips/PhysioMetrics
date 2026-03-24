@@ -2426,18 +2426,21 @@ class DataAssemblyWidget(QWidget):
         if self._ai_data is not None and self._timestamps is not None:
             # Get AI timestamps and convert to seconds
             ai_time_raw = self._timestamps.flatten()
-            ai_time_sec = ai_time_raw / 1000.0  # Always ms to seconds
-            ai_duration = ai_time_sec[-1] - ai_time_sec[0]
-            ai_sample_rate = len(ai_time_raw) / ai_duration if ai_duration > 0 else 1000.0
-            print(f"[Photometry] AI data available: {len(ai_time_raw)} samples, "
-                  f"{ai_duration:.1f}s duration, SR ~{ai_sample_rate:.1f} Hz")
-
-            # Use AI timebase if it has significantly higher sample rate
-            if ai_sample_rate > fp_sample_rate * 2:
-                use_ai_timebase = True
-                print(f"[Photometry] Using AI timebase ({ai_sample_rate:.1f} Hz) - upsampling photometry")
+            if len(ai_time_raw) < 2:
+                print(f"[Photometry] Timestamps array too short ({len(ai_time_raw)} samples), skipping AI timebase")
             else:
-                print(f"[Photometry] AI sample rate not higher, using photometry timebase")
+                ai_time_sec = ai_time_raw / 1000.0  # Always ms to seconds
+                ai_duration = ai_time_sec[-1] - ai_time_sec[0]
+                ai_sample_rate = len(ai_time_raw) / ai_duration if ai_duration > 0 else 1000.0
+                print(f"[Photometry] AI data available: {len(ai_time_raw)} samples, "
+                      f"{ai_duration:.1f}s duration, SR ~{ai_sample_rate:.1f} Hz")
+
+                # Use AI timebase if it has significantly higher sample rate
+                if ai_sample_rate > fp_sample_rate * 2:
+                    use_ai_timebase = True
+                    print(f"[Photometry] Using AI timebase ({ai_sample_rate:.1f} Hz) - upsampling photometry")
+                else:
+                    print(f"[Photometry] AI sample rate not higher, using photometry timebase")
 
         # Determine the common time array based on available data
         if use_ai_timebase and ai_time_sec is not None:
@@ -2475,6 +2478,11 @@ class DataAssemblyWidget(QWidget):
             common_time = np.linspace(0, duration, n_points)
 
             print(f"[Photometry] Common time (FP-based): {duration:.1f}s, {n_points} points at {sample_rate:.1f} Hz")
+
+        if n_points <= 0 or len(common_time) == 0:
+            print(f"[Photometry] Cannot preprocess: no valid time range (duration={duration:.3f}s, n_points={n_points})")
+            self._preprocessed = None
+            return
 
         # Get ALL fiber columns (not just selected - preprocess everything)
         fiber_columns = [col for col in data.columns
@@ -2537,52 +2545,58 @@ class DataAssemblyWidget(QWidget):
             # ai_time_sec already computed above if AI data available
             if ai_time_sec is None:
                 ai_time_raw = self._timestamps.flatten()
-                ai_time_sec = ai_time_raw / 1000.0
+                if len(ai_time_raw) < 2:
+                    ai_time_sec = None
+                else:
+                    ai_time_sec = ai_time_raw / 1000.0
 
-            # Normalize AI time to start at 0
-            ai_time_norm = ai_time_sec - ai_time_sec[0]
-
-            for col_idx, col_name in enumerate(self._ai_data.columns):
-                ai_signal = self._ai_data[col_name].values
-
-                # Handle length mismatch between timestamps and AI data
-                min_len = min(len(ai_time_norm), len(ai_signal))
-                if min_len < 10:
-                    continue
-
-                try:
-                    if use_ai_timebase:
-                        # Using AI timebase - just extract the samples in the common time range
-                        # Find indices that fall within common_time range
-                        start_idx = np.searchsorted(ai_time_norm[:min_len], common_time[0])
-                        end_idx = np.searchsorted(ai_time_norm[:min_len], common_time[-1])
-
-                        # Extract and resample to exact common_time length if needed
-                        ai_segment = ai_signal[start_idx:end_idx]
-                        ai_time_segment = ai_time_norm[start_idx:end_idx]
-
-                        # Interpolate to exact common_time points (should be very close, minimal interpolation)
-                        if len(ai_segment) > 0:
-                            ai_interp = np.interp(common_time, ai_time_segment, ai_segment)
-                        else:
-                            continue
-                    else:
-                        # Using FP timebase - downsample AI to match
-                        ai_interp = np.interp(
-                            common_time,
-                            ai_time_norm[:min_len],
-                            ai_signal[:min_len]
-                        )
-
-                    ai_channels[col_idx] = ai_interp
-                except Exception as e:
-                    print(f"[Photometry] Error processing AI channel {col_idx}: {e}")
-                    continue
-
-            if use_ai_timebase:
-                print(f"[Photometry] Extracted {len(ai_channels)} AI channels at native {ai_sample_rate:.1f} Hz")
+            if ai_time_sec is None or len(ai_time_sec) < 2:
+                print("[Photometry] Skipping AI channels: timestamps too short")
             else:
-                print(f"[Photometry] Downsampled {len(ai_channels)} AI channels to {sample_rate:.1f} Hz")
+                # Normalize AI time to start at 0
+                ai_time_norm = ai_time_sec - ai_time_sec[0]
+
+                for col_idx, col_name in enumerate(self._ai_data.columns):
+                    ai_signal = self._ai_data[col_name].values
+
+                    # Handle length mismatch between timestamps and AI data
+                    min_len = min(len(ai_time_norm), len(ai_signal))
+                    if min_len < 10:
+                        continue
+
+                    try:
+                        if use_ai_timebase:
+                            # Using AI timebase - just extract the samples in the common time range
+                            # Find indices that fall within common_time range
+                            start_idx = np.searchsorted(ai_time_norm[:min_len], common_time[0])
+                            end_idx = np.searchsorted(ai_time_norm[:min_len], common_time[-1])
+
+                            # Extract and resample to exact common_time length if needed
+                            ai_segment = ai_signal[start_idx:end_idx]
+                            ai_time_segment = ai_time_norm[start_idx:end_idx]
+
+                            # Interpolate to exact common_time points (should be very close, minimal interpolation)
+                            if len(ai_segment) > 0:
+                                ai_interp = np.interp(common_time, ai_time_segment, ai_segment)
+                            else:
+                                continue
+                        else:
+                            # Using FP timebase - downsample AI to match
+                            ai_interp = np.interp(
+                                common_time,
+                                ai_time_norm[:min_len],
+                                ai_signal[:min_len]
+                            )
+
+                        ai_channels[col_idx] = ai_interp
+                    except Exception as e:
+                        print(f"[Photometry] Error processing AI channel {col_idx}: {e}")
+                        continue
+
+                if use_ai_timebase:
+                    print(f"[Photometry] Extracted {len(ai_channels)} AI channels at native {ai_sample_rate:.1f} Hz")
+                else:
+                    print(f"[Photometry] Downsampled {len(ai_channels)} AI channels to {sample_rate:.1f} Hz")
 
         # Store preprocessed data
         self._preprocessed = {

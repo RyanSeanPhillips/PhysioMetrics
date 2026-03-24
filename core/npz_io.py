@@ -120,6 +120,7 @@ def save_batch_result(
     event_markers: Optional[Dict] = None,
     analysis_type: str = "pleth",
     stim_chan: str = "None",
+    y2_by_sweep: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
 ) -> Path:
     """Save batch analysis results to a .pmx (PhysioMetrics eXperiment) file.
 
@@ -250,6 +251,17 @@ def save_batch_result(
     data["notch_filter_lower"] = fc.notch_lower if fc.notch_lower is not None else 0.0
     data["notch_filter_upper"] = fc.notch_upper if fc.notch_upper is not None else 0.0
     data["apnea_threshold"] = 0.5
+
+    # ── Continuous y2 metrics (for grouping/consolidation) ─────────
+    if y2_by_sweep:
+        y2_sweep_indices = sorted(y2_by_sweep.keys())
+        data["y2_continuous_sweep_indices"] = np.array(y2_sweep_indices, dtype=int)
+        # Collect all metric keys from first sweep
+        first_keys = list(y2_by_sweep[y2_sweep_indices[0]].keys())
+        data["y2_continuous_metric_keys_json"] = json.dumps(first_keys)
+        for s in y2_sweep_indices:
+            for key, arr in y2_by_sweep[s].items():
+                data[f"y2c_{key}_sweep_{s}"] = arr
 
     # ── Event markers (carried over from existing .pmx on re-analyze) ─
     if event_markers is not None:
@@ -863,6 +875,20 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             for sweep_idx in y2_indices:
                 y2_vals = data[f'y2_values_sweep_{sweep_idx}']
                 state.y2_values_by_sweep[int(sweep_idx)] = y2_vals
+
+    # ===== CONTINUOUS Y2 METRICS (batch-computed, for grouping) =====
+    if 'y2_continuous_sweep_indices' in data:
+        y2c_indices = data['y2_continuous_sweep_indices']
+        y2c_keys = json.loads(str(data['y2_continuous_metric_keys_json']))
+        state.y2_continuous_by_sweep = {}
+        for sweep_idx in y2c_indices:
+            s = int(sweep_idx)
+            sweep_data = {}
+            for key in y2c_keys:
+                arr_key = f'y2c_{key}_sweep_{sweep_idx}'
+                if arr_key in data:
+                    sweep_data[key] = data[arr_key]
+            state.y2_continuous_by_sweep[s] = sweep_data
 
     # ===== STIMULUS DETECTION (per-sweep) =====
     if 'stim_onset_sweep_indices' in data:

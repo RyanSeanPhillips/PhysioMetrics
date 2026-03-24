@@ -2953,6 +2953,7 @@ class MainWindow(QMainWindow):
             'views.events.marker_editor',
             'views.events.context_menu',
             'views.events.plot_integration',
+            'dialogs.marker_edit_dialog',
             'editing.editing_modes',
             'editing.event_marking_mode',
 
@@ -4136,8 +4137,14 @@ class MainWindow(QMainWindow):
         chain: _populate_channel_manager -> _apply_auto_detection ->
         on_analyze_channel_changed. Those methods clear analysis data,
         so we replicate their view-setup effects without the clearing.
+
+        Each step is wrapped in try/except so one failure doesn't block
+        the rest (especially the critical redraw at the end).
         """
         st = self.state
+        n_peaks = sum(len(v) for v in st.peaks_by_sweep.values())
+        print(f"[session-restore] Starting restore: {n_peaks} peaks, "
+              f"analyze_chan={st.analyze_chan}, sweeps={list(st.peaks_by_sweep.keys())}")
 
         # 1. Channel combos (restores dropdown selections without triggering handlers)
         self._populate_channel_combos_npz(st)
@@ -4151,15 +4158,18 @@ class MainWindow(QMainWindow):
                 self.channel_manager.set_channel_type(st.analyze_chan, "Pleth")
 
         # 4. Stim detection -- auto-detect from signal if session didn't save one
-        auto = self._file_load_service.auto_detect_channels(st.sweeps, st.channel_names)
-        detected_stim = auto.stim_channel if auto else None
-        if detected_stim and (not st.stim_chan or st.stim_chan == 'None'):
-            st.stim_chan = detected_stim
-            if detected_stim in st.channel_names:
-                stim_idx = st.channel_names.index(detected_stim) + 1
-                self.StimChanSelect.blockSignals(True)
-                self.StimChanSelect.setCurrentIndex(stim_idx)
-                self.StimChanSelect.blockSignals(False)
+        try:
+            auto = self._file_load_service.auto_detect_channels(st.sweeps, st.channel_names)
+            detected_stim = auto.stim_channel if auto else None
+            if detected_stim and (not st.stim_chan or st.stim_chan == 'None'):
+                st.stim_chan = detected_stim
+                if detected_stim in st.channel_names:
+                    stim_idx = st.channel_names.index(detected_stim) + 1
+                    self.StimChanSelect.blockSignals(True)
+                    self.StimChanSelect.setCurrentIndex(stim_idx)
+                    self.StimChanSelect.blockSignals(False)
+        except Exception as e:
+            print(f"[session-restore] Warning: auto-detect channels failed: {e}")
 
         # Mark stim channel type
         if hasattr(self, 'channel_manager') and self.channel_manager:
@@ -4182,9 +4192,9 @@ class MainWindow(QMainWindow):
                 ch_cfg.visible = should_show
                 if ch_name in self.channel_manager._channel_rows:
                     row_widget = self.channel_manager._channel_rows[ch_name]
-                    row_widget.visibility_checkbox.blockSignals(True)
-                    row_widget.visibility_checkbox.setChecked(should_show)
-                    row_widget.visibility_checkbox.blockSignals(False)
+                    row_widget.visible_check.blockSignals(True)
+                    row_widget.visible_check.setChecked(should_show)
+                    row_widget.visible_check.blockSignals(False)
 
             self.channel_manager._update_summary()
             self.channel_manager._update_show_all_checkbox()
@@ -4193,9 +4203,19 @@ class MainWindow(QMainWindow):
         self.single_panel_mode = True
 
         # 7. Stim service -- detect stim spans for plotting
-        if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.sweeps:
-            from core.services.stim_service import StimService
-            StimService().detect_all_sweeps(st)
+        try:
+            if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.sweeps:
+                from core.services.stim_service import detect_stims_all_sweeps
+                stim_data = st.sweeps[st.stim_chan]
+                stim_results = detect_stims_all_sweeps(stim_data, st.t)
+                for s, det in stim_results.items():
+                    st.stim_onsets_by_sweep[s] = det["onsets"]
+                    st.stim_offsets_by_sweep[s] = det["offsets"]
+                    st.stim_spans_by_sweep[s] = det["spans"]
+                    if det["metrics"]:
+                        st.stim_metrics_by_sweep[s] = det["metrics"]
+        except Exception as e:
+            print(f"[session-restore] Warning: stim detection failed: {e}")
 
         # 8. Filter UI
         self.LowPass_checkBox.setChecked(st.use_low)
@@ -4241,7 +4261,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'channel_manager') and self.channel_manager:
             self.channel_manager.channels_changed.emit()
 
-        # 15. Redraw
+        # 15. Verify peaks survived restore (diagnostic)
+        n_peaks_post = sum(len(v) for v in st.peaks_by_sweep.values())
+        print(f"[session-restore] Pre-redraw check: {n_peaks_post} peaks in state")
+        if n_peaks_post == 0 and n_peaks > 0:
+            print("[session-restore] BUG: peaks were cleared during restore!")
+
+        # 16. Redraw
         self.redraw_main_plot()
 
         # 16. GMM cache

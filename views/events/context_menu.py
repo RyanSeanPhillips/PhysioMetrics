@@ -389,8 +389,9 @@ class MarkerContextMenu(QMenu):
                     lambda checked, gw=grab_w: self.grab_width_changed.emit(self._marker_id, gw)
                 )
 
-        # Add Note
-        note = self.addAction("Add Note...")
+        # Add/Edit Note
+        note_label = "Edit Note..." if marker.notes else "Add Note..."
+        note = self.addAction(note_label)
         note.triggered.connect(lambda: self.note_requested.emit(self._marker_id))
 
         self.addSeparator()
