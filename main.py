@@ -331,6 +331,12 @@ class MainWindow(QMainWindow):
         self._redraw_timer.setInterval(150)       # ms
         self._redraw_timer.timeout.connect(self.redraw_main_plot)
 
+        # Auto-save timer — debounced 30s after last edit (peak/marker change)
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(30_000)
+        self._autosave_timer.timeout.connect(self._autosave_session)
+
         # filters: commit-on-finish, not per key
         # (update_and_redraw also calls _on_filter_changed for telemetry/Apply button)
         self.LowPassVal.editingFinished.connect(self.update_and_redraw)
@@ -1582,6 +1588,8 @@ class MainWindow(QMainWindow):
         self._update_marker_count_display()
         # Refresh minimap markers
         self._refresh_minimap_markers()
+        # Schedule auto-save
+        self._schedule_autosave()
 
     def _refresh_minimap_markers(self):
         """Update just the minimap event markers without a full redraw."""
@@ -3725,9 +3733,13 @@ class MainWindow(QMainWindow):
         apnea_thresh = app_settings.get('apnea_threshold', 0.5)
 
         if hasattr(self, 'FilterOrderSpin'):
+            self.FilterOrderSpin.blockSignals(True)
             self.FilterOrderSpin.setValue(self.filter_order)
+            self.FilterOrderSpin.blockSignals(False)
         if hasattr(self, 'ApneaThresh'):
+            self.ApneaThresh.blockSignals(True)
             self.ApneaThresh.setText(str(apnea_thresh))
+            self.ApneaThresh.blockSignals(False)
 
         saved_classifier = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
         self.state.active_eupnea_sniff_classifier = saved_classifier
@@ -3741,9 +3753,13 @@ class MainWindow(QMainWindow):
         self.eup_sniff_combo.setCurrentText(dropdown_text)
         self.eup_sniff_combo.blockSignals(False)
 
+        # Restore breath-vs-noise and sigh classifiers
+        self.state.active_classifier = app_settings.get('active_classifier', 'xgboost')
+        self.state.active_sigh_classifier = app_settings.get('active_sigh_classifier', 'xgboost')
+
         print(f"[npz-load] Restored app settings: filter_order={self.filter_order}, "
               f"zscore={self.use_zscore_normalization}, notch={self.notch_filter_lower}-{self.notch_filter_upper}, "
-              f"apnea_thresh={apnea_thresh}, eupnea_sniff_classifier={saved_classifier}")
+              f"apnea_thresh={apnea_thresh}, classifiers={saved_classifier}/{self.state.active_classifier}/{self.state.active_sigh_classifier}")
 
     def load_multiple_files(self, file_paths: List[Path]):
         """Load and concatenate multiple ABF files. Validates then delegates to ViewModel."""
@@ -3906,7 +3922,9 @@ class MainWindow(QMainWindow):
                 'notch_filter_lower': self.notch_filter_lower,
                 'notch_filter_upper': self.notch_filter_upper,
                 'apnea_threshold': self._parse_float(self.ApneaThresh) or 0.5,
-                'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
+                'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier,
+                'active_classifier': self.state.active_classifier,
+                'active_sigh_classifier': self.state.active_sigh_classifier,
             }
 
             # Get event markers for persistence
@@ -3973,6 +3991,21 @@ class MainWindow(QMainWindow):
                 f"Failed to save session state:\n\n{str(e)}"
             )
 
+    def _schedule_autosave(self):
+        """Start/restart 30s debounce timer for auto-save after edits."""
+        if self.state.in_path and self.state.analyze_chan:
+            self._autosave_timer.start()
+
+    def _autosave_session(self):
+        """Silent auto-save of current session. Errors logged, never interrupt user."""
+        if not self.state.in_path or not self.state.analyze_chan:
+            return
+        try:
+            self._save_session_pmx()
+            print("[autosave] Session auto-saved")
+        except Exception as e:
+            print(f"[autosave] Failed: {e}")
+
     def _save_session_pmx(self):
         """Silent .pmx save — Ctrl+S shortcut. No dialog, just saves and shows status bar message."""
         if not self.state.in_path:
@@ -4016,7 +4049,9 @@ class MainWindow(QMainWindow):
                 'notch_filter_lower': self.notch_filter_lower,
                 'notch_filter_upper': self.notch_filter_upper,
                 'apnea_threshold': self._parse_float(self.ApneaThresh) or 0.5,
-                'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
+                'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier,
+                'active_classifier': self.state.active_classifier,
+                'active_sigh_classifier': self.state.active_sigh_classifier,
             }
 
             # Get event markers
@@ -4037,9 +4072,15 @@ class MainWindow(QMainWindow):
                 event_markers=event_markers_data,
             )
 
-            # Patch in v2 keys (schema_version, analysis_type, etc.)
-            # We reload, add keys, and re-save. This is fast for compressed NPZ.
+            # numpy savez_compressed auto-appends .npz — rename to .pmx
             import numpy as _np
+            _npz_actual = Path(str(pmx_path) + '.npz')
+            if _npz_actual.exists() and _npz_actual != pmx_path:
+                if pmx_path.exists():
+                    pmx_path.unlink()
+                _npz_actual.rename(pmx_path)
+
+            # Patch in v2 keys (schema_version, analysis_type, etc.)
             existing_data = dict(_np.load(str(pmx_path), allow_pickle=True))
             existing_data['schema_version'] = 2
             existing_data['analysis_type'] = 'pleth'
@@ -4049,7 +4090,7 @@ class MainWindow(QMainWindow):
             existing_data['metrics_json'] = '[]'
             existing_data['version'] = '2.0.0'
             _np.savez_compressed(str(pmx_path), **existing_data)
-            # numpy auto-appends .npz — rename back to .pmx
+            # Rename again after the v2 patch save
             _npz_actual = Path(str(pmx_path) + '.npz')
             if _npz_actual.exists() and _npz_actual != pmx_path:
                 if pmx_path.exists():
@@ -4217,7 +4258,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[session-restore] Warning: stim detection failed: {e}")
 
-        # 8. Filter UI
+        # 8. Filter UI — block signals to prevent update_and_redraw from
+        #    clearing all analysis data (peaks, breaths, sighs, etc.)
+        self.LowPass_checkBox.blockSignals(True)
+        self.HighPass_checkBox.blockSignals(True)
+        self.InvertSignal_checkBox.blockSignals(True)
+
         self.LowPass_checkBox.setChecked(st.use_low)
         self.HighPass_checkBox.setChecked(st.use_high)
         self.InvertSignal_checkBox.setChecked(st.use_invert)
@@ -4225,6 +4271,10 @@ class MainWindow(QMainWindow):
             self.LowPassVal.setText(str(st.low_hz))
         if st.high_hz:
             self.HighPassVal.setText(str(st.high_hz))
+
+        self.LowPass_checkBox.blockSignals(False)
+        self.HighPass_checkBox.blockSignals(False)
+        self.InvertSignal_checkBox.blockSignals(False)
 
         # 9. App settings
         if npz_result.app_settings is not None:
@@ -4267,7 +4317,10 @@ class MainWindow(QMainWindow):
         if n_peaks_post == 0 and n_peaks > 0:
             print("[session-restore] BUG: peaks were cleared during restore!")
 
-        # 16. Redraw
+        # 16. Reset view to full sweep (clear stale xlim from previous session)
+        self.plot_host.clear_saved_view()
+
+        # 17. Redraw
         self.redraw_main_plot()
 
         # 16. GMM cache
@@ -5008,7 +5061,7 @@ class MainWindow(QMainWindow):
             return Y[:, s].copy()
 
         key = (chan, s, st.use_low, st.low_hz, st.use_high, st.high_hz, st.use_mean_sub, st.mean_val, st.use_invert,
-               self.notch_filter_lower, self.notch_filter_upper, self.use_zscore_normalization)
+               self.filter_order, self.notch_filter_lower, self.notch_filter_upper, self.use_zscore_normalization)
         if key in st.proc_cache:
             return st.proc_cache[key]
 
@@ -6031,6 +6084,9 @@ class MainWindow(QMainWindow):
                                  prominence=prom)
 
         self._log_status_message(f"Peak detection complete ({t_elapsed:.1f}s)", 3000)
+
+        # Schedule auto-save after detection
+        self._schedule_autosave()
 
         # Refresh GMM tab if it was marked for refresh after channel change
         # (Peak Detection tab was already refreshed after auto-detect)
@@ -9330,8 +9386,9 @@ class MainWindow(QMainWindow):
             )
 
         from core.domain.analysis.models import AnalysisConfig
+        config = AnalysisConfig.from_app_state(self.state, self)
         exp_dicts = [exp for _, exp in experiments]
-        self._batch_vm.run_batch(exp_dicts, AnalysisConfig(), dry_run=False, save=True)
+        self._batch_vm.run_batch(exp_dicts, config, dry_run=False, save=True)
 
     def _on_batch_cancel_clicked(self):
         """Cancel the running batch analysis."""

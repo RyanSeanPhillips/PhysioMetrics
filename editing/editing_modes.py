@@ -55,6 +55,16 @@ class EditingModes:
         self._update_peaks = cb.get('update_peaks', getattr(parent_window, 'update_peaks', None))
         self._is_auto_gmm_enabled = cb.get('is_auto_gmm_enabled', lambda: getattr(parent_window, 'auto_gmm_enabled', False))
 
+        # Wrap _redraw to also schedule auto-save (every _redraw in editing_modes follows an edit)
+        _raw_redraw = self._redraw
+        _autosave_fn = cb.get('schedule_autosave', getattr(parent_window, '_schedule_autosave', None))
+        if _autosave_fn:
+            def _redraw_and_autosave():
+                if _raw_redraw:
+                    _raw_redraw()
+                _autosave_fn()
+            self._redraw = _redraw_and_autosave
+
         # Buttons dict
         btn = buttons or {}
         self._btn_add_peaks = btn.get('addPeaks', getattr(parent_window, 'addPeaksButton', None))

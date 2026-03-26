@@ -251,6 +251,9 @@ def save_batch_result(
     data["notch_filter_lower"] = fc.notch_lower if fc.notch_lower is not None else 0.0
     data["notch_filter_upper"] = fc.notch_upper if fc.notch_upper is not None else 0.0
     data["apnea_threshold"] = 0.5
+    data["active_classifier"] = config.active_classifier
+    data["active_eupnea_sniff_classifier"] = config.active_eupnea_sniff_classifier
+    data["active_sigh_classifier"] = config.active_sigh_classifier
 
     # ── Continuous y2 metrics (for grouping/consolidation) ─────────
     if y2_by_sweep:
@@ -400,6 +403,15 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             # Convert list of dicts to JSON
             data[f'peak_metrics_sweep_{sweep_idx}_json'] = json.dumps(metrics_list)
 
+    # ===== CURRENT PEAK METRICS (edited, for Y2 plotting) =====
+    if hasattr(state, 'current_peak_metrics_by_sweep') and state.current_peak_metrics_by_sweep:
+        cur_metrics_sweep_indices = sorted(state.current_peak_metrics_by_sweep.keys())
+        data['current_peak_metrics_sweep_indices'] = np.array(cur_metrics_sweep_indices, dtype=int)
+
+        for sweep_idx in cur_metrics_sweep_indices:
+            metrics_list = state.current_peak_metrics_by_sweep[sweep_idx]
+            data[f'current_peak_metrics_sweep_{sweep_idx}_json'] = json.dumps(metrics_list)
+
     # ===== BREATH FEATURES (per-sweep) =====
     # Each sweep's breath dict contains onsets, offsets, expmins, expoffs
     breath_sweep_indices = sorted(state.breath_by_sweep.keys())
@@ -497,6 +509,8 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         data['notch_filter_upper'] = app_settings.get('notch_filter_upper', 0.0) if app_settings.get('notch_filter_upper') is not None else 0.0
         data['apnea_threshold'] = app_settings.get('apnea_threshold', 0.5)
         data['active_eupnea_sniff_classifier'] = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
+        data['active_classifier'] = app_settings.get('active_classifier', 'xgboost')
+        data['active_sigh_classifier'] = app_settings.get('active_sigh_classifier', 'xgboost')
     else:
         data['has_app_settings'] = False
 
@@ -770,6 +784,16 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             metrics_list = json.loads(metrics_json)
             state.peak_metrics_by_sweep[int(sweep_idx)] = metrics_list
 
+    # ===== CURRENT PEAK METRICS (edited, for Y2 plotting) =====
+    if 'current_peak_metrics_sweep_indices' in data:
+        cur_metrics_indices = data['current_peak_metrics_sweep_indices']
+        for sweep_idx in cur_metrics_indices:
+            key = f'current_peak_metrics_sweep_{sweep_idx}_json'
+            if key in data:
+                metrics_json = str(data[key])
+                metrics_list = json.loads(metrics_json)
+                state.current_peak_metrics_by_sweep[int(sweep_idx)] = metrics_list
+
     # ===== BREATH FEATURES (per-sweep) =====
     if 'breath_sweep_indices' in data:
         breath_indices = data['breath_sweep_indices']
@@ -860,8 +884,13 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             'notch_filter_lower': notch_lower if notch_lower != 0.0 else None,
             'notch_filter_upper': notch_upper if notch_upper != 0.0 else None,
             'apnea_threshold': float(data['apnea_threshold']),
-            'active_eupnea_sniff_classifier': str(data.get('active_eupnea_sniff_classifier', 'gmm'))
+            'active_eupnea_sniff_classifier': str(data.get('active_eupnea_sniff_classifier', 'gmm')),
+            'active_classifier': str(data.get('active_classifier', 'xgboost')),
+            'active_sigh_classifier': str(data.get('active_sigh_classifier', 'xgboost')),
         }
+        # Also set on state directly so they're available before _restore_app_settings runs
+        state.active_classifier = app_settings['active_classifier']
+        state.active_sigh_classifier = app_settings['active_sigh_classifier']
 
     # ===== Y2 METRICS =====
     if 'y2_metric_key' in data:
