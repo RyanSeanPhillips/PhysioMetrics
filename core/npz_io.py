@@ -162,6 +162,7 @@ def save_batch_result(
     data["saved_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["original_file_path"] = str(original_file)
     data["sr_hz"] = sr_hz
+    data["t"] = t
     data["analyze_chan"] = channel
     data["stim_chan"] = stim_chan
     data["event_channel"] = "None"
@@ -334,9 +335,10 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             safe_name = chan_name.replace(' ', '_').replace('/', '_')
             data[f'sweeps_{safe_name}'] = sweep_data
 
-        data['t'] = state.t
         data['channel_names'] = np.array(state.channel_names, dtype=object)
 
+    # Always save time array and sample rate (needed for grouping/consolidation)
+    data['t'] = state.t
     data['sr_hz'] = state.sr_hz
 
     # ===== CHANNEL SELECTIONS =====

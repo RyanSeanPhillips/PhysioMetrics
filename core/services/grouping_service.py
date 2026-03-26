@@ -51,7 +51,12 @@ def _load_y2_from_pmx(pmx_path: Path) -> Dict[str, Any]:
     # Load y2 continuous metrics
     y2 = {}  # metric_key -> list of 1D arrays (one per sweep)
     if "y2_continuous_sweep_indices" not in data:
-        raise ValueError(f"No y2 continuous metrics in {pmx_path.name} — re-run batch analysis")
+        available_keys = [k for k in data.files if 'y2' in k.lower()]
+        raise ValueError(
+            f"No y2 continuous metrics in {pmx_path.name} — re-run batch analysis.\n"
+            f"Available y2-related keys: {available_keys}\n"
+            f"Total keys: {len(data.files)}, has t={('t' in data.files)}, has sr_hz={('sr_hz' in data.files)}"
+        )
 
     y2c_indices = data["y2_continuous_sweep_indices"]
     y2c_keys = json.loads(str(data["y2_continuous_metric_keys_json"]))

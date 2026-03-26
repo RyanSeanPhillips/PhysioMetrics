@@ -1847,12 +1847,23 @@ class ProjectBuilderManager:
 
         group_name = name.strip()
 
-        # Run grouping service
+        # Run grouping service with progress dialog
         from core.services.grouping_service import create_group
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
 
         # Output to physiometrics/ next to first .pmx
         output_dir = pmx_paths[0].parent
         print(f"[grouping] Creating group '{group_name}' from {len(pmx_paths)} experiments...")
+
+        progress = QProgressDialog(
+            f"Creating group '{group_name}'...\nLoading {len(pmx_paths)} experiments",
+            None, 0, 0, self.mw,
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
 
         result = create_group(
             pmx_paths=pmx_paths,
@@ -1861,6 +1872,8 @@ class ProjectBuilderManager:
             metadata=metadata_sample,
             animal_ids=animal_ids,
         )
+
+        progress.close()
 
         if not result.success:
             QMessageBox.critical(self.mw, "Grouping Failed", result.error)
@@ -1879,12 +1892,33 @@ class ProjectBuilderManager:
         except Exception as e:
             print(f"[grouping] Warning: DB save failed: {e}")
 
+        # Auto-save figure as PNG alongside the group file
+        fig_path = result.group_path.with_suffix('.png') if result.group_path else None
+
         QMessageBox.information(
             self.mw, "Group Created",
             f"Group '{group_name}' created with {result.n_experiments} experiments.\n\n"
             f"Saved to: {result.group_path}\n"
+            f"Figure: {fig_path.name if fig_path else 'none'}\n"
             f"Metrics: {', '.join(result.metric_keys)}",
         )
+
+        # Generate and save comparison plot
+        try:
+            from core.services.comparison_service import compare_groups
+            fig = compare_groups(
+                [result.group_path],
+                title=group_name,
+                show_individual=True,
+            )
+            if fig is not None:
+                if fig_path:
+                    fig.savefig(str(fig_path), dpi=150, bbox_inches='tight')
+                    print(f"[grouping] Figure saved: {fig_path}")
+                fig.show()
+                print(f"[grouping] Comparison plot displayed")
+        except Exception as e:
+            print(f"[grouping] Warning: Could not display comparison plot: {e}")
 
     def _compare_groups_dialog(self):
         """Open file picker for group .npz files and show comparison plot."""

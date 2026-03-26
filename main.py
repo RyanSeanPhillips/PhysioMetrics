@@ -9467,7 +9467,10 @@ class MainWindow(QMainWindow):
         # Lazy-init ViewModel
         if self._batch_vm is None:
             from viewmodels.batch_analysis_viewmodel import BatchAnalysisViewModel
-            store = getattr(self, '_experiment_store', None)
+            try:
+                store = self._project_viewmodel.service.store
+            except (AttributeError, TypeError):
+                store = None
             self._batch_vm = BatchAnalysisViewModel(store=store, parent=self)
             self._batch_vm.batch_started.connect(self._on_batch_started)
             self._batch_vm.file_started.connect(self._on_batch_file_started)

@@ -625,7 +625,8 @@ def analyze_file(
                     sweep_y2[key] = fn(t, y_proc, sr_hz, labeled_idx, onsets, offsets, expmins, expoffs)
                 y2_by_sweep[s] = sweep_y2
         except Exception as e:
-            _log(f"Warning: y2 metric computation failed: {e}")
+            import traceback
+            _log(f"Warning: y2 metric computation failed: {e}\n{traceback.format_exc()}")
 
         # 8. Compute summary statistics
         summary = _compute_summary(all_metrics_rows, n_sweeps)
