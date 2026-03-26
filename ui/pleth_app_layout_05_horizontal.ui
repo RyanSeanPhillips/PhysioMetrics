@@ -4592,7 +4592,7 @@ QCheckBox::indicator:checked {
         }</string>
                 </property>
                 <property name="title">
-                 <string>Saving</string>
+                 <string>Export</string>
                 </property>
                 <widget class="QWidget" name="layoutWidget">
                  <property name="geometry">
@@ -4625,7 +4625,7 @@ QCheckBox::indicator:checked {
                      </font>
                     </property>
                     <property name="toolTip">
-                     <string>Preview the PDF summary of analyzed metrics</string>
+                     <string>Preview summary of analyzed metrics</string>
                     </property>
                     <property name="styleSheet">
                      <string notr="true">QPushButton {
@@ -4667,7 +4667,7 @@ QPushButton:hover {
                      </font>
                     </property>
                     <property name="toolTip">
-                     <string>Export analyzed data (NPZ, CSV, breath metrics, and PDF summary)</string>
+                     <string>Export analyzed data (CSV, breath metrics, and PDF summary)</string>
                     </property>
                     <property name="autoFillBackground">
                      <bool>false</bool>
@@ -4706,7 +4706,7 @@ QPushButton#SaveAnalyzedDataButton:disabled {
 </string>
                     </property>
                     <property name="text">
-                     <string>Save Data</string>
+                     <string>Export Data</string>
                     </property>
                    </widget>
                   </item>

@@ -1425,19 +1425,40 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QLabel
         from PyQt6.QtCore import Qt
 
+        from PyQt6.QtWidgets import QToolButton
+
+        # Save status indicator
+        self._save_status_label = QLabel("", self)
+        self._save_status_label.setStyleSheet("QLabel { color: #888; padding: 2px 4px; }")
+        self._save_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.statusBar().addPermanentWidget(self._save_status_label)
+
         # Create label for filename display
         self.filename_label = QLabel("No file loaded", self)
         self.filename_label.setStyleSheet("""
             QLabel {
                 color: #d4d4d4;
                 padding: 2px 8px;
-                margin-right: 10px;
+                margin-right: 0px;
             }
         """)
         self.filename_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        # Add to status bar (right side, before history button)
         self.statusBar().addPermanentWidget(self.filename_label)
+
+        # Close file button (small X next to filename)
+        self._close_file_btn = QToolButton(self)
+        self._close_file_btn.setText("\u00d7")  # multiplication sign as X
+        self._close_file_btn.setStyleSheet("""
+            QToolButton {
+                color: #888; border: none; padding: 2px 4px;
+                font-size: 14px; font-weight: bold;
+            }
+            QToolButton:hover { color: #ff6b6b; }
+        """)
+        self._close_file_btn.setToolTip("Close current file")
+        self._close_file_btn.clicked.connect(self._close_current_file)
+        self._close_file_btn.setVisible(False)
+        self.statusBar().addPermanentWidget(self._close_file_btn)
 
     def _setup_editing_instructions_label(self):
         """Add a label to the status bar for rich text editing instructions."""
@@ -2623,6 +2644,10 @@ class MainWindow(QMainWindow):
             self.filename_label.setTextFormat(Qt.TextFormat.PlainText)
 
         self.filename_label.setText(display)
+
+        # Show close button when a file is loaded
+        if hasattr(self, '_close_file_btn'):
+            self._close_file_btn.setVisible(True)
 
     def _lookup_experiment_info(self, file_info):
         """Look up experiment metadata for the current file.
@@ -3995,6 +4020,7 @@ class MainWindow(QMainWindow):
         """Start/restart 30s debounce timer for auto-save after edits."""
         if self.state.in_path and self.state.analyze_chan:
             self._autosave_timer.start()
+            self._update_save_status("modified")
 
     def _autosave_session(self):
         """Silent auto-save of current session. Errors logged, never interrupt user."""
@@ -4002,9 +4028,67 @@ class MainWindow(QMainWindow):
             return
         try:
             self._save_session_pmx()
+            self._update_save_status("saved")
             print("[autosave] Session auto-saved")
         except Exception as e:
             print(f"[autosave] Failed: {e}")
+
+    def _update_save_status(self, status: str):
+        """Update the save status indicator in the status bar."""
+        if not hasattr(self, '_save_status_label'):
+            return
+        if status == "saved":
+            self._save_status_label.setText("Saved")
+            self._save_status_label.setStyleSheet("QLabel { color: #4caf50; padding: 2px 4px; }")
+        elif status == "modified":
+            self._save_status_label.setText("Modified")
+            self._save_status_label.setStyleSheet("QLabel { color: #ffa726; padding: 2px 4px; }")
+        elif status == "saving":
+            self._save_status_label.setText("Saving...")
+            self._save_status_label.setStyleSheet("QLabel { color: #888; padding: 2px 4px; }")
+        else:
+            self._save_status_label.setText("")
+
+    def _close_current_file(self):
+        """Close the current file and reset Analysis tab to blank state."""
+        from core.state import AppState
+        # Stop auto-save timer
+        self._autosave_timer.stop()
+        self._session_peaks_loaded = False
+
+        # Reset state
+        self.state = AppState()
+        self.plot_manager.state = self.state
+        self.editing_modes.state = self.state
+        self._file_load_vm.state = self.state
+
+        # Clear plot
+        self.plot_host.clear_saved_view()
+        if hasattr(self.plot_host, 'fig') and hasattr(self.plot_host, 'draw'):
+            self.plot_host.fig.clear()
+            self.plot_host.draw()
+        else:
+            self.plot_host.clear()
+
+        # Reset UI
+        self.filename_label.setText("No file loaded")
+        self._close_file_btn.setVisible(False)
+        self._update_save_status("")
+        self.ApplyPeakFindPushButton.setEnabled(False)
+
+        # Clear channel combos
+        self.AnalyzeChanSelect.blockSignals(True)
+        self.AnalyzeChanSelect.clear()
+        self.AnalyzeChanSelect.blockSignals(False)
+        self.StimChanSelect.blockSignals(True)
+        self.StimChanSelect.clear()
+        self.StimChanSelect.blockSignals(False)
+
+        # Clear channel manager
+        if hasattr(self, 'channel_manager') and self.channel_manager:
+            self.channel_manager.set_channels([])
+
+        print("[close-file] File closed, Analysis tab reset")
 
     def _save_session_pmx(self):
         """Silent .pmx save — Ctrl+S shortcut. No dialog, just saves and shows status bar message."""
@@ -4103,6 +4187,7 @@ class MainWindow(QMainWindow):
                 f"Saved: {pmx_path.name} ({size_mb:.1f} MB, {elapsed:.1f}s)",
                 timeout=5000,
             )
+            self._update_save_status("saved")
 
             # Update DB results_path if we have an active experiment
             if active_row is not None and hasattr(self, '_master_file_list'):
@@ -4352,6 +4437,7 @@ class MainWindow(QMainWindow):
 
             # Replace current state
             self.state = new_state
+            self._session_peaks_loaded = True  # Skip auto-rerun of peak detection
 
             # Update manager references to new state
             self.plot_manager.state = new_state
@@ -4377,6 +4463,7 @@ class MainWindow(QMainWindow):
 
             # Update last directory
             self.settings.setValue("last_dir", str(npz_path.parent))
+            self._update_save_status("saved")
 
         except Exception as e:
             import traceback
@@ -4703,9 +4790,15 @@ class MainWindow(QMainWindow):
         Automatically re-run peak detection if:
         1. Models were just loaded
         2. Peaks have already been detected once (state.all_peaks_by_sweep is not empty)
+        3. Peaks were NOT loaded from a session file (no need to re-detect)
 
         This updates predictions with newly loaded models without requiring manual re-detection.
         """
+        # Skip if peaks were loaded from a session file (already have ML labels)
+        if getattr(self, '_session_peaks_loaded', False):
+            print("[Auto Re-run] Skipping - peaks loaded from session file")
+            return
+
         # Only re-run if peaks have been detected
         if not self.state.all_peaks_by_sweep:
             print("[Auto Re-run] Skipping - no peaks detected yet")
@@ -5571,6 +5664,7 @@ class MainWindow(QMainWindow):
         Supports parallel processing for large files (10+ sweeps) with automatic fallback
         to sequential processing if parallel execution fails.
         """
+        self._session_peaks_loaded = False  # Clear flag — user is running fresh detection
         import time
         t_start = time.time()
 

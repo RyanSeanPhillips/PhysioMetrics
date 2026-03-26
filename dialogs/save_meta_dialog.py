@@ -287,10 +287,17 @@ class SaveMetaDialog(ExportMixin, QDialog):
         )
         form.addRow("Experiment Type:", self.cb_experiment_type)
 
+        # Editable filename (defaults to auto-generated, user can override)
+        self.le_filename_override = QLineEdit(self)
+        self.le_filename_override.setPlaceholderText("Auto-generated from fields above")
+        self.le_filename_override.setToolTip("Leave blank for auto-generated name, or type a custom filename")
+        self.le_filename_override.setStyleSheet("color: #88aaff; background-color: rgba(255,255,255,0.05); border: 1px solid #555; border-radius: 3px; padding: 2px 4px;")
+        form.addRow("Export Filename:", self.le_filename_override)
+
         # Live preview of filename
         self.lbl_preview = QLabel("", self)
-        self.lbl_preview.setStyleSheet("color: #88aaff; background-color: transparent;")
-        form.addRow("File Name Preview:", self.lbl_preview)
+        self.lbl_preview.setStyleSheet("color: #666; background-color: transparent; font-size: 9px;")
+        form.addRow("", self.lbl_preview)
 
         layout.addLayout(form)
 
@@ -428,12 +435,13 @@ class SaveMetaDialog(ExportMixin, QDialog):
 
         small_font = "font-size: 9pt;"
 
-        # NPZ Bundle - always required
+        # NPZ Bundle - always required (hidden — .pmx auto-save handles session state)
         self.chk_save_npz = QCheckBox("NPZ Bundle*", self)
         self.chk_save_npz.setChecked(True)
         self.chk_save_npz.setEnabled(False)
         self.chk_save_npz.setToolTip("Binary data bundle - always saved (fast, ~0.5s)")
         self.chk_save_npz.setStyleSheet(small_font)
+        self.chk_save_npz.setVisible(False)
 
         self.chk_save_timeseries = QCheckBox("Timeseries CSV", self)
         self.chk_save_timeseries.setToolTip("Time-aligned metric traces (~9s)")
@@ -454,15 +462,18 @@ class SaveMetaDialog(ExportMixin, QDialog):
         self.chk_save_session = QCheckBox("Session State", self)
         self.chk_save_session.setToolTip("Save analysis session (.pleth.npz) - allows resuming work later")
         self.chk_save_session.setStyleSheet(small_font)
+        self.chk_save_session.setVisible(False)  # Hidden — .pmx auto-save handles this
 
         self.chk_save_ml_training = QCheckBox("ML Training Data", self)
         self.chk_save_ml_training.setToolTip("Export peak metrics + user edits for ML model training")
         self.chk_save_ml_training.setStyleSheet(small_font)
+        self.chk_save_ml_training.setVisible(False)  # Hidden for now
 
-        # Gear button for ML folder
+        # Gear button for ML folder (hidden for now)
         self.btn_ml_folder_settings = QPushButton("\u2699", self)
         self.btn_ml_folder_settings.setFixedSize(22, 22)
         self.btn_ml_folder_settings.setToolTip("Change ML training data save location")
+        self.btn_ml_folder_settings.setVisible(False)
         self.btn_ml_folder_settings.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
@@ -480,6 +491,7 @@ class SaveMetaDialog(ExportMixin, QDialog):
         self.chk_ml_include_waveforms.setToolTip("Include raw waveform segments (~10x larger files)")
         self.chk_ml_include_waveforms.setStyleSheet(small_font + " padding-left: 20px;")
         self.chk_ml_include_waveforms.setEnabled(False)
+        self.chk_ml_include_waveforms.setVisible(False)
 
         # ML Labels section (State, Gas, Quality)
         self.ml_labels_group = QGroupBox("ML Labels")
@@ -510,6 +522,7 @@ class SaveMetaDialog(ExportMixin, QDialog):
             }
         """)
         self.ml_labels_group.setEnabled(False)
+        self.ml_labels_group.setVisible(False)
 
         ml_labels_layout = QGridLayout(self.ml_labels_group)
         ml_labels_layout.setContentsMargins(8, 4, 8, 4)
@@ -584,13 +597,14 @@ class SaveMetaDialog(ExportMixin, QDialog):
         # Load saved states
         self._load_export_checkbox_states()
 
-        # Layout: 3 columns
-        export_grid.addWidget(self.chk_save_npz, 0, 0)
-        export_grid.addWidget(self.chk_save_timeseries, 0, 1)
-        export_grid.addWidget(self.chk_save_breaths, 0, 2)
+        # Layout: visible export options in 2x2 grid
+        export_grid.addWidget(self.chk_save_timeseries, 0, 0)
+        export_grid.addWidget(self.chk_save_breaths, 0, 1)
         export_grid.addWidget(self.chk_save_events, 1, 0)
         export_grid.addWidget(self.chk_save_pdf, 1, 1)
-        export_grid.addWidget(self.chk_save_session, 1, 2)
+        # Hidden widgets (still in layout for values() but not shown)
+        export_grid.addWidget(self.chk_save_npz, 2, 0)
+        export_grid.addWidget(self.chk_save_session, 2, 1)
 
         # ML row
         ml_row = QWidget()
@@ -1100,6 +1114,10 @@ class SaveMetaDialog(ExportMixin, QDialog):
                    "CO₂": "co2", "Hypercapnia": "hypercapnia"}
         ml_gas = gas_map.get(ml_gas, ml_gas.lower().replace(" ", "_"))
 
+        # Use custom filename if provided, otherwise auto-generated preview
+        custom_name = self.le_filename_override.text().strip()
+        export_name = custom_name if custom_name else self.lbl_preview.text().strip()
+
         return {
             "strain": self.le_strain.text().strip(),
             "virus": self.le_virus.text().strip(),
@@ -1110,7 +1128,7 @@ class SaveMetaDialog(ExportMixin, QDialog):
             "animal": self.le_animal.text().strip(),
             "abf": self._abf_name,
             "chan": self._channel,
-            "preview": self.lbl_preview.text().strip(),
+            "preview": export_name,
             "choose_dir": bool(self.cb_choose_dir.isChecked()),
             "experiment_type": experiment_type,
             "save_npz": True,

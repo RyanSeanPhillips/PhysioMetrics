@@ -159,6 +159,8 @@ class PlotManager:
         self._metrics_by_sweep.clear()
         self._onsets_by_sweep.clear()
         self._global_outlier_stats = None
+        if hasattr(self, '_outlier_cache'):
+            self._outlier_cache.clear()
 
     def _is_single_panel_mode(self) -> bool:
         """Check if single panel mode is active."""
@@ -2277,6 +2279,14 @@ class PlotManager:
         outlier_mask = None
         failure_mask = None
 
+        # Cache check — skip recomputation if peaks haven't changed for this sweep
+        n_peaks = len(pks) if pks is not None else 0
+        cache_key = (sweep_idx, n_peaks)
+        if not hasattr(self, '_outlier_cache'):
+            self._outlier_cache = {}
+        if cache_key in self._outlier_cache:
+            return self._outlier_cache[cache_key]
+
         try:
             from core.breath_outliers import identify_problematic_breaths, compute_global_metric_statistics
 
@@ -2326,6 +2336,7 @@ class PlotManager:
             import traceback
             traceback.print_exc()
 
+        self._outlier_cache[cache_key] = (outlier_mask, failure_mask)
         return outlier_mask, failure_mask
 
     def _is_peak_in_omitted_region(self, sweep_idx, peak_idx):
