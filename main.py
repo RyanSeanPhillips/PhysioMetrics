@@ -8049,6 +8049,13 @@ class MainWindow(QMainWindow):
         self._batch_analyze_btn.clicked.connect(self._on_batch_analyze_clicked)
         action_layout.addWidget(self._batch_analyze_btn)
 
+        self._group_btn = QPushButton("Group Selected")
+        self._group_btn.setStyleSheet(btn_style.format(bg='#7c3aed', hover='#9333ea'))
+        self._group_btn.setToolTip("Create a group from selected analyzed experiments")
+        self._group_btn.setEnabled(False)
+        self._group_btn.clicked.connect(self._on_group_selected_clicked)
+        action_layout.addWidget(self._group_btn)
+
         self._review_btn = QPushButton("Review")
         self._review_btn.setStyleSheet(btn_style.format(bg='#2563a8', hover='#3478c2'))
         self._review_btn.setToolTip("Review analyzed experiments in the Analysis tab")
@@ -8191,6 +8198,8 @@ class MainWindow(QMainWindow):
         # Update batch button state (enable if visible rows exist)
         if hasattr(self, '_batch_analyze_btn'):
             self._batch_analyze_btn.setEnabled(visible_count > 0)
+        if hasattr(self, '_group_btn'):
+            self._group_btn.setEnabled(visible_count >= 2)
 
     def _setup_table_delegates(self, table: QTableView):
         """Set up item delegates for special column types."""
@@ -9347,6 +9356,25 @@ class MainWindow(QMainWindow):
                 header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         # Re-setup delegates for the new column layout
         self._setup_table_delegates(table)
+
+    def _on_group_selected_clicked(self):
+        """Group selected analyzed experiments via the Project Builder Manager."""
+        selected = self.discoveredFilesTable.selectionModel().selectedRows()
+        if not selected:
+            # Use all visible rows
+            rows = []
+            for r in range(self.discoveredFilesTable.model().rowCount()):
+                if not self.discoveredFilesTable.isRowHidden(r):
+                    rows.append(r)
+        else:
+            rows = [idx.row() for idx in selected]
+
+        if len(rows) < 2:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Cannot Group", "Select at least 2 experiments to group.")
+            return
+
+        self._project_builder_manager._group_selected_experiments(rows)
 
     def _on_batch_analyze_clicked(self):
         """Launch batch analysis and save .pmx results on selected or all visible experiments."""

@@ -121,6 +121,7 @@ def save_batch_result(
     analysis_type: str = "pleth",
     stim_chan: str = "None",
     y2_by_sweep: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
+    stim_results: Optional[Dict[int, Dict]] = None,
 ) -> Path:
     """Save batch analysis results to a .pmx (PhysioMetrics eXperiment) file.
 
@@ -240,10 +241,27 @@ def save_batch_result(
     data["bout_sweep_indices"] = np.array([], dtype=int)
     data["gmm_sweep_indices"] = np.array([], dtype=int)
     data["has_gmm_cache"] = False
-    data["stim_onset_sweep_indices"] = np.array([], dtype=int)
-    data["stim_offset_sweep_indices"] = np.array([], dtype=int)
-    data["stim_spans_sweep_indices"] = np.array([], dtype=int)
-    data["stim_metrics_sweep_indices"] = np.array([], dtype=int)
+    # ── Stimulus detection results ───────────────────────────────
+    if stim_results:
+        onset_indices = sorted(stim_results.keys())
+        data["stim_onset_sweep_indices"] = np.array(onset_indices, dtype=int)
+        data["stim_offset_sweep_indices"] = np.array(onset_indices, dtype=int)
+        data["stim_spans_sweep_indices"] = np.array(onset_indices, dtype=int)
+        stim_metrics_indices = []
+        for s in onset_indices:
+            det = stim_results[s]
+            data[f"stim_onsets_sweep_{s}"] = det["onsets"]
+            data[f"stim_offsets_sweep_{s}"] = det["offsets"]
+            data[f"stim_spans_sweep_{s}_json"] = json.dumps(det["spans"])
+            if det.get("metrics"):
+                stim_metrics_indices.append(s)
+                data[f"stim_metrics_sweep_{s}_json"] = json.dumps(det["metrics"])
+        data["stim_metrics_sweep_indices"] = np.array(stim_metrics_indices, dtype=int)
+    else:
+        data["stim_onset_sweep_indices"] = np.array([], dtype=int)
+        data["stim_offset_sweep_indices"] = np.array([], dtype=int)
+        data["stim_spans_sweep_indices"] = np.array([], dtype=int)
+        data["stim_metrics_sweep_indices"] = np.array([], dtype=int)
 
     # ── App settings ──────────────────────────────────────────────
     data["has_app_settings"] = True

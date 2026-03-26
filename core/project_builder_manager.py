@@ -1915,7 +1915,21 @@ class ProjectBuilderManager:
                 if fig_path:
                     fig.savefig(str(fig_path), dpi=150, bbox_inches='tight')
                     print(f"[grouping] Figure saved: {fig_path}")
-                fig.show()
+
+                # Show in a Qt dialog with embedded matplotlib canvas
+                from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+                from PyQt6.QtWidgets import QDialog, QVBoxLayout
+                from PyQt6.QtCore import Qt
+
+                dlg = QDialog(self.mw)
+                dlg.setWindowTitle(f"Group: {group_name}")
+                dlg.resize(1000, 700)
+                dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
+                layout = QVBoxLayout(dlg)
+                layout.setContentsMargins(0, 0, 0, 0)
+                canvas = FigureCanvasQTAgg(fig)
+                layout.addWidget(canvas)
+                dlg.show()
                 print(f"[grouping] Comparison plot displayed")
         except Exception as e:
             print(f"[grouping] Warning: Could not display comparison plot: {e}")

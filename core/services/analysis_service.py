@@ -628,6 +628,17 @@ def analyze_file(
             import traceback
             _log(f"Warning: y2 metric computation failed: {e}\n{traceback.format_exc()}")
 
+        # 7b. Detect stimulus spans (for grouping time normalization)
+        stim_results_by_sweep = {}
+        if stim_ch and stim_ch != "None" and stim_ch in sweeps:
+            try:
+                from core.services.stim_service import detect_stims_all_sweeps
+                stim_data = sweeps[stim_ch]
+                stim_results_by_sweep = detect_stims_all_sweeps(stim_data, t)
+                _log(f"Detected stim in {len(stim_results_by_sweep)} sweeps")
+            except Exception as e:
+                _log(f"Warning: stim detection failed: {e}")
+
         # 8. Compute summary statistics
         summary = _compute_summary(all_metrics_rows, n_sweeps)
         result.summary = summary
@@ -657,6 +668,7 @@ def analyze_file(
                 event_markers=existing_event_markers,
                 stim_chan=stim_ch if stim_ch else "None",
                 y2_by_sweep=y2_by_sweep,
+                stim_results=stim_results_by_sweep,
             )
             result.session_path = pmx_path
             _log(f"Saved {pmx_path.name}")
