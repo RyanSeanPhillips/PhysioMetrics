@@ -95,16 +95,20 @@ def compare_groups(
     fig, axes = plt.subplots(n_metrics, 1, figsize=figsize, sharex=True, squeeze=False)
     axes = axes.flatten()
 
-    # Auto-detect stim window from first group's metadata if not provided
+    # Auto-detect stim window from first group's stim_duration or metadata
     if stim_window is None:
-        meta = groups[0].get("metadata", {})
-        if "stim_duration" in meta:
-            stim_window = (0.0, float(meta["stim_duration"]))
+        stim_dur = groups[0].get("stim_duration", 0.0)
+        if stim_dur > 0:
+            stim_window = (0.0, stim_dur)
         else:
-            # Default: assume 0-15s stim if time range includes 0
-            t0 = groups[0]["t_common"]
-            if t0.min() < 0 and t0.max() > 15:
-                stim_window = (0.0, 15.0)
+            meta = groups[0].get("metadata", {})
+            if "stim_duration" in meta:
+                stim_window = (0.0, float(meta["stim_duration"]))
+            else:
+                # Default: assume 0-15s stim if time range includes 0
+                t0 = groups[0]["t_common"]
+                if t0.min() < 0 and t0.max() > 15:
+                    stim_window = (0.0, 15.0)
 
     for i, key in enumerate(metric_keys):
         ax = axes[i]
@@ -136,12 +140,17 @@ def compare_groups(
                     ax.plot(t, individual[:, k], color=color, alpha=alpha_individual,
                             linewidth=0.5, zorder=1)
 
-        # Stim window highlight
+        # Stim window highlight (on every subplot)
         if stim_window is not None:
-            ax.axvspan(stim_window[0], stim_window[1], color="#4682B4", alpha=0.1, zorder=0)
+            ax.axvspan(stim_window[0], stim_window[1], color="#4682B4", alpha=0.15, zorder=0)
+            ax.axvline(stim_window[0], color="#4682B4", linewidth=0.8, linestyle="--", alpha=0.6)
+            ax.axvline(stim_window[1], color="#4682B4", linewidth=0.8, linestyle="--", alpha=0.6)
             if i == 0:
-                ax.axvline(stim_window[0], color="#4682B4", linewidth=0.5, linestyle="--", alpha=0.5)
-                ax.axvline(stim_window[1], color="#4682B4", linewidth=0.5, linestyle="--", alpha=0.5)
+                ax.text(
+                    (stim_window[0] + stim_window[1]) / 2, ax.get_ylim()[1],
+                    "Laser", ha="center", va="bottom", fontsize=8,
+                    color="#4682B4", fontweight="bold",
+                )
 
         ax.set_ylabel(METRIC_LABELS.get(key, key), fontsize=10)
         ax.spines["top"].set_visible(False)

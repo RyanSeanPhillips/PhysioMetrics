@@ -192,20 +192,23 @@ def create_group(
                     means[key] = np.full(len(t_exp), np.nan)
             exp_means.append(means)
 
-        # 3. Build common time grid
+        # 3. Build common time grid (downsampled to ~1s intervals for efficiency)
         all_t_mins = [t.min() for t in exp_times]
         all_t_maxs = [t.max() for t in exp_times]
-        all_steps = []
-        for t_arr in exp_times:
-            if len(t_arr) > 1:
-                all_steps.append(np.median(np.diff(t_arr)))
+        TARGET_STEP = 1.0  # 1-second intervals (matches old consolidation)
+        t_common = np.arange(min(all_t_mins), max(all_t_maxs) + TARGET_STEP / 2, TARGET_STEP)
 
-        t_common_step = np.median(all_steps) if all_steps else 0.001
-        t_common = np.arange(min(all_t_mins), max(all_t_maxs) + t_common_step / 2, t_common_step)
+        # Collect stim duration from first experiment with stim spans
+        stim_duration = 0.0
+        for exp in experiments:
+            if exp["stim_spans"]:
+                first_span = exp["stim_spans"][0]
+                stim_duration = first_span[1] - first_span[0]
+                break
 
         # 4. Interpolate each experiment to common grid and compute mean/SEM
         group_data = {
-            "version": "group_v1",
+            "version": "group_v2",
             "group_name": group_name,
             "source_files_json": json.dumps(result.source_files),
             "source_animal_ids_json": json.dumps(result.source_animal_ids),
@@ -213,6 +216,7 @@ def create_group(
             "n_experiments": n_exp,
             "metadata_json": json.dumps(metadata or {}),
             "metric_keys_json": json.dumps(Y2_METRIC_KEYS),
+            "stim_duration": stim_duration,
         }
 
         from scipy.interpolate import interp1d
@@ -284,6 +288,7 @@ def load_group(group_path: Path) -> Dict[str, Any]:
     source_files = json.loads(str(data.get("source_files_json", "[]")))
     source_animal_ids = json.loads(str(data.get("source_animal_ids_json", "[]")))
     metadata = json.loads(str(data.get("metadata_json", "{}")))
+    stim_duration = float(data["stim_duration"]) if "stim_duration" in data else 0.0
 
     data.close()
 
@@ -295,4 +300,5 @@ def load_group(group_path: Path) -> Dict[str, Any]:
         "source_animal_ids": source_animal_ids,
         "n_experiments": n_exp,
         "metadata": metadata,
+        "stim_duration": stim_duration,
     }
