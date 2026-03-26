@@ -9374,7 +9374,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot Group", "Select at least 2 experiments to group.")
             return
 
-        self._project_builder_manager._group_selected_experiments(rows)
+        self._project_builder._group_selected_experiments(rows)
 
     def _on_batch_analyze_clicked(self):
         """Launch batch analysis and save .pmx results on selected or all visible experiments."""
