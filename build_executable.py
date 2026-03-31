@@ -113,7 +113,7 @@ def build_executable():
         # Run PyInstaller with the spec file
         result = subprocess.run([
             sys.executable, '-m', 'PyInstaller',
-            '--clean',
+            '--clean', '-y',
             'physiometrics.spec'
         ], capture_output=True, text=True)
 

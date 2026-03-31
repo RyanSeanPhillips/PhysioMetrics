@@ -15,6 +15,9 @@ import sys
 sys.path.insert(0, spec_root)
 from version_info import VERSION_STRING
 
+# Conda environment Library/bin (for DLLs PyInstaller misses)
+conda_lib_bin = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), 'Library', 'bin')
+
 block_cipher = None
 
 # Collect additional data files
@@ -84,7 +87,12 @@ hidden_imports = [
 a = Analysis(
     ['main.py'],
     pathex=[spec_root],
-    binaries=[],
+    binaries=[
+        # Pillow image library dependencies (not always auto-detected by PyInstaller)
+        (os.path.join(conda_lib_bin, dll), '.')
+        for dll in ['lcms2.dll', 'libwebp.dll', 'libwebpdemux.dll', 'libwebpmux.dll', 'openjp2.dll']
+        if os.path.exists(os.path.join(conda_lib_bin, dll))
+    ],
     datas=added_files,
     hiddenimports=hidden_imports,
     hookspath=[],
