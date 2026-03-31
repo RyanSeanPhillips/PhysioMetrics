@@ -974,30 +974,33 @@ class DataAssemblyWidget(QWidget):
         """Create checkboxes for AI columns."""
         self.ai_columns.clear()
 
-        if self._ai_data is None or not hasattr(self, 'ai_columns_container'):
+        if self._ai_data is None:
             return
 
-        layout = self.ai_columns_container.layout()
-        if layout is None:
-            layout = QHBoxLayout(self.ai_columns_container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(4)
-
-        # Remove old widgets
-        while layout.count():
-            child = layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-
-        # Add AI column checkboxes
+        # Always populate ai_columns dict (channel table depends on it)
         for i, col in enumerate(self._ai_data.columns):
             cb = QCheckBox(col)
             cb.setChecked(True)
             cb.setStyleSheet("color: #d4d4d4;")
-            layout.addWidget(cb)
             self.ai_columns[i] = {'checkbox': cb, 'column': col}
 
-        layout.addStretch()
+        # Add to container widget if it exists
+        if hasattr(self, 'ai_columns_container'):
+            layout = self.ai_columns_container.layout()
+            if layout is None:
+                layout = QHBoxLayout(self.ai_columns_container)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(4)
+
+            while layout.count():
+                child = layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+
+            for info in self.ai_columns.values():
+                layout.addWidget(info['checkbox'])
+
+            layout.addStretch()
 
     def _update_fp_preview_table(self):
         """Update FP data preview table."""
@@ -2418,6 +2421,13 @@ class DataAssemblyWidget(QWidget):
         fp_t_start = max(iso_time_sec[0], gcamp_time_sec[0])
         fp_t_end = min(iso_time_sec[-1], gcamp_time_sec[-1])
 
+        # Validate timestamps aren't corrupted (e.g., recovered/corrupted files)
+        if fp_t_end <= fp_t_start or np.isnan(fp_t_start) or np.isnan(fp_t_end):
+            print(f"[Photometry] ERROR: Invalid time range (start={fp_t_start}, end={fp_t_end}). "
+                  f"The photometry file may be corrupted.")
+            self._preprocessed = None
+            return
+
         # Check if AI data is available - if so, use its higher sample rate
         use_ai_timebase = False
         ai_time_sec = None
@@ -2460,6 +2470,11 @@ class DataAssemblyWidget(QWidget):
             duration = t_end - t_start
             n_points = int(duration * sample_rate)
 
+            if n_points <= 0:
+                print(f"[Photometry] Cannot preprocess: no valid time range (duration={duration:.3f}s, n_points={n_points})")
+                self._preprocessed = None
+                return
+
             # Create common time at AI sample rate
             common_time = np.linspace(t_start, t_end, n_points)
 
@@ -2475,6 +2490,12 @@ class DataAssemblyWidget(QWidget):
             time_offset = t_start
             duration = t_end - t_start
             n_points = int(duration * sample_rate)
+
+            if n_points <= 0:
+                print(f"[Photometry] Cannot preprocess: no valid time range (duration={duration:.3f}s, n_points={n_points})")
+                self._preprocessed = None
+                return
+
             common_time = np.linspace(0, duration, n_points)
 
             print(f"[Photometry] Common time (FP-based): {duration:.1f}s, {n_points} points at {sample_rate:.1f} Hz")
