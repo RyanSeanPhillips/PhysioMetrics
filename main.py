@@ -1296,6 +1296,8 @@ class MainWindow(QMainWindow):
         if not file_paths:
             return
 
+        print(f"[load-files] _load_files called with: {[str(f) for f in file_paths]}")
+
         # Track recently used files and folders
         if file_paths:
             self._add_recent_file(str(file_paths[0]))
@@ -1307,8 +1309,8 @@ class MainWindow(QMainWindow):
         else:
             self.filename_label.setText(f"Files: {len(file_paths)} files ({file_paths[0].name}, ...)")
 
-        # Check if any files are .pleth.npz (session files)
-        npz_files = [f for f in file_paths if f.suffix == '.npz' or f.name.endswith('.pleth.npz')]
+        # Check if any files are .pleth.npz or .pmx (session files)
+        npz_files = [f for f in file_paths if f.suffix in ('.npz', '.pmx') or f.name.endswith('.pleth.npz')]
 
         if npz_files:
             # Can only load one NPZ session at a time
@@ -1317,12 +1319,40 @@ class MainWindow(QMainWindow):
                     "Cannot load session files (.pleth.npz) together with data files.\n\n"
                     "Please select either:\n"
                     "• One or more data files (.abf, .smrx, .edf) for concatenation, OR\n"
-                    "• One session file (.pleth.npz) to restore analysis"
+                    "• One session file (.pleth.npz / .pmx) to restore analysis"
                 )
                 return
 
-            # Load the NPZ session
-            self.load_npz_state(file_paths[0])
+            target = file_paths[0]
+
+            # For photometry NPZ files, check if a .pmx session exists
+            if target.suffix == '.npz' and not target.name.endswith('.pleth.npz'):
+                try:
+                    from core.npz_io import get_pmx_path
+                    # The photometry NPZ IS the in_path for pmx lookup
+                    candidate = get_pmx_path(target, 'pleth')
+                    if candidate.exists():
+                        reply = QMessageBox.question(
+                            self, "Session Found",
+                            f"A saved session was found:\n{candidate.name}\n\n"
+                            f"Load the saved session (with peaks, markers, channels)?\n\n"
+                            f"Click No to load the raw photometry data instead.",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.Yes,
+                        )
+                        if reply == QMessageBox.StandardButton.Yes:
+                            self.load_npz_state(candidate, alternative_data_path=target)
+                            return
+                        else:
+                            # User chose raw data — fall through to photometry path below
+                            # by removing from npz_files so it doesn't load as session
+                            npz_files = []
+                except Exception as e:
+                    print(f"[load-files] Warning: .pmx check for photometry NPZ failed: {e}")
+
+            if npz_files:
+                # Load the NPZ/PMX session
+                self.load_npz_state(target)
 
         # Check if this is a photometry file (CSV with FP_data pattern)
         elif len(file_paths) == 1 and photometry.detect_photometry_file(file_paths[0]):
@@ -1343,12 +1373,68 @@ class MainWindow(QMainWindow):
                 # User selected a specific experiment to load directly
                 npz_path = data['npz_path']
                 exp_idx = data['experiment_index']
-                self._load_photometry_npz_async(npz_path, exp_idx)
+
+                # Check for existing .pmx session before loading raw photometry
+                pmx_loaded = False
+                try:
+                    from core.npz_io import get_pmx_path
+                    print(f"[load-files] Photometry load action: npz={npz_path}")
+
+                    # Glob for any .pmx in the physiometrics subfolder matching this stem
+                    # (channel name in filename varies, so we can't predict the exact path)
+                    pmx_dir = npz_path.parent / "physiometrics"
+                    stem = npz_path.stem
+                    candidates = sorted(pmx_dir.glob(f"{stem}.pleth.*.pmx"),
+                                        key=lambda p: p.stat().st_mtime, reverse=True) if pmx_dir.exists() else []
+                    candidate = candidates[0] if candidates else None
+                    print(f"[load-files] PMX search in {pmx_dir}: found {len(candidates)} candidates")
+                    if candidate:
+                        reply = QMessageBox.question(
+                            self, "Session Found",
+                            f"A saved session was found:\n{candidate.name}\n\n"
+                            f"Load the saved session (with peaks, markers, channels)?\n\n"
+                            f"Click No to load the photometry data without analysis.",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.Yes,
+                        )
+                        if reply == QMessageBox.StandardButton.Yes:
+                            self.load_npz_state(candidate, alternative_data_path=npz_path)
+                            pmx_loaded = True
+                except Exception as e:
+                    print(f"[load-files] Warning: .pmx check for photometry failed: {e}")
+
+                if not pmx_loaded:
+                    self._load_photometry_npz_async(npz_path, exp_idx)
 
         else:
             # Load data files (ABF, SMRX, EDF)
+            # Check for existing .pmx session first (same logic as _analyze_file_at_row)
             if len(file_paths) == 1:
-                self.load_file(file_paths[0])
+                pmx_found = False
+                try:
+                    fp = file_paths[0]
+                    pmx_dir = fp.parent / "physiometrics"
+                    stem = fp.stem
+                    candidates = sorted(pmx_dir.glob(f"{stem}.pleth.*.pmx"),
+                                        key=lambda p: p.stat().st_mtime, reverse=True) if pmx_dir.exists() else []
+                    if candidates:
+                        candidate = candidates[0]
+                        reply = QMessageBox.question(
+                            self, "Session Found",
+                            f"A saved session was found:\n{candidate.name}\n\n"
+                            f"Load the saved session (with peaks, markers, etc.)?\n\n"
+                            f"Click No to load the raw data file instead.",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.Yes,
+                        )
+                        if reply == QMessageBox.StandardButton.Yes:
+                            self.load_npz_state(candidate, alternative_data_path=fp)
+                            pmx_found = True
+                except Exception as e:
+                    print(f"[load-files] Warning: .pmx check failed: {e}")
+
+                if not pmx_found:
+                    self.load_file(file_paths[0])
             else:
                 self.load_multiple_files(file_paths)
 
@@ -1639,10 +1725,15 @@ class MainWindow(QMainWindow):
         from viewmodels.cta_viewmodel import CTAViewModel
         from PyQt6.QtWidgets import QMessageBox
 
-        # Get all markers
+        # Get all markers (may be empty if using breath events only)
         markers = list(self._event_marker_viewmodel.store.all())
-        if not markers:
-            QMessageBox.warning(self, "No Markers", "No event markers available for CTA generation.")
+
+        # Check if we have either markers or breath data
+        has_breath_data = bool(
+            self.state.all_peaks_by_sweep and self.state.all_breaths_by_sweep
+        )
+        if not markers and not has_breath_data:
+            QMessageBox.warning(self, "No Events", "No event markers or breath data available for CTA generation.")
             return
 
         # Collect continuous signals suitable for CTA
@@ -1843,6 +1934,23 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+        # Collect breath data for breath-triggered CTA
+        breath_data = None
+        st = self.state
+        sweep_idx = st.sweep_idx
+        print(f"[CTA] Breath data check: sweep_idx={sweep_idx}, "
+              f"all_peaks_by_sweep keys={list(st.all_peaks_by_sweep.keys())}, "
+              f"all_breaths_by_sweep keys={list(st.all_breaths_by_sweep.keys())}, "
+              f"breath_by_sweep keys={list(st.breath_by_sweep.keys())}")
+        if st.all_peaks_by_sweep and st.all_breaths_by_sweep:
+            breath_data = {
+                'all_peaks': st.all_peaks_by_sweep.get(sweep_idx, {}),
+                'all_breaths': st.all_breaths_by_sweep.get(sweep_idx, {}),
+                'sigh_indices': st.sigh_by_sweep.get(sweep_idx, np.array([])),
+                'sr_hz': getattr(st, 'sr_hz', 1000.0),
+                'sweep_idx': sweep_idx,
+            }
+
         # Create CTA viewmodel (persist on MainWindow so collection survives dialog close)
         if not hasattr(self, '_cta_viewmodel') or self._cta_viewmodel is None:
             self._cta_viewmodel = CTAViewModel(self)
@@ -1854,6 +1962,7 @@ class MainWindow(QMainWindow):
             time_array=time_array,
             metric_labels=metric_labels,
             channel_colors=channel_colors,
+            breath_data=breath_data,
         )
         dialog.exec()
 
@@ -3965,7 +4074,18 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"[npz-save] Warning: Failed to save event markers: {e}")
 
-            save_state_to_npz(self.state, save_path, include_raw_data=include_raw, gmm_cache=gmm_cache, app_settings=app_settings, event_markers=event_markers_data)
+            # Collect channel config
+            channel_config = None
+            if hasattr(self, 'channel_manager') and self.channel_manager:
+                channel_config = {}
+                for ch_name, ch_cfg in self.channel_manager.get_channels().items():
+                    channel_config[ch_name] = {
+                        'visible': ch_cfg.visible,
+                        'channel_type': ch_cfg.channel_type,
+                        'order': ch_cfg.order,
+                    }
+
+            save_state_to_npz(self.state, save_path, include_raw_data=include_raw, gmm_cache=gmm_cache, app_settings=app_settings, event_markers=event_markers_data, channel_config=channel_config)
 
             t_elapsed = time.time() - t_start
             file_size_mb = save_path.stat().st_size / (1024 * 1024)
@@ -4177,24 +4297,47 @@ class MainWindow(QMainWindow):
             self._log_status_message("No channel selected — cannot save.", timeout=3000)
             return
 
+        # Show saving indicator in status bar with progress bar
+        from PyQt6.QtWidgets import QProgressBar
+        save_bar = QProgressBar()
+        save_bar.setRange(0, 0)  # Indeterminate
+        save_bar.setFixedWidth(150)
+        save_bar.setFixedHeight(16)
+        save_bar.setStyleSheet(
+            "QProgressBar { border: 1px solid #3a3a3a; border-radius: 3px; background: #1e1e1e; }"
+            "QProgressBar::chunk { background: #2a7fff; }"
+        )
+        self.statusBar().addWidget(save_bar)
+        self.statusBar().showMessage("Saving session...")
+        QApplication.processEvents()
+
         try:
             from core.npz_io import save_state_to_npz, get_pmx_path
             import time
 
-            # Determine output path
-            channel = self.state.analyze_chan
-            # Try to get animal_id from current master list row
+            # Determine output path — use experiment index as primary ID
+            exp_idx = getattr(self.state, 'photometry_experiment_index', None)
+
+            # Try animal_id from master list or state
             animal_id = ""
             active_row = getattr(self, '_active_master_list_row', None)
             if active_row is not None and hasattr(self, '_master_file_list'):
                 if active_row < len(self._master_file_list):
                     animal_id = self._master_file_list[active_row].get('animal_id', '') or ''
 
+            # Build ID: prefer experiment index (e.g., "exp0"), then animal_id, then channel
+            if exp_idx is not None:
+                pmx_id = f"exp{exp_idx}"
+            elif animal_id:
+                pmx_id = animal_id
+            else:
+                pmx_id = self.state.analyze_chan or ""
+
             pmx_path = get_pmx_path(
                 self.state.in_path,
                 analysis_type="pleth",
-                animal_id=animal_id,
-                channel=channel,
+                animal_id=pmx_id,
+                channel="",
             )
             pmx_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -4237,7 +4380,26 @@ class MainWindow(QMainWindow):
             # but write to .pmx path in physiometrics/ subfolder
             # Include raw data for photometry sessions (signals aren't in an ABF
             # file that can be reloaded — they only exist in the photometry NPZ)
-            is_photometry = getattr(self.state, 'photometry_raw', None) is not None
+            # Always include raw data if we have photometry channels
+            # (photometry_raw may be None after session restore, but we still need raw data embedded)
+            is_photometry = (
+                getattr(self.state, 'photometry_raw', None) is not None
+                or getattr(self.state, 'photometry_npz_path', None) is not None
+                or any('dF/F' in ch or 'dff' in ch.lower() or 'GCaMP' in ch or 'Iso' in ch
+                       for ch in (self.state.channel_names or []))
+            )
+
+            # Collect channel config (visibility + types) from channel manager
+            channel_config = None
+            if hasattr(self, 'channel_manager') and self.channel_manager:
+                channel_config = {}
+                for ch_name, ch_cfg in self.channel_manager.get_channels().items():
+                    channel_config[ch_name] = {
+                        'visible': ch_cfg.visible,
+                        'channel_type': ch_cfg.channel_type,
+                        'order': ch_cfg.order,
+                    }
+
             save_state_to_npz(
                 self.state, pmx_path,
                 include_raw_data=is_photometry,
@@ -4245,6 +4407,7 @@ class MainWindow(QMainWindow):
                 app_settings=app_settings,
                 event_markers=event_markers_data,
                 cta_data=cta_data,
+                channel_config=channel_config,
             )
 
             # numpy savez_compressed auto-appends .npz — rename to .pmx
@@ -4260,7 +4423,7 @@ class MainWindow(QMainWindow):
             existing_data['schema_version'] = 2
             existing_data['analysis_type'] = 'pleth'
             existing_data['batch_timestamp'] = ''  # manual save, not batch
-            existing_data['channel_analyzed'] = channel
+            existing_data['channel_analyzed'] = self.state.analyze_chan or ''
             existing_data['summary_json'] = '{}'
             existing_data['metrics_json'] = '[]'
             existing_data['version'] = '2.0.0'
@@ -4274,6 +4437,10 @@ class MainWindow(QMainWindow):
 
             elapsed = time.time() - t_start
             size_mb = pmx_path.stat().st_size / (1024 * 1024)
+
+            self.statusBar().removeWidget(save_bar)
+            save_bar.deleteLater()
+
             self._log_status_message(
                 f"Saved: {pmx_path.name} ({size_mb:.1f} MB, {elapsed:.1f}s)",
                 timeout=5000,
@@ -4293,6 +4460,8 @@ class MainWindow(QMainWindow):
                             pass
 
         except Exception as e:
+            self.statusBar().removeWidget(save_bar)
+            save_bar.deleteLater()
             self._log_status_message(f"Save failed: {e}", timeout=5000)
             print(f"[pmx-save] Error: {e}")
 
@@ -4393,28 +4562,60 @@ class MainWindow(QMainWindow):
             if st.stim_chan and st.stim_chan != 'None' and st.stim_chan in st.channel_names:
                 self.channel_manager.set_channel_type(st.stim_chan, "Opto Stim")
 
-        # 5. Channel visibility -- only analyze + stim + event
+        # 5. Channel visibility + types — restore from saved config or fall back to defaults
         if hasattr(self, 'channel_manager') and self.channel_manager:
-            keep_visible = set()
-            if st.analyze_chan:
-                keep_visible.add(st.analyze_chan)
-            if st.stim_chan and st.stim_chan != 'None':
-                keep_visible.add(st.stim_chan)
-            if st.event_channel and st.event_channel != 'None':
-                keep_visible.add(st.event_channel)
+            saved_config = getattr(npz_result, 'channel_config', None)
+            print(f"[session-restore] Channel config from file: {saved_config}")
 
-            channels = self.channel_manager.get_channels()
-            for ch_name, ch_cfg in channels.items():
-                should_show = (ch_name in keep_visible)
-                ch_cfg.visible = should_show
-                if ch_name in self.channel_manager._channel_rows:
-                    row_widget = self.channel_manager._channel_rows[ch_name]
-                    row_widget.visible_check.blockSignals(True)
-                    row_widget.visible_check.setChecked(should_show)
-                    row_widget.visible_check.blockSignals(False)
+            if saved_config:
+                # Restore saved channel visibility and types
+                channels = self.channel_manager.get_channels()
+                print(f"[session-restore] Restoring config for {len(channels)} channels, "
+                      f"saved has {len(saved_config)} entries")
+                print(f"[session-restore] Current channel names: {list(channels.keys())}")
+                print(f"[session-restore] Saved channel names: {list(saved_config.keys())}")
+                for ch_name, ch_cfg in channels.items():
+                    if ch_name in saved_config:
+                        cfg = saved_config[ch_name]
+                        ch_cfg.visible = cfg.get('visible', False)
+                        ch_type = cfg.get('channel_type', ch_cfg.channel_type)
+                        if ch_type != ch_cfg.channel_type:
+                            self.channel_manager.set_channel_type(ch_name, ch_type)
+                    else:
+                        ch_cfg.visible = False
+
+                    if ch_name in self.channel_manager._channel_rows:
+                        row_widget = self.channel_manager._channel_rows[ch_name]
+                        row_widget.visible_check.blockSignals(True)
+                        row_widget.visible_check.setChecked(ch_cfg.visible)
+                        row_widget.visible_check.blockSignals(False)
+            else:
+                # Legacy fallback: only show analyze + stim + event
+                keep_visible = set()
+                if st.analyze_chan:
+                    keep_visible.add(st.analyze_chan)
+                if st.stim_chan and st.stim_chan != 'None':
+                    keep_visible.add(st.stim_chan)
+                if st.event_channel and st.event_channel != 'None':
+                    keep_visible.add(st.event_channel)
+
+                channels = self.channel_manager.get_channels()
+                for ch_name, ch_cfg in channels.items():
+                    should_show = (ch_name in keep_visible)
+                    ch_cfg.visible = should_show
+                    if ch_name in self.channel_manager._channel_rows:
+                        row_widget = self.channel_manager._channel_rows[ch_name]
+                        row_widget.visible_check.blockSignals(True)
+                        row_widget.visible_check.setChecked(should_show)
+                        row_widget.visible_check.blockSignals(False)
 
             self.channel_manager._update_summary()
             self.channel_manager._update_show_all_checkbox()
+
+            # Debug: verify visibility state
+            for ch_name, ch_cfg in self.channel_manager.get_channels().items():
+                if ch_cfg.visible:
+                    print(f"[session-restore] Channel visible: {ch_name} (type={ch_cfg.channel_type})")
 
         # 6. Single panel mode (session restore always shows focused view)
         self.single_panel_mode = True

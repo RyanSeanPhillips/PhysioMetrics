@@ -299,7 +299,7 @@ def save_batch_result(
     return output_path
 
 
-def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None, cta_data: Optional[Dict] = None) -> None:
+def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None, cta_data: Optional[Dict] = None, channel_config: Optional[Dict] = None) -> None:
     """
     Save complete analysis state to .pleth.npz file.
 
@@ -364,6 +364,10 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
     data['stim_chan'] = state.stim_chan if state.stim_chan else 'None'
     data['event_channel'] = state.event_channel if state.event_channel else 'None'
 
+    # ===== CHANNEL CONFIG (visibility, types) =====
+    if channel_config:
+        data['channel_config_json'] = json.dumps(channel_config)
+
     # ===== FILTER SETTINGS =====
     data['use_low'] = state.use_low
     data['use_high'] = state.use_high
@@ -404,13 +408,22 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             if 'breath_type_class' in all_peaks_dict and all_peaks_dict['breath_type_class'] is not None:
                 data[f'all_peaks_breath_type_class_sweep_{sweep_idx}'] = all_peaks_dict['breath_type_class']
 
-            # Save read-only GMM predictions (for classifier switching)
-            if 'gmm_class_ro' in all_peaks_dict and all_peaks_dict['gmm_class_ro'] is not None:
-                data[f'all_peaks_gmm_class_ro_sweep_{sweep_idx}'] = all_peaks_dict['gmm_class_ro']
-
-            # Save eupnea/sniff source (which classifier produced each label)
-            if 'eupnea_sniff_source' in all_peaks_dict and all_peaks_dict['eupnea_sniff_source'] is not None:
-                data[f'all_peaks_eupnea_sniff_source_sweep_{sweep_idx}'] = all_peaks_dict['eupnea_sniff_source']
+            # Save ALL read-only classifier predictions (for instant classifier switching)
+            _ro_keys = [
+                # Breath vs noise
+                'labels_threshold_ro', 'labels_xgboost_ro', 'labels_rf_ro', 'labels_mlp_ro',
+                # Eupnea vs sniffing
+                'gmm_class_ro', 'eupnea_sniff_xgboost_ro', 'eupnea_sniff_rf_ro', 'eupnea_sniff_mlp_ro',
+                # Sigh
+                'sigh_xgboost_ro', 'sigh_rf_ro', 'sigh_mlp_ro',
+                # Source tracking
+                'eupnea_sniff_source',
+                # Prominences (needed for threshold recalculation)
+                'prominences',
+            ]
+            for ro_key in _ro_keys:
+                if ro_key in all_peaks_dict and all_peaks_dict[ro_key] is not None:
+                    data[f'all_peaks_{ro_key}_sweep_{sweep_idx}'] = all_peaks_dict[ro_key]
 
     # ===== PEAK METRICS (for ML export) =====
     # Save peak_metrics_by_sweep as JSON (list of dicts)
@@ -668,13 +681,32 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             state.in_path = data_path_to_load  # Use the actual path loaded from
             raw_data_loaded = True
         except Exception as e:
-            # Original file couldn't be loaded - try NPZ embedded data
+            # Original file couldn't be loaded - try photometry NPZ loader
             print(f"Warning: Could not reload from {data_path_to_load}: {e}")
-            print("Attempting to use embedded data from NPZ...")
-            pass
+
+            # Fallback: try loading as photometry NPZ
+            if data_path_to_load.suffix == '.npz':
+                try:
+                    from core.photometry import load_experiment_from_npz
+                    phot_data = load_experiment_from_npz(data_path_to_load, experiment_index=0)
+                    if phot_data and 'sweeps' in phot_data:
+                        state.sr_hz = phot_data['sr_hz']
+                        state.sweeps = phot_data['sweeps']
+                        state.channel_names = phot_data['channel_names']
+                        state.t = phot_data['t']
+                        state.in_path = data_path_to_load
+                        state.photometry_raw = phot_data.get('photometry_raw')
+                        state.photometry_npz_path = data_path_to_load
+                        raw_data_loaded = True
+                        print(f"[npz_io] Loaded raw data from photometry NPZ: {len(state.channel_names)} channels")
+                except Exception as e2:
+                    print(f"Warning: Photometry NPZ fallback also failed: {e2}")
+
+            if not raw_data_loaded:
+                print("Attempting to use embedded data from NPZ...")
 
     # Check if raw data is embedded in NPZ (fallback or if reload_raw_data=False)
-    if not raw_data_loaded and 't' in data:
+    if not raw_data_loaded and 't' in data and 'channel_names' in data:
         state.sr_hz = float(data['sr_hz'])
         state.t = data['t']
         state.channel_names = list(data['channel_names'])
@@ -789,15 +821,17 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                 # Backwards compatibility: load old gmm_class as breath_type_class
                 all_peaks_dict['breath_type_class'] = data[gmm_class_key]
 
-            # Load read-only GMM predictions (for classifier switching)
-            gmm_class_ro_key = f'all_peaks_gmm_class_ro_sweep_{sweep_idx}'
-            if gmm_class_ro_key in data:
-                all_peaks_dict['gmm_class_ro'] = data[gmm_class_ro_key]
-
-            # Load eupnea/sniff source
-            eupnea_sniff_source_key = f'all_peaks_eupnea_sniff_source_sweep_{sweep_idx}'
-            if eupnea_sniff_source_key in data:
-                all_peaks_dict['eupnea_sniff_source'] = data[eupnea_sniff_source_key]
+            # Load ALL read-only classifier predictions (for instant classifier switching)
+            _ro_keys = [
+                'labels_threshold_ro', 'labels_xgboost_ro', 'labels_rf_ro', 'labels_mlp_ro',
+                'gmm_class_ro', 'eupnea_sniff_xgboost_ro', 'eupnea_sniff_rf_ro', 'eupnea_sniff_mlp_ro',
+                'sigh_xgboost_ro', 'sigh_rf_ro', 'sigh_mlp_ro',
+                'eupnea_sniff_source', 'prominences',
+            ]
+            for ro_key in _ro_keys:
+                npz_key = f'all_peaks_{ro_key}_sweep_{sweep_idx}'
+                if npz_key in data:
+                    all_peaks_dict[ro_key] = data[npz_key]
 
             state.all_peaks_by_sweep[int(sweep_idx)] = all_peaks_dict
 
@@ -832,6 +866,13 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                 'expmins': np.array(breath_dict['expmins'], dtype=int),
                 'expoffs': np.array(breath_dict['expoffs'], dtype=int)
             }
+
+    # Populate all_breaths_by_sweep from breath_by_sweep (they share the same data
+    # for labeled breaths — all_breaths includes noise peaks too, but after restore
+    # we only have the filtered set, which is sufficient for CTA and display)
+    if state.breath_by_sweep and not state.all_breaths_by_sweep:
+        for sweep_idx, breath_dict in state.breath_by_sweep.items():
+            state.all_breaths_by_sweep[sweep_idx] = breath_dict.copy()
 
     # ===== SIGHS (per-sweep) =====
     if 'sigh_sweep_indices' in data:
@@ -973,7 +1014,15 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             'cta_json': str(data['cta_json']),
         }
 
-    return state, raw_data_loaded, gmm_cache, app_settings, event_markers, cta_data
+    # ===== CHANNEL CONFIG =====
+    channel_config = None
+    if 'channel_config_json' in data:
+        try:
+            channel_config = json.loads(str(data['channel_config_json']))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return state, raw_data_loaded, gmm_cache, app_settings, event_markers, cta_data, channel_config
 
 
 def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:

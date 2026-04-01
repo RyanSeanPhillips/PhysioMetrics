@@ -130,7 +130,7 @@ class CTAService:
 
             # Compute offset to paired event (onset→withdrawal or withdrawal→onset)
             paired_offset = None
-            if paired_event_times is not None and i < len(paired_event_times):
+            if paired_event_times is not None and i < len(paired_event_times) and paired_event_times[i] is not None:
                 paired_offset = float(paired_event_times[i] - event_time)
 
             trace = CTATrace(
@@ -468,7 +468,8 @@ class CTAService:
         all_columns = []  # list of (header, values_array)
         all_columns.append(('time', t_common))
 
-        for result in results_with_data:
+        blank = np.full(n_points, np.nan)
+        for ri, result in enumerate(results_with_data):
             safe_metric = result.metric_key.replace('/', '_')
             prefix = f"{safe_metric}_{result.alignment}"
 
@@ -487,6 +488,11 @@ class CTAService:
                 all_columns.append((f"{prefix}_mean", result.mean))
             if result.sem is not None:
                 all_columns.append((f"{prefix}_sem", result.sem))
+
+            # Add 2 blank separator columns between metrics
+            if ri < len(results_with_data) - 1:
+                all_columns.append(('', blank))
+                all_columns.append(('', blank))
 
         # Write single CSV
         with open(filepath, 'w', newline='') as f:
@@ -517,6 +523,7 @@ class CTAService:
         all_columns = []
         t_common = None
 
+        result_count = 0
         for cond_name, collection in sorted(condition_collections.items()):
             safe_cond = cond_name.replace('/', '_').replace(' ', '_')
 
@@ -533,6 +540,12 @@ class CTAService:
                 safe_metric = result.metric_key.replace('/', '_')
                 prefix = f"{safe_cond}_{safe_metric}_{result.alignment}"
 
+                # Add 2 blank separator columns between metric groups
+                if result_count > 0:
+                    blank = np.full(n_points, np.nan)
+                    all_columns.append(('', blank))
+                    all_columns.append(('', blank))
+
                 for i, trace in enumerate(result.traces):
                     if len(trace.time) < 2:
                         continue
@@ -546,6 +559,8 @@ class CTAService:
                     all_columns.append((f"{prefix}_mean", result.mean))
                 if result.sem is not None:
                     all_columns.append((f"{prefix}_sem", result.sem))
+
+                result_count += 1
 
         if not all_columns or t_common is None:
             return

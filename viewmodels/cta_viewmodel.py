@@ -190,6 +190,12 @@ class CTAViewModel(QObject):
             else:
                 filtered_signals = signals
 
+            print(f"[CTA VM] selected_categories={self._selected_categories}")
+            print(f"[CTA VM] filtered_markers={len(filtered_markers)} from {len(markers)} input")
+            print(f"[CTA VM] selected_metrics={self._selected_metrics}")
+            print(f"[CTA VM] filtered_signals={list(filtered_signals.keys())} from {list(signals.keys())}")
+            print(f"[CTA VM] condition_mode={condition_mode}")
+
             if not filtered_markers:
                 self.error_occurred.emit("No markers selected for CTA")
                 return

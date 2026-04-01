@@ -234,12 +234,15 @@ class FileLoadViewModel(QObject):
 
     def _on_npz_loaded(self, result) -> None:
         """Handle NPZ load completion."""
-        # Support both old (5-element) and new (6-element) return tuples
-        if len(result) == 6:
+        # Support old (5), v2 (6), and v3 (7) return tuples
+        cta_data = None
+        channel_config = None
+        if len(result) == 7:
+            new_state, raw_data_loaded, gmm_cache, app_settings, event_markers, cta_data, channel_config = result
+        elif len(result) == 6:
             new_state, raw_data_loaded, gmm_cache, app_settings, event_markers, cta_data = result
         else:
             new_state, raw_data_loaded, gmm_cache, app_settings, event_markers = result
-            cta_data = None
 
         npz_result = NpzLoadResult(
             new_state=new_state,
@@ -248,6 +251,7 @@ class FileLoadViewModel(QObject):
             app_settings=app_settings,
             event_markers=event_markers,
             cta_data=cta_data,
+            channel_config=channel_config,
             npz_path=self._loading_npz_path,
             metadata=self._loading_npz_metadata,
         )
