@@ -70,8 +70,28 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         self._source_dir = ""
         if parent and hasattr(parent, 'state') and hasattr(parent.state, 'in_path') and parent.state.in_path:
             p = Path(parent.state.in_path)
-            self._source_stem = p.stem
             self._source_dir = str(p.parent)
+
+            # Build a rich stem: {file_stem}.{exp_id}
+            # e.g., "3_30_2026_B__recovered_photometry.exp0" or "3_30_2026_B.L_280671"
+            stem_parts = [p.stem]
+            st = parent.state
+
+            # Add experiment index
+            exp_idx = getattr(st, 'photometry_experiment_index', None)
+            if exp_idx is not None:
+                stem_parts.append(f"exp{exp_idx}")
+
+            # Add animal ID if available
+            animal_id = ""
+            active_row = getattr(parent, '_active_master_list_row', None)
+            if active_row is not None and hasattr(parent, '_master_file_list'):
+                if active_row < len(parent._master_file_list):
+                    animal_id = parent._master_file_list[active_row].get('animal_id', '') or ''
+            if animal_id:
+                stem_parts.append(animal_id)
+
+            self._source_stem = ".".join(stem_parts)
 
         self._init_ui()
         self._apply_dark_theme()

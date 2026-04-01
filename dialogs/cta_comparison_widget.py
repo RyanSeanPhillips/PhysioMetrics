@@ -1033,7 +1033,80 @@ class CTAComparisonWidget(QWidget):
             "CSV Files (*.csv);;All Files (*.*)"
         )
         if filepath:
-            self._viewmodel.export_to_csv_wide(filepath)
+            self._viewmodel.export_to_csv_wide(filepath, metadata=self._build_export_metadata())
+
+    def _build_export_metadata(self) -> dict:
+        """Build metadata dict for CSV header."""
+        meta = {}
+
+        # Source file info
+        if self._source_stem:
+            meta['source_file'] = self._source_stem
+
+        # Get parent state info
+        parent = self.parent()
+        if parent and hasattr(parent, '_source_stem'):
+            meta['source_file'] = parent._source_stem
+        if parent and hasattr(parent, '_source_dir'):
+            meta['source_dir'] = parent._source_dir
+
+        # App version
+        try:
+            from version_info import VERSION_STRING
+            meta['app_version'] = VERSION_STRING
+        except ImportError:
+            pass
+
+        # Parent state details
+        mw = self.window()
+        if mw and hasattr(mw, 'state'):
+            st = mw.state
+            if hasattr(st, 'in_path') and st.in_path:
+                meta['source_file'] = str(st.in_path)
+            if hasattr(st, 'sr_hz'):
+                meta['sample_rate'] = st.sr_hz
+            if hasattr(st, 'analyze_chan'):
+                meta['analyze_channel'] = st.analyze_chan
+            exp_idx = getattr(st, 'photometry_experiment_index', None)
+            if exp_idx is not None:
+                meta['experiment_index'] = exp_idx
+
+        # Animal ID from master list
+        if mw and hasattr(mw, '_active_master_list_row') and hasattr(mw, '_master_file_list'):
+            row = mw._active_master_list_row
+            if row is not None and row < len(mw._master_file_list):
+                animal_id = mw._master_file_list[row].get('animal_id', '')
+                if animal_id:
+                    meta['animal_id'] = animal_id
+
+        # Trigger source
+        if self._radio_breath_events.isChecked():
+            trigger = self._breath_trigger_combo.currentText()
+            btype = self._breath_type_combo.currentText()
+            meta['trigger_source'] = f'Breath Events: {trigger} ({btype})'
+            meta['max_events'] = self._breath_max_events.value()
+            t_start = self._breath_time_start.value()
+            t_end = self._breath_time_end.value()
+            if t_start > 0 or t_end > 0:
+                meta['time_window'] = f'{t_start:.1f}s - {t_end:.1f}s' if t_end > 0 else f'{t_start:.1f}s - end'
+        else:
+            cats = self._get_selected_categories()
+            meta['trigger_source'] = f'Event Markers: {", ".join(cats)}' if cats else 'Event Markers'
+
+        # Condition mode
+        meta['condition_mode'] = self._condition_mode_combo.currentText()
+
+        # Selected conditions
+        selected = self._get_selected_conditions()
+        if selected:
+            meta['conditions'] = selected
+
+        # Selected metrics
+        metrics = self._get_selected_metrics()
+        if metrics:
+            meta['metrics'] = metrics
+
+        return meta
 
     # -------------------------------------------------------------------------
     # Breath Info

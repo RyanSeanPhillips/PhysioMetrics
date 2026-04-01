@@ -435,6 +435,7 @@ class CTAService:
         self,
         collection: CTACollection,
         filepath: str,
+        metadata: Optional[Dict] = None,
     ) -> None:
         """
         Export all CTA data into a single wide-format CSV.
@@ -447,6 +448,7 @@ class CTAService:
         Args:
             collection: The CTA collection to export
             filepath: Path to save CSV
+            metadata: Optional dict of metadata to write as header comments
         """
         import csv
         from scipy import interpolate
@@ -497,6 +499,7 @@ class CTAService:
         # Write single CSV
         with open(filepath, 'w', newline='') as f:
             writer = csv.writer(f)
+            self._write_metadata_header(writer, metadata, collection)
             writer.writerow([col[0] for col in all_columns])
             for j in range(n_points):
                 writer.writerow([col[1][j] for col in all_columns])
@@ -505,6 +508,7 @@ class CTAService:
         self,
         condition_collections: Dict[str, CTACollection],
         filepath: str,
+        metadata: Optional[Dict] = None,
     ) -> None:
         """
         Export per-condition CTA data into a single wide-format CSV.
@@ -566,8 +570,68 @@ class CTAService:
             return
 
         n_points = len(t_common)
+        # Use first collection for header metadata
+        first_coll = next(iter(condition_collections.values()))
         with open(filepath, 'w', newline='') as f:
             writer = csv.writer(f)
+            self._write_metadata_header(writer, metadata, first_coll)
             writer.writerow([col[0] for col in all_columns])
             for j in range(n_points):
                 writer.writerow([col[1][j] for col in all_columns])
+
+    def _write_metadata_header(self, writer, metadata: Optional[Dict],
+                                collection: Optional[CTACollection]) -> None:
+        """Write metadata comment rows at the top of the CSV."""
+        from datetime import datetime
+
+        writer.writerow(['# PhysioMetrics CTA Export'])
+        writer.writerow([f'# Exported: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+
+        if metadata:
+            if metadata.get('source_file'):
+                writer.writerow([f'# Source file: {metadata["source_file"]}'])
+            if metadata.get('pmx_file'):
+                writer.writerow([f'# Session file: {metadata["pmx_file"]}'])
+            if metadata.get('animal_id'):
+                writer.writerow([f'# Animal ID: {metadata["animal_id"]}'])
+            if metadata.get('experiment_index') is not None:
+                writer.writerow([f'# Experiment: {metadata["experiment_index"]}'])
+            if metadata.get('analyze_channel'):
+                writer.writerow([f'# Analyze channel: {metadata["analyze_channel"]}'])
+            if metadata.get('trigger_source'):
+                writer.writerow([f'# Trigger source: {metadata["trigger_source"]}'])
+            if metadata.get('condition_mode'):
+                writer.writerow([f'# Condition mode: {metadata["condition_mode"]}'])
+            if metadata.get('conditions'):
+                writer.writerow([f'# Conditions: {", ".join(metadata["conditions"])}'])
+            if metadata.get('max_events'):
+                writer.writerow([f'# Max events: {metadata["max_events"]}'])
+            if metadata.get('time_window'):
+                writer.writerow([f'# Time window filter: {metadata["time_window"]}'])
+            if metadata.get('sample_rate'):
+                writer.writerow([f'# Sample rate: {metadata["sample_rate"]} Hz'])
+            if metadata.get('app_version'):
+                writer.writerow([f'# App version: {metadata["app_version"]}'])
+
+        if collection:
+            config = collection.config
+            writer.writerow([f'# Window: -{config.window_before}s to +{config.window_after}s'])
+            if config.zscore_baseline:
+                writer.writerow([f'# Z-score baseline: {config.baseline_start}s to {config.baseline_end}s'])
+            writer.writerow([f'# N points: {config.n_points}'])
+
+            marker_types = set()
+            total_events = 0
+            metrics_used = set()
+            for r in collection.results.values():
+                marker_types.add(f'{r.category}:{r.label}')
+                if r.alignment == 'onset':
+                    total_events = max(total_events, r.n_events)
+                metrics_used.add(r.metric_key)
+            if marker_types:
+                writer.writerow([f'# Marker types: {", ".join(sorted(marker_types))}'])
+            writer.writerow([f'# Events: {total_events}'])
+            if metrics_used:
+                writer.writerow([f'# Metrics: {", ".join(sorted(metrics_used))}'])
+
+        writer.writerow(['#'])

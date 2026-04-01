@@ -330,7 +330,7 @@ class CTAViewModel(QObject):
         except Exception as e:
             self.error_occurred.emit(f"CSV export failed: {str(e)}")
 
-    def export_to_csv_wide(self, filepath: str) -> None:
+    def export_to_csv_wide(self, filepath: str, metadata: Optional[Dict] = None) -> None:
         """
         Export CTA data in wide format (time + one column per event + mean + sem).
 
@@ -338,12 +338,14 @@ class CTAViewModel(QObject):
 
         Args:
             filepath: Base path for CSV files
+            metadata: Optional metadata dict for CSV header
         """
         if self._condition_mode in ('separate', 'overlay') and self._condition_collections:
             try:
                 self._service.export_conditions_to_csv_wide(
                     self._condition_collections,
                     filepath,
+                    metadata=metadata,
                 )
                 self.export_complete.emit(filepath)
             except Exception as e:
@@ -353,6 +355,7 @@ class CTAViewModel(QObject):
                 self._service.export_to_csv_wide(
                     self._current_collection,
                     filepath,
+                    metadata=metadata,
                 )
                 self.export_complete.emit(filepath)
             except Exception as e:
