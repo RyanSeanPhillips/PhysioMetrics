@@ -16,7 +16,8 @@ sys.path.insert(0, spec_root)
 from version_info import VERSION_STRING
 
 # Conda environment Library/bin (for DLLs PyInstaller misses)
-conda_lib_bin = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), 'Library', 'bin')
+# sys.executable = .../envs/plethapp/python.exe → dirname = .../envs/plethapp/
+conda_lib_bin = os.path.join(os.path.dirname(sys.executable), 'Library', 'bin')
 
 block_cipher = None
 
