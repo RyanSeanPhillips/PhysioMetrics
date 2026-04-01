@@ -1964,7 +1964,24 @@ class MainWindow(QMainWindow):
             channel_colors=channel_colors,
             breath_data=breath_data,
         )
+
+        # Restore saved workspace if available
+        saved_workspace = getattr(self, '_cta_workspace_config', None)
+        if saved_workspace and saved_workspace.get('tabs'):
+            try:
+                dialog.apply_workspace_config(saved_workspace)
+            except Exception as e:
+                print(f"[CTA] Failed to restore workspace: {e}")
+
         dialog.exec()
+
+        # Capture workspace config on close for persistence
+        try:
+            workspace = dialog.get_workspace_config()
+            if workspace and workspace.get('tabs'):
+                self._cta_workspace_config = workspace
+        except Exception as e:
+            print(f"[CTA] Failed to capture workspace config: {e}")
 
     def _update_marker_count_display(self):
         """Update the marker count label in the UI."""
@@ -4366,9 +4383,20 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # Get CTA data (if any CTA has been generated)
+            # Get CTA data — prefer full workspace config, fallback to single collection
             cta_data = None
-            if hasattr(self, '_cta_viewmodel') and self._cta_viewmodel:
+            saved_workspace = getattr(self, '_cta_workspace_config', None)
+            if saved_workspace and saved_workspace.get('tabs'):
+                import json as _json
+                cta_data = {
+                    'cta_version': 2,
+                    'cta_workspace_json': _json.dumps(saved_workspace),
+                }
+                # Also include legacy cta_json from first tab for backward compat
+                first_tab = saved_workspace['tabs'][0]
+                if first_tab.get('collection'):
+                    cta_data['cta_json'] = _json.dumps(first_tab['collection'])
+            elif hasattr(self, '_cta_viewmodel') and self._cta_viewmodel:
                 try:
                     collection = self._cta_viewmodel.current_collection
                     if collection and collection.results:
@@ -4684,17 +4712,33 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[session-restore] Warning: event markers failed: {e}")
 
-        # 13b. CTA data
+        # 13b. CTA data — workspace config (v2) or legacy single collection
         if hasattr(npz_result, 'cta_data') and npz_result.cta_data:
+            import json
+            cta_data = npz_result.cta_data
             try:
-                from core.domain.cta.models import CTACollection
-                from viewmodels.cta_viewmodel import CTAViewModel
-                collection = CTACollection.from_npz_dict(npz_result.cta_data)
-                if collection and collection.results:
-                    if not hasattr(self, '_cta_viewmodel') or self._cta_viewmodel is None:
-                        self._cta_viewmodel = CTAViewModel(self)
-                    self._cta_viewmodel._current_collection = collection
-                    print(f"[session-restore] Restored CTA with {len(collection.results)} results")
+                if 'cta_workspace_json' in cta_data:
+                    # New multi-tab workspace format
+                    workspace = json.loads(cta_data['cta_workspace_json'])
+                    self._cta_workspace_config = workspace
+                    n_tabs = len(workspace.get('tabs', []))
+                    print(f"[session-restore] Restored CTA workspace with {n_tabs} tab(s)")
+                elif 'cta_json' in cta_data:
+                    # Legacy single-collection — wrap in workspace structure
+                    from core.domain.cta.models import CTACollection
+                    from viewmodels.cta_viewmodel import CTAViewModel
+                    collection = CTACollection.from_npz_dict(cta_data)
+                    if collection and collection.results:
+                        if not hasattr(self, '_cta_viewmodel') or self._cta_viewmodel is None:
+                            self._cta_viewmodel = CTAViewModel(self)
+                        self._cta_viewmodel._current_collection = collection
+                        # Wrap legacy into workspace config for dialog restore
+                        self._cta_workspace_config = {
+                            'version': 1,
+                            'active_tab_index': 0,
+                            'tabs': [{'tab_name': 'CTA 1', 'collection': collection.to_dict()}],
+                        }
+                        print(f"[session-restore] Restored legacy CTA with {len(collection.results)} results")
             except Exception as e:
                 print(f"[session-restore] Warning: CTA data failed: {e}")
 

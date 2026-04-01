@@ -1736,3 +1736,201 @@ class CTAComparisonWidget(QWidget):
         self._populate_marker_categories()
         self._populate_metrics()
         self._update_breath_info()
+
+    # -------------------------------------------------------------------------
+    # Config Serialization (for workspace round-trip save/restore)
+    # -------------------------------------------------------------------------
+
+    def get_config(self) -> dict:
+        """Serialize all widget state + viewmodel collections for save."""
+        from core.domain.cta.models import CTATabConfig
+
+        config = CTATabConfig(
+            tab_name=self.tab_name,
+            trigger_source='breath_events' if self._radio_breath_events.isChecked() else 'event_markers',
+            breath_trigger_point=self._breath_trigger_combo.currentData() or 'inspiratory_onset',
+            breath_type_filter=self._breath_type_combo.currentData() or 'all',
+            breath_max_events=self._breath_max_events.value(),
+            breath_min_bout=self._breath_min_bout.value(),
+            breath_time_start=self._breath_time_start.value(),
+            breath_time_end=self._breath_time_end.value(),
+            window_before=self._spin_before.value(),
+            window_after=self._spin_after.value(),
+            zscore_enabled=self._zscore_group.isChecked(),
+            baseline_start=self._spin_baseline_start.value(),
+            baseline_end=self._spin_baseline_end.value(),
+            condition_mode=self._condition_mode_combo.currentData() or 'overlay',
+            selected_categories=self._get_selected_categories(),
+            selected_conditions=self._get_selected_conditions() or [],
+            selected_metrics=self._get_selected_metrics(),
+            metric_colors={k: v.name() for k, v in self._metric_colors.items()},
+            show_paired_lines=self._chk_show_paired_lines.isChecked(),
+            show_baseline_zone=self._chk_show_baseline.isChecked(),
+        ).to_dict()
+
+        # Add CTA results (collection + condition_collections)
+        result = {'config': config}
+
+        vm = self._viewmodel
+        if vm.current_collection and vm.current_collection.results:
+            result['collection'] = vm.current_collection.to_dict()
+
+        if vm.condition_collections:
+            result['condition_collections'] = {
+                cond: coll.to_dict()
+                for cond, coll in vm.condition_collections.items()
+            }
+
+        result['condition_mode_actual'] = vm.condition_mode
+
+        return result
+
+    def apply_config(self, tab_data: dict) -> None:
+        """Restore widget state from a saved config dict and render plots."""
+        from core.domain.cta.models import CTATabConfig, CTACollection
+
+        config_dict = tab_data.get('config', {})
+        cfg = CTATabConfig.from_dict(config_dict)
+
+        # --- Block signals during restore ---
+        widgets_to_block = [
+            self._spin_before, self._spin_after,
+            self._spin_baseline_start, self._spin_baseline_end,
+            self._zscore_group,
+            self._condition_mode_combo,
+            self._breath_trigger_combo, self._breath_type_combo,
+            self._breath_max_events, self._breath_min_bout,
+            self._breath_time_start, self._breath_time_end,
+            self._chk_show_paired_lines, self._chk_show_baseline,
+            self._radio_event_markers, self._radio_breath_events,
+        ]
+        for w in widgets_to_block:
+            w.blockSignals(True)
+
+        try:
+            # Trigger source
+            if cfg.trigger_source == 'breath_events':
+                self._radio_breath_events.setChecked(True)
+                self._trigger_stack.setCurrentIndex(1)
+                self._condition_group.setVisible(False)
+            else:
+                self._radio_event_markers.setChecked(True)
+                self._trigger_stack.setCurrentIndex(0)
+                self._condition_group.setVisible(True)
+
+            # Breath config
+            idx = self._breath_trigger_combo.findData(cfg.breath_trigger_point)
+            if idx >= 0:
+                self._breath_trigger_combo.setCurrentIndex(idx)
+            idx = self._breath_type_combo.findData(cfg.breath_type_filter)
+            if idx >= 0:
+                self._breath_type_combo.setCurrentIndex(idx)
+            self._breath_max_events.setValue(cfg.breath_max_events)
+            self._breath_min_bout.setValue(cfg.breath_min_bout)
+            self._breath_time_start.setValue(cfg.breath_time_start)
+            self._breath_time_end.setValue(cfg.breath_time_end)
+
+            # Time windows
+            self._spin_before.setValue(cfg.window_before)
+            self._spin_after.setValue(cfg.window_after)
+
+            # Z-score
+            self._zscore_group.setChecked(cfg.zscore_enabled)
+            self._spin_baseline_start.setValue(cfg.baseline_start)
+            self._spin_baseline_end.setValue(cfg.baseline_end)
+
+            # Condition mode
+            idx = self._condition_mode_combo.findData(cfg.condition_mode)
+            if idx >= 0:
+                self._condition_mode_combo.setCurrentIndex(idx)
+
+            # Update viewmodel config to match
+            self._viewmodel.config.window_before = cfg.window_before
+            self._viewmodel.config.window_after = cfg.window_after
+            self._viewmodel.config.zscore_baseline = cfg.zscore_enabled
+            self._viewmodel.config.baseline_start = cfg.baseline_start
+            self._viewmodel.config.baseline_end = cfg.baseline_end
+
+            # Selected categories (match by text against populated marker list)
+            if cfg.selected_categories:
+                saved_set = set(cfg.selected_categories)
+                for i in range(self._marker_list.count()):
+                    item = self._marker_list.item(i)
+                    data = item.data(Qt.ItemDataRole.UserRole)
+                    if data:
+                        cat_str = f"{data['category']}:{data['label']}"
+                    else:
+                        cat_str = item.text()
+                    item.setCheckState(
+                        Qt.CheckState.Checked if cat_str in saved_set
+                        else Qt.CheckState.Unchecked
+                    )
+
+            # Selected conditions (match by text)
+            if cfg.selected_conditions:
+                saved_set = set(cfg.selected_conditions)
+                for i in range(self._condition_list.count()):
+                    item = self._condition_list.item(i)
+                    cond = item.data(Qt.ItemDataRole.UserRole)
+                    if cond == '__all__':
+                        item.setCheckState(Qt.CheckState.Unchecked)
+                    elif cond and cond in saved_set:
+                        item.setCheckState(Qt.CheckState.Checked)
+                    elif cond:
+                        item.setCheckState(Qt.CheckState.Unchecked)
+
+            # Selected metrics (check/uncheck and apply colors)
+            if cfg.selected_metrics:
+                saved_set = set(cfg.selected_metrics)
+                self._metrics_table.blockSignals(True)
+                for row in range(self._metrics_table.rowCount()):
+                    name_item = self._metrics_table.item(row, 1)
+                    if name_item:
+                        key = name_item.data(Qt.ItemDataRole.UserRole)
+                        name_item.setCheckState(
+                            Qt.CheckState.Checked if key in saved_set
+                            else Qt.CheckState.Unchecked
+                        )
+                        # Restore color
+                        if key in cfg.metric_colors:
+                            color = QColor(cfg.metric_colors[key])
+                            self._metric_colors[key] = color
+                            color_item = self._metrics_table.item(row, 0)
+                            if color_item:
+                                color_item.setBackground(QBrush(color))
+                self._metrics_table.blockSignals(False)
+                self._update_metric_row_styles()
+
+            # Display toggles
+            self._chk_show_paired_lines.setChecked(cfg.show_paired_lines)
+            self._chk_show_baseline.setChecked(cfg.show_baseline_zone)
+
+        finally:
+            for w in widgets_to_block:
+                w.blockSignals(False)
+
+        # --- Restore CTA results into viewmodel ---
+        collection_dict = tab_data.get('collection')
+        if collection_dict:
+            try:
+                self._viewmodel._current_collection = CTACollection.from_dict(collection_dict)
+            except Exception as e:
+                print(f"[CTA restore] Failed to restore collection: {e}")
+
+        cond_colls = tab_data.get('condition_collections')
+        if cond_colls:
+            try:
+                self._viewmodel._condition_collections = {
+                    cond: CTACollection.from_dict(coll_dict)
+                    for cond, coll_dict in cond_colls.items()
+                }
+            except Exception as e:
+                print(f"[CTA restore] Failed to restore condition collections: {e}")
+
+        actual_mode = tab_data.get('condition_mode_actual', cfg.condition_mode)
+        self._viewmodel._condition_mode = actual_mode
+
+        # Render plots
+        if self._viewmodel.current_collection or self._viewmodel.condition_collections:
+            self._update_preview_plots()
+            self._btn_export_csv.setEnabled(True)

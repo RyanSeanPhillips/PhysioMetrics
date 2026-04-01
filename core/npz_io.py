@@ -1009,10 +1009,13 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
     # ===== CTA DATA =====
     cta_data = None
     if 'cta_version' in data:
-        cta_data = {
-            'cta_version': data['cta_version'],
-            'cta_json': str(data['cta_json']),
-        }
+        cta_data = {'cta_version': data['cta_version']}
+        # New workspace format (v2) — full multi-tab state
+        if 'cta_workspace_json' in data:
+            cta_data['cta_workspace_json'] = str(data['cta_workspace_json'])
+        # Legacy or fallback single-collection format
+        if 'cta_json' in data:
+            cta_data['cta_json'] = str(data['cta_json'])
 
     # ===== CHANNEL CONFIG =====
     channel_config = None

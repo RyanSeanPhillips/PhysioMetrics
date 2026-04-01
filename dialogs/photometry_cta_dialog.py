@@ -298,6 +298,75 @@ class PhotometryCTADialog(ExportMixin, QDialog):
                 widget.set_data(markers, signals, time_array, metric_labels)
 
     # -------------------------------------------------------------------------
+    # Workspace Config (save/restore all tabs)
+    # -------------------------------------------------------------------------
+
+    def get_workspace_config(self) -> dict:
+        """Serialize all tabs' configs + results for saving to .pmx."""
+        tabs = []
+        for i in range(self._tabs.count()):
+            widget = self._tabs.widget(i)
+            if isinstance(widget, CTAComparisonWidget):
+                tab_data = widget.get_config()
+                tab_data['tab_name'] = self._tabs.tabText(i)
+                tabs.append(tab_data)
+
+        return {
+            'version': 2,
+            'active_tab_index': self._tabs.currentIndex(),
+            'tabs': tabs,
+        }
+
+    def apply_workspace_config(self, config: dict) -> None:
+        """Restore all tabs from a saved workspace config."""
+        tabs = config.get('tabs', [])
+        if not tabs:
+            return
+
+        # Remove the default blank tab
+        while self._tabs.count() > 0:
+            widget = self._tabs.widget(0)
+            self._tabs.removeTab(0)
+            if widget:
+                widget.deleteLater()
+
+        # Create tabs from saved configs
+        for tab_data in tabs:
+            tab_name = tab_data.get('tab_name') or tab_data.get('config', {}).get('tab_name', 'CTA')
+            vm = CTAViewModel(self)
+            widget = CTAComparisonWidget(
+                parent=self,
+                viewmodel=vm,
+                markers=self._markers,
+                signals=self._signals,
+                time_array=self._time_array,
+                metric_labels=self._metric_labels,
+                channel_colors=self._channel_colors,
+                breath_data=self._breath_data,
+                source_stem=self._source_stem,
+            )
+            widget._default_export_dir = self._source_dir
+            widget.name_changed.connect(
+                lambda name, w=widget: self._on_tab_name_changed(w, name)
+            )
+            widget.cta_generated.connect(self.cta_generated.emit)
+
+            idx = self._tabs.addTab(widget, tab_name)
+
+            # Apply saved config (sets widgets, loads collections, renders plots)
+            try:
+                widget.apply_config(tab_data)
+            except Exception as e:
+                print(f"[CTA Workspace] Failed to restore tab '{tab_name}': {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Restore active tab
+        active = config.get('active_tab_index', 0)
+        if 0 <= active < self._tabs.count():
+            self._tabs.setCurrentIndex(active)
+
+    # -------------------------------------------------------------------------
     # Theme
     # -------------------------------------------------------------------------
 
