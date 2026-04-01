@@ -299,7 +299,7 @@ def save_batch_result(
     return output_path
 
 
-def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None) -> None:
+def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None, cta_data: Optional[Dict] = None) -> None:
     """
     Save complete analysis state to .pleth.npz file.
 
@@ -495,6 +495,11 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         # event_markers is a dict from EventMarkerService.to_npz_dict()
         # Contains: event_markers_version (np.array) and event_markers_json (str)
         for key, value in event_markers.items():
+            data[key] = value
+
+    # ===== CTA DATA =====
+    if cta_data is not None:
+        for key, value in cta_data.items():
             data[key] = value
 
     # ===== GMM PROBABILITIES (per-sweep) =====
@@ -960,7 +965,15 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             metrics = json.loads(metrics_json)
             state.stim_metrics_by_sweep[int(sweep_idx)] = metrics
 
-    return state, raw_data_loaded, gmm_cache, app_settings, event_markers
+    # ===== CTA DATA =====
+    cta_data = None
+    if 'cta_version' in data:
+        cta_data = {
+            'cta_version': data['cta_version'],
+            'cta_json': str(data['cta_json']),
+        }
+
+    return state, raw_data_loaded, gmm_cache, app_settings, event_markers, cta_data
 
 
 def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:

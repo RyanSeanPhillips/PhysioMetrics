@@ -96,7 +96,7 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
 
         # Event list panel state
         self._event_checkboxes: List[QCheckBox] = []
-        self._event_condition_combos: List[QComboBox] = []
+        self._event_condition_combos: List[QComboBox] = []  # Legacy — kept for compat, unused
         self._marker_groups: Dict[Tuple[str, str], list] = {}  # (source_channel, category) -> [EventMarker]
         self._current_default_condition: str = ""  # Track for condition propagation
         self._loading_marker_group = False  # Prevent auto-detection when loading a group
@@ -691,6 +691,12 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
         self._deselect_all_btn.setStyleSheet("padding: 2px 8px; font-size: 11px;")
         toolbar.addWidget(self._deselect_all_btn)
 
+        self._set_condition_btn = QPushButton("Set Condition...")
+        self._set_condition_btn.setFixedHeight(24)
+        self._set_condition_btn.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        self._set_condition_btn.setToolTip("Set condition for selected rows (select rows first)")
+        toolbar.addWidget(self._set_condition_btn)
+
         toolbar.addStretch()
 
         self._event_count_label = QLabel("0 events")
@@ -713,11 +719,13 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
         self._event_table.setColumnWidth(1, 58)   # Start — "XXXX.X"
         self._event_table.setColumnWidth(2, 58)   # End
         self._event_table.setColumnWidth(3, 42)   # Δ — "XX.X"
-        self._event_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._event_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self._event_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._event_table.verticalHeader().setDefaultSectionSize(25)
         self._event_table.verticalHeader().setVisible(False)
         self._event_table.setAlternatingRowColors(True)
+        self._event_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._event_table.customContextMenuRequested.connect(self._on_event_table_context_menu)
 
         layout.addWidget(self._event_table)
 
@@ -843,6 +851,7 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
         self._event_table.cellClicked.connect(self._on_event_list_clicked)
         self._select_all_btn.clicked.connect(self._on_select_all)
         self._deselect_all_btn.clicked.connect(self._on_deselect_all)
+        self._set_condition_btn.clicked.connect(self._on_set_condition_for_selected)
 
         # Condition default propagation
         self._condition_combo.currentTextChanged.connect(self._on_default_condition_changed)
@@ -1033,7 +1042,12 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
         for i, (start, end) in enumerate(self._preview_events):
             # Column 0: Checkbox with event number
             cb = QCheckBox(f"  {i + 1}")
-            cb.setChecked(True)
+            # Set checked state from marker visibility (if editing existing markers)
+            if i < len(self._preview_marker_ids) and self._preview_marker_ids[i]:
+                marker = self._viewmodel.service.store.get(self._preview_marker_ids[i])
+                cb.setChecked(getattr(marker, 'visible', True) if marker else True)
+            else:
+                cb.setChecked(True)
             self._event_checkboxes.append(cb)
             self._event_table.setCellWidget(i, 0, cb)
 
@@ -1055,27 +1069,16 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
             item_dur.setFlags(item_dur.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._event_table.setItem(i, 3, item_dur)
 
-            # Column 4: Condition combo
-            cond_combo = QComboBox()
-            cond_combo.setEditable(True)
-            for preset in CONDITION_PRESETS:
-                cond_combo.addItem(preset if preset else "(none)")
-            # Set condition: per-event condition from loaded markers, or default
+            # Column 4: Condition (plain text — use right-click or Set Condition button to change)
             per_event_cond = self._preview_conditions[i] if i < len(self._preview_conditions) else None
-            if per_event_cond:
-                idx = cond_combo.findText(per_event_cond)
-                if idx >= 0:
-                    cond_combo.setCurrentIndex(idx)
-                else:
-                    cond_combo.setCurrentText(per_event_cond)
-            elif default_condition:
-                idx = cond_combo.findText(default_condition)
-                if idx >= 0:
-                    cond_combo.setCurrentIndex(idx)
-                else:
-                    cond_combo.setCurrentText(default_condition)
-            self._event_condition_combos.append(cond_combo)
-            self._event_table.setCellWidget(i, 4, cond_combo)
+            cond_text = per_event_cond or default_condition or ""
+            item_cond = QTableWidgetItem(cond_text)
+            item_cond.setFlags(item_cond.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if cond_text:
+                item_cond.setForeground(QColor('#88cc88'))  # Green tint for set conditions
+            else:
+                item_cond.setForeground(QColor('#666666'))  # Dim for unset
+            self._event_table.setItem(i, 4, item_cond)
 
         self._event_count_label.setText(f"{len(self._preview_events)} events")
 
@@ -1100,24 +1103,91 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
         for cb in self._event_checkboxes:
             cb.setChecked(False)
 
+    def _on_event_table_context_menu(self, pos) -> None:
+        """Show context menu on right-click in event table."""
+        selected_rows = sorted(set(idx.row() for idx in self._event_table.selectedIndexes()))
+        if not selected_rows:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #252526; color: #d4d4d4; border: 1px solid #3e3e42; }
+            QMenu::item:selected { background-color: #094771; }
+            QMenu::separator { background-color: #3e3e42; height: 1px; margin: 4px 8px; }
+        """)
+
+        n = len(selected_rows)
+        set_cond = menu.addAction(f"Set Condition for {n} event{'s' if n > 1 else ''}...")
+        set_cond.triggered.connect(self._on_set_condition_for_selected)
+
+        clear_cond = menu.addAction(f"Clear Condition for {n} event{'s' if n > 1 else ''}")
+        clear_cond.triggered.connect(self._on_clear_condition_for_selected)
+
+        menu.exec(self._event_table.viewport().mapToGlobal(pos))
+
+    def _on_set_condition_for_selected(self) -> None:
+        """Set condition for all selected rows in the event table."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        selected_rows = sorted(set(idx.row() for idx in self._event_table.selectedIndexes()))
+        if not selected_rows:
+            self._status_label.setText("Select rows first (Ctrl+Click or Shift+Click)")
+            return
+
+        # Gather existing conditions for suggestions
+        conditions = ['(none)', 'baseline', 'awake', 'iso', 'morphine', 'treatment', 'recovery']
+        # Add any custom conditions already in use in the table
+        for row in range(self._event_table.rowCount()):
+            item = self._event_table.item(row, 4)
+            if item:
+                text = item.text().strip()
+                if text and text not in conditions:
+                    conditions.append(text)
+
+        condition, ok = QInputDialog.getItem(
+            self, "Set Condition",
+            f"Condition for {len(selected_rows)} selected event(s):",
+            conditions, 0, True  # editable=True so user can type custom
+        )
+        if ok and condition:
+            display = "" if condition == "(none)" else condition
+            for row in selected_rows:
+                item = self._event_table.item(row, 4)
+                if item:
+                    item.setText(display)
+                    if display:
+                        item.setForeground(QColor('#88cc88'))
+                    else:
+                        item.setForeground(QColor('#666666'))
+            self._status_label.setText(f"Set condition '{condition}' for {len(selected_rows)} events")
+
+    def _on_clear_condition_for_selected(self) -> None:
+        """Clear condition for all selected rows."""
+        selected_rows = sorted(set(idx.row() for idx in self._event_table.selectedIndexes()))
+        for row in selected_rows:
+            item = self._event_table.item(row, 4)
+            if item:
+                item.setText("")
+                item.setForeground(QColor('#666666'))
+        self._status_label.setText(f"Cleared condition for {len(selected_rows)} events")
+
     def _on_default_condition_changed(self, text: str) -> None:
-        """Propagate default condition change to event list combos that still have the old default."""
+        """Propagate default condition change to event list items that still have the old default."""
         old_default = self._current_default_condition
         new_default = text.strip()
         self._current_default_condition = new_default
 
-        for combo in self._event_condition_combos:
-            current = combo.currentText().strip()
-            # Update if combo still has old default or is empty/(none)
-            if current == old_default or current in ("", "(none)"):
-                if new_default:
-                    idx = combo.findText(new_default)
-                    if idx >= 0:
-                        combo.setCurrentIndex(idx)
+        for row in range(self._event_table.rowCount()):
+            item = self._event_table.item(row, 4)
+            if item:
+                current = item.text().strip()
+                # Update if item still has old default or is empty
+                if current == old_default or current == "":
+                    item.setText(new_default)
+                    if new_default:
+                        item.setForeground(QColor('#88cc88'))
                     else:
-                        combo.setCurrentText(new_default)
-                else:
-                    combo.setCurrentIndex(0)  # "(none)"
+                        item.setForeground(QColor('#666666'))
 
     def _on_category_changed(self) -> None:
         """Handle category combo change — reset marker group if it no longer matches."""
@@ -2150,19 +2220,21 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
             is_checked = self._event_checkboxes[i].isChecked() if i < len(self._event_checkboxes) else True
             start, end = self._preview_events[i]
 
-            # Get per-event condition
+            # Get per-event condition from table text
             condition = ""
-            if i < len(self._event_condition_combos):
-                condition = self._event_condition_combos[i].currentText().strip()
-                if condition == "(none)":
-                    condition = ""
+            cond_item = self._event_table.item(i, 4)
+            if cond_item:
+                condition = cond_item.text().strip()
 
             if marker_id:
                 if not is_checked:
-                    # Unchecked existing marker → delete from plot
-                    self._viewmodel.delete_marker(marker_id)
+                    # Unchecked existing marker → hide (keep in store for re-enabling later)
+                    self._viewmodel.update_marker(marker_id, visible=False)
                     deleted += 1
                 else:
+                    # Ensure visible (may have been previously hidden)
+                    self._viewmodel.update_marker(marker_id, visible=True)
+
                     # Checked existing marker — check if times changed (edge drag)
                     original = self._preview_original_times[i] if i < len(self._preview_original_times) else None
                     if original and (abs(start - original[0]) > 0.001 or abs(end - original[1]) > 0.001):
@@ -2197,19 +2269,17 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
         self.accept()
 
     def _save_create_mode(self, category: str, label: str, is_paired: bool, source_channel: str) -> None:
-        """Save in create mode — create new markers for all checked events."""
-        # Collect checked events
+        """Save in create mode — create markers for all events (unchecked ones are hidden)."""
         events_to_create = []
         for i, cb in enumerate(self._event_checkboxes):
-            if cb.isChecked() and i < len(self._preview_events):
+            if i < len(self._preview_events):
                 start, end = self._preview_events[i]
-                condition = self._event_condition_combos[i].currentText().strip()
-                if condition == "(none)":
-                    condition = ""
-                events_to_create.append((start, end, condition or None))
+                cond_item = self._event_table.item(i, 4)
+                condition = cond_item.text().strip() if cond_item else ""
+                events_to_create.append((start, end, condition or None, cb.isChecked()))
 
         if not events_to_create:
-            self._status_label.setText("No events selected")
+            self._status_label.setText("No events detected")
             return
 
         # Warn if many events
@@ -2225,11 +2295,26 @@ class MarkerDetectionDialog(ExportMixin, QDialog):
                 return
 
         created = 0
-        for start_time, end_time, event_condition in events_to_create:
+        hidden = 0
+        for start_time, end_time, event_condition, is_visible in events_to_create:
             if self._create_single_marker(start_time, end_time, category, label, is_paired, source_channel, event_condition):
                 created += 1
+                if not is_visible:
+                    # Hide unchecked markers (they're still in the store for later re-enabling)
+                    # Get the most recently added marker to set its visibility
+                    markers = self._viewmodel.get_markers_for_sweep(self._sweep_idx)
+                    if markers:
+                        # Find the marker we just created (matching start_time)
+                        for m in reversed(markers):
+                            if abs(m.start_time - start_time) < 0.001:
+                                self._viewmodel.update_marker(m.id, visible=False)
+                                hidden += 1
+                                break
 
-        self._status_label.setText(f"Created {created} markers")
+        parts = [f"{created - hidden} visible"]
+        if hidden:
+            parts.append(f"{hidden} hidden")
+        self._status_label.setText(f"Created {created} markers ({', '.join(parts)})")
         self.detection_complete.emit(created)
         self.accept()
 

@@ -79,16 +79,20 @@ class CTATrace:
     event_time: float
     time: np.ndarray
     values: np.ndarray
+    paired_event_offset: Optional[float] = None  # Time offset to paired marker (onset→withdrawal or vice versa)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary (for JSON storage)."""
-        return {
+        d = {
             'event_id': self.event_id,
             'sweep_idx': self.sweep_idx,
             'event_time': float(self.event_time),
             'time': self.time.tolist() if isinstance(self.time, np.ndarray) else list(self.time),
             'values': self.values.tolist() if isinstance(self.values, np.ndarray) else list(self.values),
         }
+        if self.paired_event_offset is not None:
+            d['paired_event_offset'] = float(self.paired_event_offset)
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'CTATrace':
@@ -99,6 +103,7 @@ class CTATrace:
             event_time=float(d['event_time']),
             time=np.array(d['time'], dtype=np.float64),
             values=np.array(d['values'], dtype=np.float64),
+            paired_event_offset=d.get('paired_event_offset'),
         )
 
 

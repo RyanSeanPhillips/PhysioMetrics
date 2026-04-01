@@ -184,6 +184,33 @@ class PhotometryCTADialog(ExportMixin, QDialog):
 
         left_layout.addWidget(markers_group)
 
+        # --- Condition Mode ---
+        condition_group = QGroupBox("Conditions")
+        condition_layout = QVBoxLayout(condition_group)
+
+        # Mode selector
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Mode:"))
+        self._condition_mode_combo = QComboBox()
+        self._condition_mode_combo.addItem("Combined", "combined")
+        self._condition_mode_combo.addItem("Separate", "separate")
+        self._condition_mode_combo.addItem("Overlay", "overlay")
+        self._condition_mode_combo.setToolTip(
+            "Combined: Pool all events into one CTA\n"
+            "Separate: Independent CTA per condition (stacked plots)\n"
+            "Overlay: Conditions on same axes with different colors"
+        )
+        mode_layout.addWidget(self._condition_mode_combo)
+        condition_layout.addLayout(mode_layout)
+
+        # Condition checklist
+        self._condition_list = QListWidget()
+        self._condition_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self._condition_list.setMaximumHeight(80)
+        condition_layout.addWidget(self._condition_list)
+
+        left_layout.addWidget(condition_group)
+
         # --- Metrics Table (color + name with checkboxes, up/down arrows) ---
         metrics_group = QGroupBox("Metrics to Include")
         metrics_layout = QVBoxLayout(metrics_group)
@@ -235,6 +262,37 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         )
         self._btn_generate.clicked.connect(self._on_generate_clicked)
         left_layout.addWidget(self._btn_generate)
+
+        # Export CSV button
+        self._btn_export_csv = QPushButton("Export CSV")
+        self._btn_export_csv.setMinimumHeight(32)
+        self._btn_export_csv.setEnabled(False)
+        self._btn_export_csv.setStyleSheet(
+            "QPushButton { background-color: #1a4a6b; border: 1px solid #2a6a8a; }"
+            "QPushButton:hover { background-color: #22628b; border-color: #33a; }"
+            "QPushButton:pressed { background-color: #0d3a4d; }"
+            "QPushButton:disabled { background-color: #2a2a2a; color: #666; }"
+        )
+        self._btn_export_csv.clicked.connect(self._on_export_csv_clicked)
+        left_layout.addWidget(self._btn_export_csv)
+
+        # Show paired marker lines toggle
+        self._chk_show_paired_lines = QCheckBox("Show paired marker lines")
+        self._chk_show_paired_lines.setChecked(True)
+        self._chk_show_paired_lines.setToolTip(
+            "Show faint lines where the paired event (onset/withdrawal) occurs on each trace"
+        )
+        self._chk_show_paired_lines.toggled.connect(lambda: self._update_preview_plots())
+        left_layout.addWidget(self._chk_show_paired_lines)
+
+        # Show baseline zone toggle
+        self._chk_show_baseline = QCheckBox("Show baseline zone")
+        self._chk_show_baseline.setChecked(True)
+        self._chk_show_baseline.setToolTip(
+            "Show the z-score normalization window as a shaded region on plots"
+        )
+        self._chk_show_baseline.toggled.connect(lambda: self._update_preview_plots())
+        left_layout.addWidget(self._chk_show_baseline)
 
         # Progress bar
         self._progress = QProgressBar()
@@ -320,6 +378,50 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         if has_any_paired:
             self._viewmodel.include_withdrawal = True
 
+        # Populate condition filter
+        self._populate_conditions()
+
+    def _populate_conditions(self):
+        """Populate condition filter from marker conditions."""
+        self._condition_list.clear()
+
+        conditions = set()
+        for marker in self._markers:
+            if getattr(marker, 'visible', True) and marker.condition:
+                conditions.add(marker.condition)
+
+        if not conditions:
+            item = QListWidgetItem("(no conditions set)")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._condition_list.addItem(item)
+            return
+
+        # "All" option
+        item = QListWidgetItem("All conditions")
+        item.setData(Qt.ItemDataRole.UserRole, '__all__')
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self._condition_list.addItem(item)
+
+        for cond in sorted(conditions):
+            item = QListWidgetItem(cond)
+            item.setData(Qt.ItemDataRole.UserRole, cond)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self._condition_list.addItem(item)
+
+    def _get_selected_conditions(self):
+        """Get list of selected conditions, or None for 'all'."""
+        selected = []
+        for i in range(self._condition_list.count()):
+            item = self._condition_list.item(i)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data == '__all__' and item.checkState() == Qt.CheckState.Checked:
+                return None  # All conditions
+            if data and data != '__all__' and item.checkState() == Qt.CheckState.Checked:
+                selected.append(data)
+        return selected if selected else None
+
     def _populate_metrics(self):
         """Populate metrics table with checkboxes and color swatches."""
         self._metrics_table.blockSignals(True)
@@ -370,12 +472,21 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         """Handle click on metrics table - toggle checkbox or open color picker."""
         self._active_metric_row = row
         if col == 1:
+            # Toggle checkbox on click in the metric name column.
+            # Qt handles clicks directly on the checkbox indicator via cellChanged,
+            # so we only manually toggle for clicks on the text area (not the indicator).
+            # We detect this by checking if the checkbox state already changed via cellChanged
+            # since the last click — if so, skip the manual toggle to avoid double-toggle.
             name_item = self._metrics_table.item(row, 1)
-            if name_item:
+            if name_item and not getattr(self, '_checkbox_just_toggled', False):
+                self._metrics_table.blockSignals(True)
                 new_state = (Qt.CheckState.Unchecked
                              if name_item.checkState() == Qt.CheckState.Checked
                              else Qt.CheckState.Checked)
                 name_item.setCheckState(new_state)
+                self._metrics_table.blockSignals(False)
+                self._update_metric_row_styles()
+            self._checkbox_just_toggled = False
             return
         if col == 0:
             item = self._metrics_table.item(row, 0)
@@ -390,6 +501,7 @@ class PhotometryCTADialog(ExportMixin, QDialog):
     def _on_metric_check_changed(self, row: int, col: int):
         """Handle checkbox toggle - update row styling."""
         if col == 1:
+            self._checkbox_just_toggled = True
             self._update_metric_row_styles()
 
     def _update_metric_row_styles(self):
@@ -541,11 +653,23 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         self._viewmodel.selected_categories = categories
         self._viewmodel.selected_metrics = metrics
 
+        # Filter markers by condition and visibility
+        selected_conditions = self._get_selected_conditions()
+        filtered_markers = [
+            m for m in self._markers
+            if getattr(m, 'visible', True)
+            and (selected_conditions is None or not m.condition or m.condition in selected_conditions)
+        ]
+
+        # Get condition mode
+        condition_mode = self._condition_mode_combo.currentData() or "combined"
+
         self._viewmodel.generate_preview(
-            markers=self._markers,
+            markers=filtered_markers,
             signals=self._signals,
             time_array=self._time_array,
             metric_labels=self._metric_labels,
+            condition_mode=condition_mode,
         )
 
     def _on_calculation_started(self):
@@ -568,6 +692,7 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         if collection:
             print(f"[CTA] Collection has {len(collection.results)} results")
 
+        self._btn_export_csv.setEnabled(True)
         self._update_preview_plots()
         self.cta_generated.emit()
 
@@ -579,6 +704,29 @@ class PhotometryCTADialog(ExportMixin, QDialog):
 
     def _on_export_complete(self, filepath: str):
         QMessageBox.information(self, "Export Complete", f"CTA data exported to:\n{filepath}")
+
+    def _on_export_csv_clicked(self):
+        """Export CTA data to wide-format CSV (all metrics in one file)."""
+        from PyQt6.QtWidgets import QFileDialog
+        from pathlib import Path
+
+        # Build a smart default filename from the source data path
+        default_name = "CTA_export.csv"
+        default_dir = ""
+        st = getattr(self, '_state', None) or getattr(self.parent(), 'state', None) if self.parent() else None
+        if st and hasattr(st, 'in_path') and st.in_path:
+            source_path = Path(st.in_path)
+            default_dir = str(source_path.parent)
+            default_name = f"{source_path.stem}_CTA.csv"
+
+        start_path = str(Path(default_dir) / default_name) if default_dir else default_name
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export CTA Data", start_path,
+            "CSV Files (*.csv);;All Files (*.*)"
+        )
+        if filepath:
+            self._viewmodel.export_to_csv_wide(filepath)
 
     # -------------------------------------------------------------------------
     # Preview Plots
@@ -592,7 +740,8 @@ class PhotometryCTADialog(ExportMixin, QDialog):
                 item.widget().deleteLater()
 
         collection = self._viewmodel.current_collection
-        if not collection or not collection.results:
+        has_condition_data = bool(self._viewmodel.condition_collections)
+        if (not collection or not collection.results) and not has_condition_data:
             label = QLabel("No CTA results to display")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._plot_layout.addWidget(label)
@@ -609,29 +758,81 @@ class PhotometryCTADialog(ExportMixin, QDialog):
             traceback.print_exc()
 
     def _create_matplotlib_preview(self):
-        """Create matplotlib preview of CTA results."""
-        import matplotlib.pyplot as plt
+        """Create matplotlib preview of CTA results — dispatches by condition mode."""
+        mode = self._viewmodel.condition_mode
+
+        if mode == 'overlay':
+            self._create_overlay_preview()
+        elif mode == 'separate':
+            self._create_separate_preview()
+        else:
+            self._create_combined_preview()
+
+    def _add_figure_to_layout(self, fig, n_metrics: int):
+        """Add a matplotlib figure + toolbar to the plot layout."""
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+
+        canvas = FigureCanvas(fig)
+        canvas.setMinimumHeight(int(3.5 * max(1, n_metrics) * fig.dpi))
+        canvas.setStyleSheet("background-color: #1e1e1e;")
+
+        scroll_area = self._plot_tab
+        def _forward_wheel(event, _sa=scroll_area):
+            _sa.verticalScrollBar().setValue(
+                _sa.verticalScrollBar().value() - event.angleDelta().y()
+            )
+        canvas.wheelEvent = _forward_wheel
+
+        toolbar = NavigationToolbar2QT(canvas, self)
+        toolbar.setStyleSheet("""
+            QToolBar { background-color: #1e1e1e; border: none; spacing: 3px; padding: 0px; margin: 0px; }
+            QToolButton {
+                background-color: transparent; border: none;
+                padding: 3px; color: #d4d4d4;
+            }
+            QToolButton:hover { background-color: #3d3d3d; }
+            QToolButton:pressed { background-color: #5d5d5d; }
+            QLabel { color: #d4d4d4; }
+        """)
+
+        container = QWidget()
+        container.setStyleSheet("background-color: #1e1e1e; border: none;")
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(canvas)
+        container_layout.addWidget(toolbar)
+
+        self._plot_layout.addWidget(container)
+        canvas._figure = fig
+
+    def _get_metrics_and_types(self, collection):
+        """Get ordered metrics and marker types for a collection."""
+        marker_types = self._get_selected_categories()
+        if not marker_types:
+            types = set()
+            for r in collection.results.values():
+                types.add(f"{r.category}:{r.label}")
+            marker_types = sorted(types)
+        return marker_types
+
+    def _create_combined_preview(self):
+        """Create combined CTA preview (original behavior)."""
+        import matplotlib.pyplot as plt
 
         collection = self._viewmodel.current_collection
         if not collection:
             return
 
         is_zscored = self._viewmodel.config.zscore_baseline
-
-        marker_types = self._get_selected_categories()
-        if not marker_types:
-            marker_types = self._viewmodel.get_marker_types()
+        marker_types = self._get_metrics_and_types(collection)
 
         for marker_type in marker_types:
             category, label = marker_type.split(":", 1)
             type_results = collection.get_results_for_marker_type(category, label)
-
             if not type_results:
                 continue
 
-            # Get metrics in table order
             selected_metrics_ordered = self._get_selected_metrics()
             available_metrics = set(r.metric_key for r in type_results.values())
             metrics = [m for m in selected_metrics_ordered if m in available_metrics]
@@ -644,25 +845,24 @@ class PhotometryCTADialog(ExportMixin, QDialog):
 
             fig, axes = plt.subplots(
                 n_metrics, n_cols,
-                figsize=(5 * n_cols, 3 * n_metrics),
-                squeeze=False,
-                facecolor='#1e1e1e'
+                figsize=(5 * n_cols, 3.5 * n_metrics),
+                squeeze=False, facecolor='#1e1e1e'
             )
-            fig.suptitle(f"CTA: {marker_type}", fontsize=12, fontweight='bold', color='#e0e0e0')
+            fig.suptitle(f"CTA: {marker_type}", fontsize=12, fontweight='bold',
+                         color='#e0e0e0', y=1.0 - 0.01 / max(1, n_metrics))
 
+            show_paired = self._chk_show_paired_lines.isChecked()
             for idx, metric_key in enumerate(metrics):
-                # Use per-metric color
                 metric_color = self._metric_colors.get(metric_key, QColor('#4488ff')).name()
 
                 onset_key = f"{category}:{label}:onset:{metric_key}"
                 onset_result = type_results.get(onset_key)
-
                 withdrawal_key = f"{category}:{label}:withdrawal:{metric_key}"
                 withdrawal_result = type_results.get(withdrawal_key)
 
                 ax_onset = axes[idx, 0]
                 if onset_result and onset_result.traces:
-                    self._plot_cta_on_axis(ax_onset, onset_result, 'Onset', metric_color, is_zscored)
+                    self._plot_cta_on_axis(ax_onset, onset_result, 'Onset', metric_color, is_zscored, show_paired)
                 else:
                     ax_onset.text(0.5, 0.5, 'No onset data', ha='center', va='center',
                                   transform=ax_onset.transAxes, color='#888')
@@ -675,46 +875,333 @@ class PhotometryCTADialog(ExportMixin, QDialog):
                 if has_withdrawal:
                     ax_withdrawal = axes[idx, 1]
                     if withdrawal_result and withdrawal_result.traces:
-                        self._plot_cta_on_axis(ax_withdrawal, withdrawal_result, 'Withdrawal', metric_color, is_zscored)
+                        self._plot_cta_on_axis(ax_withdrawal, withdrawal_result, 'Withdrawal', metric_color, is_zscored, show_paired)
                     else:
                         ax_withdrawal.text(0.5, 0.5, 'No withdrawal data', ha='center', va='center',
                                            transform=ax_withdrawal.transAxes, color='#888')
                         ax_withdrawal.set_facecolor('#252525')
                         ax_withdrawal.set_title(f"{metric_key} - Withdrawal CTA", color='#e0e0e0')
 
-            plt.tight_layout()
+            fig.tight_layout(h_pad=3.0, w_pad=2.0, rect=[0, 0, 1, 0.97])
+            self._add_figure_to_layout(fig, n_metrics)
 
-            canvas = FigureCanvas(fig)
-            canvas.setStyleSheet("background-color: #1e1e1e;")
+    def _create_separate_preview(self):
+        """Create separate CTA preview — one figure per condition."""
+        import matplotlib.pyplot as plt
 
-            toolbar = NavigationToolbar2QT(canvas, self)
-            toolbar.setStyleSheet("""
-                QToolBar { background-color: #1e1e1e; border: none; spacing: 3px; padding: 0px; margin: 0px; }
-                QToolButton {
-                    background-color: transparent; border: none;
-                    padding: 3px; color: #d4d4d4;
-                }
-                QToolButton:hover { background-color: #3d3d3d; }
-                QToolButton:pressed { background-color: #5d5d5d; }
-                QLabel { color: #d4d4d4; }
-            """)
+        condition_collections = self._viewmodel.condition_collections
+        if not condition_collections:
+            return
 
-            container = QWidget()
-            container.setStyleSheet("background-color: #1e1e1e; border: none;")
-            container_layout = QVBoxLayout(container)
-            container_layout.setContentsMargins(0, 0, 0, 0)
-            container_layout.addWidget(canvas)
-            container_layout.addWidget(toolbar)
+        is_zscored = self._viewmodel.config.zscore_baseline
+        show_paired = self._chk_show_paired_lines.isChecked()
 
-            self._plot_layout.addWidget(container)
-            canvas._figure = fig
+        for cond_name, collection in sorted(condition_collections.items()):
+            marker_types = self._get_metrics_and_types(collection)
 
-    def _plot_cta_on_axis(self, ax, result, alignment_label: str, color: str, is_zscored: bool = False):
+            for marker_type in marker_types:
+                category, label = marker_type.split(":", 1)
+                type_results = collection.get_results_for_marker_type(category, label)
+                if not type_results:
+                    continue
+
+                selected_metrics_ordered = self._get_selected_metrics()
+                available_metrics = set(r.metric_key for r in type_results.values())
+                metrics = [m for m in selected_metrics_ordered if m in available_metrics]
+                if not metrics:
+                    metrics = list(available_metrics)
+                n_metrics = len(metrics)
+
+                has_withdrawal = any(r.alignment == 'withdrawal' for r in type_results.values())
+                n_cols = 2 if has_withdrawal else 1
+
+                fig, axes = plt.subplots(
+                    n_metrics, n_cols,
+                    figsize=(5 * n_cols, 3.5 * n_metrics),
+                    squeeze=False, facecolor='#1e1e1e'
+                )
+                fig.suptitle(f"CTA: {marker_type} [{cond_name}]", fontsize=12,
+                             fontweight='bold', color='#e0e0e0',
+                             y=1.0 - 0.01 / max(1, n_metrics))
+
+                for idx, metric_key in enumerate(metrics):
+                    metric_color = self._metric_colors.get(metric_key, QColor('#4488ff')).name()
+
+                    onset_result = type_results.get(f"{category}:{label}:onset:{metric_key}")
+                    withdrawal_result = type_results.get(f"{category}:{label}:withdrawal:{metric_key}")
+
+                    ax_onset = axes[idx, 0]
+                    if onset_result and onset_result.traces:
+                        self._plot_cta_on_axis(ax_onset, onset_result, 'Onset', metric_color, is_zscored, show_paired)
+                    else:
+                        ax_onset.set_facecolor('#252525')
+                        ax_onset.set_title(f"{metric_key} - Onset CTA", color='#e0e0e0')
+                        ax_onset.text(0.5, 0.5, 'No data', ha='center', va='center',
+                                      transform=ax_onset.transAxes, color='#888')
+
+                    if has_withdrawal:
+                        ax_w = axes[idx, 1]
+                        if withdrawal_result and withdrawal_result.traces:
+                            self._plot_cta_on_axis(ax_w, withdrawal_result, 'Withdrawal', metric_color, is_zscored, show_paired)
+                        else:
+                            ax_w.set_facecolor('#252525')
+                            ax_w.set_title(f"{metric_key} - Withdrawal CTA", color='#e0e0e0')
+                            ax_w.text(0.5, 0.5, 'No data', ha='center', va='center',
+                                      transform=ax_w.transAxes, color='#888')
+
+                fig.tight_layout(h_pad=3.0, w_pad=2.0, rect=[0, 0, 1, 0.97])
+                self._add_figure_to_layout(fig, n_metrics)
+
+    def _plot_overlay_condition(self, ax, result, cond_color: str, cond_name: str,
+                                show_paired: bool = True):
+        """Plot one condition's CTA data on an overlay axis."""
+        if not result or not result.traces:
+            return
+        # Individual traces
+        for trace in result.traces:
+            ax.plot(trace.time, trace.values, color=cond_color, alpha=0.12, linewidth=0.5)
+        # Mean + SEM
+        if result.time_common is not None and result.mean is not None:
+            ax.plot(result.time_common, result.mean, color=cond_color, linewidth=2,
+                    label=f'{cond_name} (n={result.n_events})')
+            if result.sem is not None:
+                ax.fill_between(
+                    result.time_common,
+                    result.mean - result.sem, result.mean + result.sem,
+                    alpha=0.2, color=cond_color,
+                )
+        # Paired marker lines
+        if show_paired:
+            added = False
+            for trace in result.traces:
+                if trace.paired_event_offset is not None:
+                    ax.axvline(trace.paired_event_offset, color=cond_color,
+                               alpha=0.15, linewidth=1.0, linestyle=':',
+                               label=f'{cond_name} withdrawal' if not added else None)
+                    added = True
+
+    def _create_overlay_preview(self):
+        """Create overlay CTA preview — conditions on same axes, different colors."""
+        import matplotlib.pyplot as plt
+
+        condition_collections = self._viewmodel.condition_collections
+        if not condition_collections:
+            return
+
+        is_zscored = self._viewmodel.config.zscore_baseline
+        show_paired = self._chk_show_paired_lines.isChecked()
+
+        # Assign a color per condition (+ white for "All combined")
+        _CONDITION_COLORS = [
+            '#4488ff', '#ff6644', '#44cc66', '#cc44ff', '#ffcc44',
+            '#44cccc', '#ff44aa', '#88cc44', '#ff8844', '#4466ff',
+        ]
+        cond_names = sorted(condition_collections.keys())
+        cond_color_map = {
+            name: _CONDITION_COLORS[i % len(_CONDITION_COLORS)]
+            for i, name in enumerate(cond_names)
+        }
+
+        # Build "All combined" collection if there are multiple conditions
+        all_combined = None
+        if len(condition_collections) > 1:
+            # Merge all results by recalculating from combined markers
+            # We already have per-condition results, so merge traces manually
+            all_combined = self._build_combined_collection(condition_collections)
+
+        # Gather all marker types across all conditions
+        all_marker_types = set()
+        for collection in condition_collections.values():
+            for r in collection.results.values():
+                all_marker_types.add(f"{r.category}:{r.label}")
+        selected_cats = self._get_selected_categories()
+        marker_types = sorted(selected_cats if selected_cats else all_marker_types)
+
+        for marker_type in marker_types:
+            category, label = marker_type.split(":", 1)
+
+            # Gather metrics across all conditions for this marker type
+            all_available = set()
+            has_withdrawal = False
+            for collection in condition_collections.values():
+                type_results = collection.get_results_for_marker_type(category, label)
+                for r in type_results.values():
+                    all_available.add(r.metric_key)
+                    if r.alignment == 'withdrawal':
+                        has_withdrawal = True
+
+            selected_metrics_ordered = self._get_selected_metrics()
+            metrics = [m for m in selected_metrics_ordered if m in all_available]
+            if not metrics:
+                metrics = sorted(all_available)
+            n_metrics = len(metrics)
+            if n_metrics == 0:
+                continue
+
+            n_cols = 2 if has_withdrawal else 1
+
+            fig, axes = plt.subplots(
+                n_metrics, n_cols,
+                figsize=(5 * n_cols, 3.5 * n_metrics),
+                squeeze=False, facecolor='#1e1e1e'
+            )
+            fig.suptitle(f"CTA: {marker_type} (Overlay)", fontsize=12,
+                         fontweight='bold', color='#e0e0e0',
+                         y=1.0 - 0.01 / max(1, n_metrics))
+
+            for idx, metric_key in enumerate(metrics):
+                ax_onset = axes[idx, 0]
+                ax_onset.set_facecolor('#252525')
+                ax_onset.tick_params(colors='#d4d4d4', which='both')
+                for spine in ax_onset.spines.values():
+                    spine.set_color('#3a3a3a')
+                self._draw_baseline_zone(ax_onset)
+                ax_onset.axvline(0, color='#ff5555', linestyle='--', linewidth=1.5)
+
+                if has_withdrawal:
+                    ax_w = axes[idx, 1]
+                    ax_w.set_facecolor('#252525')
+                    ax_w.tick_params(colors='#d4d4d4', which='both')
+                    for spine in ax_w.spines.values():
+                        spine.set_color('#3a3a3a')
+                    self._draw_baseline_zone(ax_w)
+                    ax_w.axvline(0, color='#ff5555', linestyle='--', linewidth=1.5)
+
+                metric_label_text = metric_key
+
+                # Plot "All combined" first (behind per-condition traces) in gray
+                if all_combined:
+                    combined_results = all_combined.get_results_for_marker_type(category, label)
+                    onset_r = combined_results.get(f"{category}:{label}:onset:{metric_key}")
+                    if onset_r:
+                        metric_label_text = onset_r.metric_label
+                        self._plot_overlay_condition(ax_onset, onset_r, '#888888', 'All combined', show_paired)
+                    if has_withdrawal:
+                        w_r = combined_results.get(f"{category}:{label}:withdrawal:{metric_key}")
+                        if w_r:
+                            self._plot_overlay_condition(ax_w, w_r, '#888888', 'All combined', show_paired)
+
+                # Plot per-condition traces on top
+                for cond_name in cond_names:
+                    collection = condition_collections[cond_name]
+                    type_results = collection.get_results_for_marker_type(category, label)
+                    cond_color = cond_color_map[cond_name]
+
+                    onset_result = type_results.get(f"{category}:{label}:onset:{metric_key}")
+                    if onset_result:
+                        metric_label_text = onset_result.metric_label
+                    self._plot_overlay_condition(ax_onset, onset_result, cond_color, cond_name, show_paired)
+
+                    if has_withdrawal:
+                        w_result = type_results.get(f"{category}:{label}:withdrawal:{metric_key}")
+                        self._plot_overlay_condition(ax_w, w_result, cond_color, cond_name, show_paired)
+
+                ylabel = metric_label_text
+                if is_zscored:
+                    ylabel = f'{ylabel} (z-scored)'
+
+                ax_onset.set_xlabel('Time from Onset (s)', color='#d4d4d4')
+                ax_onset.set_ylabel(ylabel, color='#d4d4d4')
+                ax_onset.set_title(f'{metric_label_text} - Onset CTA', color='#e0e0e0')
+                ax_onset.legend(fontsize=8, loc='best', facecolor='#2a2a2a',
+                                edgecolor='#3a3a3a', labelcolor='#d4d4d4')
+                ax_onset.grid(True, alpha=0.2, color='#3a3a3a')
+
+                if has_withdrawal:
+                    ax_w.set_xlabel('Time from Withdrawal (s)', color='#d4d4d4')
+                    ax_w.set_ylabel(ylabel, color='#d4d4d4')
+                    ax_w.set_title(f'{metric_label_text} - Withdrawal CTA', color='#e0e0e0')
+                    ax_w.legend(fontsize=8, loc='best', facecolor='#2a2a2a',
+                                edgecolor='#3a3a3a', labelcolor='#d4d4d4')
+                    ax_w.grid(True, alpha=0.2, color='#3a3a3a')
+
+            fig.tight_layout(h_pad=3.0, w_pad=2.0, rect=[0, 0, 1, 0.97])
+            self._add_figure_to_layout(fig, n_metrics)
+
+    def _build_combined_collection(self, condition_collections):
+        """Merge per-condition collections into a single 'All combined' collection."""
+        from core.domain.cta import CTACollection, CTAResult
+        combined = CTACollection(config=self._viewmodel.config)
+
+        # Gather all result keys across conditions
+        all_keys = set()
+        for coll in condition_collections.values():
+            all_keys.update(coll.results.keys())
+
+        for key in all_keys:
+            # Merge traces from all conditions for this key
+            merged_traces = []
+            template_result = None
+            for coll in condition_collections.values():
+                r = coll.results.get(key)
+                if r:
+                    template_result = r
+                    merged_traces.extend(r.traces)
+
+            if not template_result or not merged_traces:
+                continue
+
+            # Recompute mean/SEM from merged traces
+            time_common = template_result.time_common
+            if time_common is not None and len(merged_traces) > 0:
+                from scipy import interpolate as _interp
+                # Interpolate all traces onto common time base
+                all_values = []
+                for trace in merged_traces:
+                    if len(trace.time) < 2:
+                        continue
+                    f = _interp.interp1d(trace.time, trace.values, kind='linear',
+                                         bounds_error=False, fill_value=np.nan)
+                    all_values.append(f(time_common))
+
+                if all_values:
+                    stacked = np.array(all_values)
+                    mean = np.nanmean(stacked, axis=0)
+                    sem = np.nanstd(stacked, axis=0, ddof=1) / np.sqrt(len(all_values)) if len(all_values) > 1 else np.zeros_like(mean)
+                else:
+                    mean = template_result.mean
+                    sem = template_result.sem
+
+                merged_result = CTAResult(
+                    metric_key=template_result.metric_key,
+                    metric_label=template_result.metric_label,
+                    alignment=template_result.alignment,
+                    category=template_result.category,
+                    label=template_result.label,
+                    config=template_result.config,
+                    traces=merged_traces,
+                    time_common=time_common,
+                    mean=mean,
+                    sem=sem,
+                    n_events=len(merged_traces),
+                )
+                combined.add_result(merged_result)
+
+        return combined
+
+    def _draw_baseline_zone(self, ax):
+        """Draw the z-score baseline zone as a shaded region if enabled."""
+        if not self._chk_show_baseline.isChecked():
+            return
+        config = self._viewmodel.config
+        if not config.zscore_baseline:
+            return
+        ax.axvspan(
+            config.baseline_start, config.baseline_end,
+            alpha=0.12, color='#44aaff', zorder=0,
+            label='Baseline zone',
+        )
+
+    def _plot_cta_on_axis(self, ax, result, alignment_label: str, color: str,
+                          is_zscored: bool = False, show_paired_lines: bool = True):
         """Plot a single CTA result on the given axis."""
         ax.set_facecolor('#252525')
         ax.tick_params(colors='#d4d4d4', which='both')
         for spine in ax.spines.values():
             spine.set_color('#3a3a3a')
+
+        # Baseline zone (behind data)
+        self._draw_baseline_zone(ax)
 
         for trace in result.traces:
             ax.plot(trace.time, trace.values, color=color, alpha=0.2, linewidth=0.5)
@@ -731,6 +1218,20 @@ class PhotometryCTADialog(ExportMixin, QDialog):
                 )
 
         ax.axvline(0, color='#ff5555', linestyle='--', linewidth=1.5, label=alignment_label)
+
+        # Draw paired event marker lines (e.g., withdrawal lines on onset CTA)
+        if show_paired_lines:
+            paired_label = 'Withdrawal' if alignment_label == 'Onset' else 'Onset'
+            added_legend = False
+            for trace in result.traces:
+                if trace.paired_event_offset is not None:
+                    ax.axvline(
+                        trace.paired_event_offset,
+                        color='#ff5555', alpha=0.15, linewidth=1.0, linestyle=':',
+                        label=paired_label if not added_legend else None,
+                    )
+                    added_legend = True
+
         ax.set_xlabel(f'Time from {alignment_label} (s)', color='#d4d4d4')
 
         ylabel = result.metric_label

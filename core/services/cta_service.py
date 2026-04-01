@@ -35,6 +35,7 @@ class CTAService:
         event_times: List[float],
         event_ids: Optional[List[str]] = None,
         baseline_ref_times: Optional[List[float]] = None,
+        paired_event_times: Optional[List[float]] = None,
         sweep_idx: int = 0,
         config: Optional[CTAConfig] = None,
         metric_key: str = 'signal',
@@ -127,12 +128,18 @@ class CTAService:
                         # If std is ~0, just subtract mean (flat baseline)
                         vals_window = vals_window - baseline_mean
 
+            # Compute offset to paired event (onset→withdrawal or withdrawal→onset)
+            paired_offset = None
+            if paired_event_times is not None and i < len(paired_event_times):
+                paired_offset = float(paired_event_times[i] - event_time)
+
             trace = CTATrace(
                 event_id=event_ids[i] if i < len(event_ids) else f"event_{i}",
                 sweep_idx=sweep_idx,
                 event_time=float(event_time),
                 time=t_window,
                 values=vals_window,
+                paired_event_offset=paired_offset,
             )
             traces.append(trace)
 
@@ -219,6 +226,14 @@ class CTAService:
             onset_times = [m.start_time for m in group_markers]
             onset_ids = [m.id for m in group_markers]
 
+            # For onset CTA: paired event = withdrawal time (for paired marker lines)
+            onset_paired_times = []
+            for m in group_markers:
+                if m.is_paired and m.end_time is not None:
+                    onset_paired_times.append(m.end_time)
+                else:
+                    onset_paired_times.append(None)
+
             # Withdrawal times (only for paired markers)
             # Keep track of corresponding onset times for z-score baseline
             withdrawal_times = []
@@ -242,6 +257,7 @@ class CTAService:
                         signal=signal,
                         event_times=onset_times,
                         event_ids=onset_ids,
+                        paired_event_times=onset_paired_times,
                         config=config,
                         metric_key=metric_key,
                         metric_label=metric_label,
@@ -265,6 +281,7 @@ class CTAService:
                         event_times=withdrawal_times,
                         event_ids=withdrawal_ids,
                         baseline_ref_times=withdrawal_onset_times,  # Z-score to onset baseline
+                        paired_event_times=withdrawal_onset_times,  # Show onset lines on withdrawal CTA
                         config=config,
                         metric_key=metric_key,
                         metric_label=metric_label,
@@ -413,3 +430,129 @@ class CTAService:
                                 marker_type, result.alignment, result.metric_key,
                                 t, m, s
                             ])
+
+    def export_to_csv_wide(
+        self,
+        collection: CTACollection,
+        filepath: str,
+    ) -> None:
+        """
+        Export all CTA data into a single wide-format CSV.
+
+        Columns: time, metric1_event1, metric1_event2, ..., metric1_mean, metric1_sem,
+                        metric2_event1, metric2_event2, ..., metric2_mean, metric2_sem, ...
+
+        All metrics share the same time column (common time base).
+
+        Args:
+            collection: The CTA collection to export
+            filepath: Path to save CSV
+        """
+        import csv
+        from scipy import interpolate
+
+        # Collect all results that have data, grouped by alignment
+        results_with_data = []
+        for key, result in collection.results.items():
+            if result.time_common is not None and len(result.traces) > 0:
+                results_with_data.append(result)
+
+        if not results_with_data:
+            return
+
+        # Use the first result's time base as the common time
+        t_common = results_with_data[0].time_common
+        n_points = len(t_common)
+
+        # Build columns for each result
+        all_columns = []  # list of (header, values_array)
+        all_columns.append(('time', t_common))
+
+        for result in results_with_data:
+            safe_metric = result.metric_key.replace('/', '_')
+            prefix = f"{safe_metric}_{result.alignment}"
+
+            # Interpolate each trace onto the common time base
+            for i, trace in enumerate(result.traces):
+                if len(trace.time) < 2:
+                    continue
+                f_interp = interpolate.interp1d(
+                    trace.time, trace.values,
+                    kind='linear', bounds_error=False, fill_value=np.nan
+                )
+                all_columns.append((f"{prefix}_event{i + 1}", f_interp(t_common)))
+
+            # Add mean and sem
+            if result.mean is not None:
+                all_columns.append((f"{prefix}_mean", result.mean))
+            if result.sem is not None:
+                all_columns.append((f"{prefix}_sem", result.sem))
+
+        # Write single CSV
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([col[0] for col in all_columns])
+            for j in range(n_points):
+                writer.writerow([col[1][j] for col in all_columns])
+
+    def export_conditions_to_csv_wide(
+        self,
+        condition_collections: Dict[str, CTACollection],
+        filepath: str,
+    ) -> None:
+        """
+        Export per-condition CTA data into a single wide-format CSV.
+
+        Each column header is prefixed with the condition name so all
+        conditions appear side-by-side.
+
+        Args:
+            condition_collections: Dict of condition_name -> CTACollection
+            filepath: Path to save CSV
+        """
+        import csv
+        from scipy import interpolate
+
+        # Collect all results with data across all conditions
+        all_columns = []
+        t_common = None
+
+        for cond_name, collection in sorted(condition_collections.items()):
+            safe_cond = cond_name.replace('/', '_').replace(' ', '_')
+
+            for key, result in collection.results.items():
+                if result.time_common is None or len(result.traces) == 0:
+                    continue
+
+                # Use the first result's time base as the common time
+                if t_common is None:
+                    t_common = result.time_common
+                    all_columns.append(('time', t_common))
+
+                n_points = len(t_common)
+                safe_metric = result.metric_key.replace('/', '_')
+                prefix = f"{safe_cond}_{safe_metric}_{result.alignment}"
+
+                for i, trace in enumerate(result.traces):
+                    if len(trace.time) < 2:
+                        continue
+                    f_interp = interpolate.interp1d(
+                        trace.time, trace.values,
+                        kind='linear', bounds_error=False, fill_value=np.nan
+                    )
+                    all_columns.append((f"{prefix}_event{i + 1}", f_interp(t_common)))
+
+                if result.mean is not None:
+                    all_columns.append((f"{prefix}_mean", result.mean))
+                if result.sem is not None:
+                    all_columns.append((f"{prefix}_sem", result.sem))
+
+        if not all_columns or t_common is None:
+            return
+
+        n_points = len(t_common)
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([col[0] for col in all_columns])
+            for j in range(n_points):
+                writer.writerow([col[1][j] for col in all_columns])

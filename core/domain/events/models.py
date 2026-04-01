@@ -67,6 +67,9 @@ class EventMarker:
     # Grouping
     group_id: Optional[str] = None
 
+    # Visibility (False = hidden/excluded from rendering and CTA, but still in store)
+    visible: bool = True
+
     @property
     def duration(self) -> float:
         """Duration of marker (0 for single markers)."""
@@ -154,6 +157,7 @@ class EventMarker:
             'line_width': self.line_width,
             'notes': self.notes,
             'group_id': self.group_id,
+            'visible': self.visible,
         }
 
     @classmethod
@@ -179,6 +183,7 @@ class EventMarker:
             line_width=data.get('line_width'),
             notes=data.get('notes'),
             group_id=data.get('group_id'),
+            visible=data.get('visible', True),
         )
 
     def copy(self) -> 'EventMarker':

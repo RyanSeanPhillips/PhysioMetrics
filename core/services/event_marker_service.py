@@ -237,6 +237,7 @@ class EventMarkerService:
         color_override: Optional[str] = None,
         line_width: Optional[int] = None,
         notes: Optional[str] = None,
+        visible: Optional[bool] = None,
     ) -> bool:
         """
         Update marker properties.
@@ -249,6 +250,7 @@ class EventMarkerService:
             color_override: New color override (or None to keep current)
             line_width: Custom line width (or None to keep current, 0 to reset to default)
             notes: New notes (or None to keep current)
+            visible: Show/hide marker (or None to keep current)
 
         Returns:
             True if updated, False if marker not found
@@ -275,6 +277,8 @@ class EventMarkerService:
             marker.line_width = line_width if line_width >= 0 else None
         if notes is not None:
             marker.notes = notes if notes else None
+        if visible is not None:
+            marker.visible = visible
 
         # Pass old values to store for proper index cleanup
         self._store.update(marker, old_category=old_category, old_sweep_idx=old_sweep_idx)

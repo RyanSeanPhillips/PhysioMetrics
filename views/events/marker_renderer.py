@@ -180,7 +180,7 @@ class MarkerRenderer:
         # Default line widths (can be changed via settings dialog)
         self._default_single_width: int = 0  # 0 = cosmetic pen (always 1px regardless of zoom)
         self._default_paired_width: int = 0  # 0 = cosmetic pen (thin edges)
-        self._default_fill_alpha: int = 30
+        self._default_fill_alpha: int = 55
 
         # Time offset for display (when stimulus channel normalizes time to stim onset)
         # Markers are stored in absolute time, display time = absolute - offset
@@ -714,6 +714,8 @@ class MarkerRenderer:
         sorted_markers = sorted(markers, key=lambda m: m.start_time)
 
         for marker in sorted_markers:
+            if not getattr(marker, 'visible', True):
+                continue
             self._render_marker(marker)
 
         # Update selection highlights

@@ -1711,58 +1711,59 @@ class MainWindow(QMainWindow):
                             signals['pleth'] = y_array
                             metric_labels['pleth'] = 'Pleth Signal'
 
-        # Add interpolated breath metrics (IF, Ti, Te, Amplitude, etc.)
-        # These are per-breath values that need to be interpolated to a continuous signal
-        breath_metrics_to_add = ['IF', 'Ti', 'Te', 'PIF', 'PEF', 'VT', 'MV', 'DVDT', 'EF50']
-        breath_metric_labels = {
-            'IF': 'Instantaneous Frequency (Hz)',
-            'Ti': 'Inspiratory Time (s)',
-            'Te': 'Expiratory Time (s)',
-            'PIF': 'Peak Inspiratory Flow',
-            'PEF': 'Peak Expiratory Flow',
-            'VT': 'Tidal Volume',
-            'MV': 'Minute Ventilation',
-            'DVDT': 'dV/dt Max',
-            'EF50': 'Expiratory Flow at 50%',
+        # Add continuous breathing metrics using the same mechanism as the y2 plot.
+        # Each metric function in metrics.METRICS produces a stepwise-constant array
+        # the same length as time_array, computed from detected peaks/breaths.
+        from core import metrics as _metrics
+
+        # Key breathing metrics to offer for CTA (subset of metrics.METRICS)
+        breath_metric_keys = {
+            'if':        'Instantaneous Frequency (Hz)',
+            'ti':        'Inspiratory Time (s)',
+            'te':        'Expiratory Time (s)',
+            'amp_insp':  'Inspiratory Amplitude',
+            'amp_exp':   'Expiratory Amplitude',
+            'vent_proxy': 'Ventilation Proxy',
+            'area_insp': 'Inspiratory Area',
+            'area_exp':  'Expiratory Area',
+            'ti_te_ratio': 'Ti/Te Ratio',
+            'regularity': 'Regularity Score',
         }
 
-        # Debug: Check for breath metrics
-        print(f"[CTA Debug] Checking for breath metrics...")
-        print(f"[CTA Debug]   has cached_traces_by_sweep: {hasattr(self, 'cached_traces_by_sweep')}")
-        if hasattr(self, 'cached_traces_by_sweep'):
-            print(f"[CTA Debug]   cached_traces_by_sweep keys: {list(self.cached_traces_by_sweep.keys()) if self.cached_traces_by_sweep else 'empty'}")
-            print(f"[CTA Debug]   sweep_idx {sweep_idx} in cache: {sweep_idx in self.cached_traces_by_sweep}")
+        st = self.state
+        peaks_dict = getattr(st, "peaks_by_sweep", {})
+        breath_dict = getattr(st, "breath_by_sweep", {})
+        pks = peaks_dict.get(sweep_idx, None)
+        breaths = breath_dict.get(sweep_idx, {})
 
-        if hasattr(self, 'cached_traces_by_sweep') and sweep_idx in self.cached_traces_by_sweep:
-            cached_data = self.cached_traces_by_sweep[sweep_idx]
-            print(f"[CTA Debug]   cached_data keys: {list(cached_data.keys())}")
+        if pks is not None and breaths.get("onsets") is not None:
+            on = breaths.get("onsets")
+            off = breaths.get("offsets")
+            exm = breaths.get("expmins")
+            exo = breaths.get("expoffs")
 
-            # Get breath timing info for interpolation
-            breath_data = self.state.breath_by_sweep.get(sweep_idx, {})
-            onsets = breath_data.get('onsets', [])
-            print(f"[CTA Debug]   Number of breath onsets: {len(onsets)}")
+            # Get processed signal for the analyze channel
+            y_proc = self._get_processed_for(st.analyze_chan, sweep_idx)
 
-            if len(onsets) > 1:
-                # Get onset times (convert indices to times)
-                onset_times = time_array[onsets] if max(onsets) < len(time_array) else None
+            # Set peak metrics context (same as _compute_y2_all_sweeps)
+            cur_pm = getattr(st, 'current_peak_metrics_by_sweep', {}).get(sweep_idx)
+            orig_pm = getattr(st, 'peak_metrics_by_sweep', {}).get(sweep_idx)
+            _metrics.set_peak_metrics(cur_pm if cur_pm is not None else orig_pm)
+            gmm_probs = getattr(st, 'gmm_sniff_probabilities', {}).get(sweep_idx)
+            _metrics.set_gmm_probabilities(gmm_probs)
 
-                if onset_times is not None and len(onset_times) > 1:
-                    for metric_key in breath_metrics_to_add:
-                        if metric_key in cached_data:
-                            metric_values = cached_data[metric_key]
-                            if metric_values is not None and len(metric_values) > 0:
-                                # Interpolate to continuous signal
-                                # Each breath's metric value is held constant for that breath's duration
-                                try:
-                                    interp_signal = self._interpolate_breath_metric(
-                                        time_array, onset_times, metric_values
-                                    )
-                                    if interp_signal is not None:
-                                        signal_key = f"breath_{metric_key}"
-                                        signals[signal_key] = interp_signal
-                                        metric_labels[signal_key] = breath_metric_labels.get(metric_key, metric_key)
-                                except Exception as e:
-                                    print(f"[CTA] Warning: Failed to interpolate {metric_key}: {e}")
+            for mkey, mlabel in breath_metric_keys.items():
+                if mkey in _metrics.METRICS:
+                    try:
+                        y2 = _metrics.METRICS[mkey](time_array, y_proc, st.sr_hz, pks, on, off, exm, exo)
+                        if y2 is not None and len(y2) == n_samples:
+                            signals[f"breath_{mkey}"] = y2
+                            metric_labels[f"breath_{mkey}"] = mlabel
+                    except Exception as e:
+                        print(f"[CTA] Warning: Failed to compute {mkey}: {e}")
+
+            _metrics.set_peak_metrics(None)
+            _metrics.set_gmm_probabilities(None)
 
         if not signals:
             # Debug: print what we have in state
@@ -1842,11 +1843,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-        # Create and show the CTA dialog
-        cta_viewmodel = CTAViewModel(self)
+        # Create CTA viewmodel (persist on MainWindow so collection survives dialog close)
+        if not hasattr(self, '_cta_viewmodel') or self._cta_viewmodel is None:
+            self._cta_viewmodel = CTAViewModel(self)
         dialog = PhotometryCTADialog(
             parent=self,
-            viewmodel=cta_viewmodel,
+            viewmodel=self._cta_viewmodel,
             markers=markers,
             signals=signals,
             time_array=time_array,
@@ -4023,15 +4025,90 @@ class MainWindow(QMainWindow):
             self._update_save_status("modified")
 
     def _autosave_session(self):
-        """Silent auto-save of current session. Errors logged, never interrupt user."""
+        """Lightweight auto-save: only saves mutable state (peaks, markers, settings).
+
+        Skips raw signal data (sweeps, time arrays) which are immutable after load.
+        This keeps autosave fast (<50ms) even for large photometry recordings.
+        Full saves happen on explicit Ctrl+S.
+        """
         if not self.state.in_path or not self.state.analyze_chan:
             return
+        # Skip if a background save is already running
+        if hasattr(self, '_autosave_worker') and self._autosave_worker is not None:
+            if self._autosave_worker.isRunning():
+                return
         try:
-            self._save_session_pmx()
-            self._update_save_status("saved")
-            print("[autosave] Session auto-saved")
+            from core.file_load_worker import FileLoadWorker
+            from core.npz_io import get_pmx_path
+            from pathlib import Path
+            import numpy as _np
+            import json
+
+            channel = self.state.analyze_chan
+            animal_id = ""
+            active_row = getattr(self, '_active_master_list_row', None)
+            if active_row is not None and hasattr(self, '_master_file_list'):
+                if active_row < len(self._master_file_list):
+                    animal_id = self._master_file_list[active_row].get('animal_id', '') or ''
+
+            pmx_path = get_pmx_path(
+                self.state.in_path, analysis_type="pleth",
+                animal_id=animal_id, channel=channel,
+            )
+            # Autosave sidecar: same name with .autosave.npz extension
+            autosave_path = pmx_path.with_suffix('.autosave.npz')
+            autosave_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Collect only mutable state (fast — just references, no large arrays)
+            st = self.state
+            save_data = {}
+
+            # Peaks and breaths (small arrays — indices only)
+            for s_idx in range(len(st.peaks_by_sweep) + 1):
+                pks = st.peaks_by_sweep.get(s_idx)
+                if pks is not None:
+                    save_data[f'peaks_{s_idx}'] = _np.asarray(pks)
+                breaths = st.breath_by_sweep.get(s_idx, {})
+                for bkey in ('onsets', 'offsets', 'expmins', 'expoffs'):
+                    bvals = breaths.get(bkey)
+                    if bvals is not None:
+                        save_data[f'breath_{bkey}_{s_idx}'] = _np.asarray(bvals)
+
+            # Event markers
+            if hasattr(self, '_event_marker_viewmodel') and self._event_marker_viewmodel:
+                try:
+                    em_data = self._event_marker_viewmodel.save_to_npz()
+                    if em_data:
+                        for k, v in em_data.items():
+                            save_data[f'em_{k}'] = v
+                except Exception:
+                    pass
+
+            # Settings as JSON string (tiny)
+            settings = {
+                'filter_order': self.filter_order,
+                'use_zscore_normalization': self.use_zscore_normalization,
+                'notch_filter_lower': self.notch_filter_lower,
+                'notch_filter_upper': self.notch_filter_upper,
+                'apnea_threshold': self._parse_float(self.ApneaThresh) or 0.5,
+                'channel_analyzed': channel,
+                'y2_metric_key': getattr(st, 'y2_metric_key', None) or '',
+            }
+            save_data['settings_json'] = json.dumps(settings)
+
+            def _do_save(progress_callback=None):
+                _np.savez(str(autosave_path), **save_data)  # No compression — speed over size
+
+            self._autosave_worker = FileLoadWorker(_do_save)
+            self._autosave_worker.finished.connect(lambda _: (
+                self._update_save_status("saved"),
+                print("[autosave] Quick-saved (background)"),
+            ))
+            self._autosave_worker.error.connect(lambda msg: print(f"[autosave] Failed: {msg}"))
+            self._autosave_worker.start()
+
         except Exception as e:
-            print(f"[autosave] Failed: {e}")
+            print(f"[autosave] Failed to start: {e}")
 
     def _update_save_status(self, status: str):
         """Update the save status indicator in the status bar."""
@@ -4146,14 +4223,28 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+            # Get CTA data (if any CTA has been generated)
+            cta_data = None
+            if hasattr(self, '_cta_viewmodel') and self._cta_viewmodel:
+                try:
+                    collection = self._cta_viewmodel.current_collection
+                    if collection and collection.results:
+                        cta_data = collection.to_npz_dict()
+                except Exception:
+                    pass
+
             # Use existing save_state_to_npz for the full state (including manual edits)
             # but write to .pmx path in physiometrics/ subfolder
+            # Include raw data for photometry sessions (signals aren't in an ABF
+            # file that can be reloaded — they only exist in the photometry NPZ)
+            is_photometry = getattr(self.state, 'photometry_raw', None) is not None
             save_state_to_npz(
                 self.state, pmx_path,
-                include_raw_data=False,
+                include_raw_data=is_photometry,
                 gmm_cache=gmm_cache,
                 app_settings=app_settings,
                 event_markers=event_markers_data,
+                cta_data=cta_data,
             )
 
             # numpy savez_compressed auto-appends .npz — rename to .pmx
@@ -4392,6 +4483,20 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[session-restore] Warning: event markers failed: {e}")
 
+        # 13b. CTA data
+        if hasattr(npz_result, 'cta_data') and npz_result.cta_data:
+            try:
+                from core.domain.cta.models import CTACollection
+                from viewmodels.cta_viewmodel import CTAViewModel
+                collection = CTACollection.from_npz_dict(npz_result.cta_data)
+                if collection and collection.results:
+                    if not hasattr(self, '_cta_viewmodel') or self._cta_viewmodel is None:
+                        self._cta_viewmodel = CTAViewModel(self)
+                    self._cta_viewmodel._current_collection = collection
+                    print(f"[session-restore] Restored CTA with {len(collection.results)} results")
+            except Exception as e:
+                print(f"[session-restore] Warning: CTA data failed: {e}")
+
         # 14. Emit channels_changed to notify listeners (plot manager, etc.)
         if hasattr(self, 'channel_manager') and self.channel_manager:
             self.channel_manager.channels_changed.emit()
@@ -4592,6 +4697,13 @@ class MainWindow(QMainWindow):
 
                         # Sort by modification time (newest first)
                         session_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+                    # Also check for .pmx files in physiometrics/ subfolder
+                    from core.npz_io import get_pmx_path as _get_pmx_path
+                    pmx_path = _get_pmx_path(st.in_path, analysis_type="pleth", channel=new_chan)
+                    if pmx_path.exists():
+                        # Prefer .pmx over legacy session files (newer format)
+                        session_files = [pmx_path] + session_files
 
                     if session_files:
                         # Found session file(s) - use most recent
@@ -5056,7 +5168,9 @@ class MainWindow(QMainWindow):
     def redraw_main_plot(self):
         """Delegate to PlotManager."""
         self.plot_manager.redraw_main_plot()
-        # Refresh event markers for current sweep
+        # Invalidate the marker refresh cache so the next refresh will re-render
+        # (plot items may have been rebuilt, e.g. after channel visibility change)
+        self._last_marker_refresh_key = None
         self._refresh_event_markers()
 
 
