@@ -65,6 +65,14 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         self._breath_data = breath_data
         self._first_viewmodel = viewmodel  # Reuse for first tab
 
+        # Derive source file stem and export dir from parent's state
+        self._source_stem = ""
+        self._source_dir = ""
+        if parent and hasattr(parent, 'state') and hasattr(parent.state, 'in_path') and parent.state.in_path:
+            p = Path(parent.state.in_path)
+            self._source_stem = p.stem
+            self._source_dir = str(p.parent)
+
         self._init_ui()
         self._apply_dark_theme()
         self.setup_export_menu()
@@ -147,7 +155,9 @@ class PhotometryCTADialog(ExportMixin, QDialog):
             metric_labels=self._metric_labels,
             channel_colors=self._channel_colors,
             breath_data=self._breath_data,
+            source_stem=self._source_stem,
         )
+        widget._default_export_dir = self._source_dir
         widget.name_changed.connect(
             lambda name, w=widget: self._on_tab_name_changed(w, name)
         )
@@ -207,7 +217,8 @@ class PhotometryCTADialog(ExportMixin, QDialog):
             has_condition_data = bool(vm.condition_collections)
             has_main = vm.current_collection is not None
             if has_condition_data or has_main:
-                filepath = str(folder_path / f"CTA_{tab_name}.csv")
+                stem = self._source_stem or "CTA"
+                filepath = str(folder_path / f"{stem}_CTA_{tab_name}.csv")
                 try:
                     vm.export_to_csv_wide(filepath)
                     exported += 1

@@ -59,6 +59,7 @@ class CTAComparisonWidget(QWidget):
         metric_labels: Optional[Dict[str, str]] = None,
         channel_colors: Optional[Dict[str, str]] = None,
         breath_data: Optional[Dict[str, Any]] = None,
+        source_stem: str = "",
     ):
         super().__init__(parent)
 
@@ -69,6 +70,7 @@ class CTAComparisonWidget(QWidget):
         self._metric_labels = metric_labels or {}
         self._channel_colors = channel_colors or {}
         self._breath_data = breath_data
+        self._source_stem = source_stem  # e.g. "3_30_2026_B__recovered_photometry"
 
         # Per-metric colors (assigned during populate)
         self._metric_colors: Dict[str, QColor] = {}
@@ -1016,8 +1018,12 @@ class CTAComparisonWidget(QWidget):
 
     def _on_export_csv_clicked(self):
         """Export CTA data to wide-format CSV (all metrics in one file)."""
-        # Build a smart default filename from the default export directory
-        default_name = "CTA_export.csv"
+        # Build smart default filename from source stem + tab name
+        tab_suffix = self.tab_name.replace(' ', '_').replace('/', '_').replace(':', '-')
+        if self._source_stem:
+            default_name = f"{self._source_stem}_CTA_{tab_suffix}.csv"
+        else:
+            default_name = f"CTA_{tab_suffix}.csv"
         default_dir = self._default_export_dir or ""
 
         start_path = str(Path(default_dir) / default_name) if default_dir else default_name
