@@ -28,11 +28,12 @@ class ChannelPanelConfig:
     enabling unified handling of 1-N channel displays.
     """
     name: str                          # Channel name
-    channel_type: str                  # "Pleth", "Opto Stim", "Event", "Raw Signal"
+    channel_type: str                  # "Pleth", "EKG", "Opto Stim", "Event", "Raw Signal"
     height_ratio: float = 0.25         # Relative height (0.0-1.0, normalized later)
     show_overlays: bool = False        # Show peak/breath/region overlays (Pleth only)
     is_primary_pleth: bool = False     # Is this the primary Pleth for editing/analysis
     is_event_channel: bool = False     # Show bout annotations on this panel
+    is_ekg_channel: bool = False       # Show R-peak markers and HR axis
     show_stim_spans: bool = False      # Show blue stim background spans
     apply_filtering: bool = False      # Apply filtering (Pleth channels only)
 
@@ -50,6 +51,8 @@ class ChannelPanelConfig:
         # Determine height ratio based on channel type
         if channel_type == "Pleth":
             height_ratio = 0.6
+        elif channel_type == "EKG":
+            height_ratio = 0.30
         elif channel_type == "Opto Stim":
             height_ratio = 0.15
         elif channel_type == "Event":
@@ -64,7 +67,8 @@ class ChannelPanelConfig:
             show_overlays=(channel_type == "Pleth" and is_primary),
             is_primary_pleth=is_primary,
             is_event_channel=(channel_type == "Event"),
-            show_stim_spans=(channel_type == "Pleth"),
+            is_ekg_channel=(channel_type == "EKG"),
+            show_stim_spans=(channel_type in ("Pleth", "EKG")),
             apply_filtering=(channel_type == "Pleth"),
         )
 
@@ -484,6 +488,10 @@ class PlotManager:
             if not grid_mode:
                 self._autoscale_axis(ax, y_data)
 
+            # EKG channel: draw R-peak markers and HR trace
+            if config.is_ekg_channel:
+                self._draw_ekg_overlays(ax, s, t_plot, y_data)
+
         # Set title on first axis
         title = self._build_plot_title(s)
         if axes:
@@ -547,11 +555,13 @@ class PlotManager:
             self.plot_host._store_from_axes(mode="single")
 
         # Layout adjustments
+        has_ekg = any(c.is_ekg_channel for c in channel_configs)
+        right_margin = 0.92 if has_ekg else 0.98  # leave room for HR right axis
         if grid_mode:
             self.plot_host.fig.tight_layout(pad=1.0)
         else:
             self.plot_host.fig.tight_layout(pad=0.5, h_pad=0.1, w_pad=0.1)
-            self.plot_host.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
+            self.plot_host.fig.subplots_adjust(left=0.06, right=right_margin, top=0.95, bottom=0.08)
 
         self.plot_host.canvas.draw_idle()
 
@@ -659,7 +669,8 @@ class PlotManager:
         # --- Layout reuse: skip expensive PlotItem create/destroy if panel config unchanged ---
         # Build a fingerprint from channel configs to detect layout changes
         layout_key = (is_dark, tuple((c.name, c.channel_type, c.is_primary_pleth, c.is_event_channel,
-                                      c.show_stim_spans, c.show_overlays, c.apply_filtering)
+                                      c.is_ekg_channel, c.show_stim_spans, c.show_overlays,
+                                      c.apply_filtering)
                                      for c in channel_configs))
         can_reuse = (
             hasattr(self, '_layout_key') and self._layout_key == layout_key
@@ -790,8 +801,15 @@ class PlotManager:
                 minimap_channels.append((y_data, channel_trace_color))
 
             # Plot trace: clipToView sends only visible data to GPU
-            curve = plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
-                              clipToView=True)
+            # EKG channels: raw trace is faint (filtered overlay added later)
+            if config.is_ekg_channel:
+                raw_pen = pg.mkPen(channel_trace_color, width=0.5, style=pg.QtCore.Qt.PenStyle.SolidLine)
+                raw_pen.setColor(pg.mkColor(channel_trace_color))
+                raw_pen.color().setAlpha(80)
+                curve = plot.plot(t_plot, y_data, pen=raw_pen, clipToView=True)
+            else:
+                curve = plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
+                                  clipToView=True)
             # Peak-preserving downsampling: reduces points during zoom/pan while
             # keeping min/max per bucket so peaks/valleys are never lost
             if self.use_auto_downsample:
@@ -817,6 +835,13 @@ class PlotManager:
                         )
                         region.setZValue(-10)
                         plot.addItem(region)
+
+        # Draw EKG overlays on any EKG channel panels (pyqtgraph path)
+        for i, config in enumerate(channel_configs):
+            if config.is_ekg_channel and i < len(plots):
+                if config.name in st.sweeps:
+                    ekg_y = st.sweeps[config.name][:, s]
+                    self._draw_ekg_overlays_pyqtgraph(plots[i], s, t_plot, ekg_y)
 
         # Set title on first plot
         if plots:
@@ -2026,6 +2051,156 @@ class PlotManager:
                     break
 
         return " | ".join(title_parts)
+
+    def _draw_ekg_overlays_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
+        """Draw filtered signal, R-peak markers, and summary on a PyQtGraph EKG panel."""
+        import pyqtgraph as pg
+        st = self.state
+        ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+        result = ecg_results.get(sweep_idx)
+        if result is None:
+            return
+
+        r_peaks = result.r_peaks
+        labels = result.labels
+        n = min(len(y_data), len(t_plot))
+
+        # Bandpass-filtered signal overlaid in blue (this is the "real" trace)
+        filtered = None
+        ecg_config = getattr(st, 'ecg_config', None)
+        if ecg_config is not None:
+            try:
+                from scipy.signal import butter, sosfiltfilt
+                nyq = (st.sr_hz or 1000.0) / 2.0
+                low = max(ecg_config.bandpass_low, 0.5)
+                high = min(ecg_config.bandpass_high, nyq - 1.0)
+                if low < high:
+                    sos = butter(ecg_config.filter_order, [low, high],
+                                 btype='band', fs=st.sr_hz, output='sos')
+                    filtered = sosfiltfilt(sos, y_data)
+                    filt_curve = plot.plot(
+                        t_plot, filtered,
+                        pen=pg.mkPen('#42A5F5', width=1.5),
+                    )
+                    filt_curve.setZValue(2)
+                    if self.use_auto_downsample:
+                        filt_curve.setDownsampling(auto=True, method='peak')
+            except Exception:
+                pass
+
+        # Use filtered signal for peak marker Y positions (peaks were detected on filtered)
+        peak_y_source = filtered if filtered is not None else y_data
+
+        if len(r_peaks) == 0:
+            return
+
+        valid_mask = (r_peaks >= 0) & (r_peaks < n)
+        r_peaks_v = r_peaks[valid_mask]
+        labels_v = labels[valid_mask]
+
+        # Valid R-peak markers (red downward triangles on the filtered signal)
+        valid_beats = r_peaks_v[labels_v == 1]
+        if len(valid_beats):
+            scatter = pg.ScatterPlotItem(
+                x=t_plot[valid_beats], y=peak_y_source[valid_beats],
+                size=8, symbol='t',
+                brush=pg.mkBrush(229, 57, 53), pen=None,
+            )
+            scatter.setZValue(10)
+            plot.addItem(scatter)
+
+        # Artifact markers (gray)
+        artifact_beats = r_peaks_v[labels_v == 0]
+        if len(artifact_beats):
+            scatter_art = pg.ScatterPlotItem(
+                x=t_plot[artifact_beats], y=peak_y_source[artifact_beats],
+                size=5, symbol='t',
+                brush=pg.mkBrush(128, 128, 128, 120), pen=None,
+            )
+            scatter_art.setZValue(9)
+            plot.addItem(scatter_art)
+
+        # Summary in panel title
+        sr_hz = st.sr_hz or 1000.0
+        n_valid = int(np.sum(labels_v == 1))
+        hr_mean = result.mean_hr_bpm(sr_hz)
+        q = int(result.quality_score * 100)
+        inv = " (inv)" if result.is_inverted else ""
+        plot.setTitle(
+            f"EKG: {hr_mean:.0f} BPM | {n_valid} beats | Q:{q}%{inv}",
+            color='#FF9800', size='8pt',
+        )
+
+    def _draw_ekg_overlays(self, ax, sweep_idx, t_plot, y_data):
+        """Draw R-peak markers and instantaneous HR trace on an EKG channel panel."""
+        st = self.state
+        ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+        result = ecg_results.get(sweep_idx)
+        if result is None:
+            return
+
+        r_peaks = result.r_peaks
+        labels = result.labels
+        if len(r_peaks) == 0:
+            return
+
+        # Clamp peak indices to data range
+        n = min(len(y_data), len(t_plot))
+        valid_mask = (r_peaks >= 0) & (r_peaks < n)
+        r_peaks_v = r_peaks[valid_mask]
+        labels_v = labels[valid_mask]
+
+        # R-peak markers — red triangles for valid, gray for artifact
+        valid_beats = r_peaks_v[labels_v == 1]
+        artifact_beats = r_peaks_v[labels_v == 0]
+
+        if len(valid_beats):
+            ax.scatter(
+                t_plot[valid_beats], y_data[valid_beats],
+                s=18, c='#E53935', marker='v', zorder=6,
+                edgecolors='none', linewidths=0,
+            )
+        if len(artifact_beats):
+            ax.scatter(
+                t_plot[artifact_beats], y_data[artifact_beats],
+                s=12, c='gray', marker='v', zorder=5,
+                edgecolors='none', linewidths=0, alpha=0.5,
+            )
+
+        # Instantaneous HR trace on right y-axis
+        sr_hz = st.sr_hz or 1000.0
+        hr_trace = result.compute_hr_trace(sr_hz, len(y_data))
+        has_hr = hr_trace is not None and not np.all(np.isnan(hr_trace))
+        if has_hr:
+            # Reuse existing twinx or create new one
+            ax_hr = ax.twinx()
+            ax_hr.plot(
+                t_plot, hr_trace,
+                linewidth=1.0, color='#FF9800', alpha=0.7, zorder=3,
+            )
+            ax_hr.set_ylabel('BPM', fontsize=7, color='#FF9800')
+            ax_hr.tick_params(axis='y', labelcolor='#FF9800', labelsize=6)
+            hr_valid = hr_trace[~np.isnan(hr_trace)]
+            if len(hr_valid) > 0:
+                hr_min, hr_max = np.min(hr_valid), np.max(hr_valid)
+                margin = max(10, (hr_max - hr_min) * 0.15)
+                ax_hr.set_ylim(hr_min - margin, hr_max + margin)
+            ax_hr.grid(False)
+
+        # Summary strip text
+        n_valid = int(np.sum(labels_v == 1))
+        hr_mean = result.mean_hr_bpm(sr_hz)
+        q = int(result.quality_score * 100)
+        inv = " (inv.)" if result.is_inverted else ""
+        summary = f"HR: {hr_mean:.0f} BPM  |  {n_valid} beats  |  Q: {q}%{inv}"
+        ax.text(
+            0.99, 0.02, summary,
+            transform=ax.transAxes, fontsize=7,
+            ha='right', va='bottom', color='#FF9800', alpha=0.9,
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.3),
+        )
+
+        print(f"[ekg] Drew {len(valid_beats)} valid + {len(artifact_beats)} artifact markers on sweep {sweep_idx}")
 
     def _draw_peak_markers(self, sweep_idx, t_plot, y):
         """Draw peak markers for current sweep, with gray markers for omitted regions."""

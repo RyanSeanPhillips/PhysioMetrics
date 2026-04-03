@@ -2653,6 +2653,19 @@ class MainWindow(QMainWindow):
             if hasattr(st, 'bout_annotations'):
                 st.bout_annotations.clear()
 
+        # Update EKG channel (for heart rate analysis)
+        ekg_channel = self.channel_manager.get_ekg_channel()
+        ekg_changed = (ekg_channel != getattr(st, 'ekg_chan', None))
+        if ekg_changed:
+            st.ekg_chan = ekg_channel
+            # Clear previous ECG results
+            ecg_dict = getattr(st, 'ecg_results_by_sweep', None)
+            if ecg_dict is not None:
+                ecg_dict.clear()
+            # Auto-detect R-peaks for current sweep if channel is set
+            if st.ekg_chan and st.ekg_chan in st.sweeps:
+                self._auto_detect_ekg_current_sweep()
+
         # Redraw the plot with new channel configuration
         self.redraw_main_plot()
 
@@ -2669,6 +2682,11 @@ class MainWindow(QMainWindow):
 
         config = configs[channel_name]
         print(f"[ChannelManager] Config found: source={config.source}, callback={config.settings_callback is not None}")
+
+        # EKG channels: open detection settings dialog
+        if config.channel_type == "EKG":
+            self._open_ekg_settings_dialog()
+            return
 
         # Call the settings callback if one was registered
         if config.settings_callback is not None:
@@ -4428,6 +4446,7 @@ class MainWindow(QMainWindow):
                         'order': ch_cfg.order,
                     }
 
+            t_npz_start = time.time()
             save_state_to_npz(
                 self.state, pmx_path,
                 include_raw_data=is_photometry,
@@ -4462,6 +4481,32 @@ class MainWindow(QMainWindow):
                 if pmx_path.exists():
                     pmx_path.unlink()
                 _npz_actual.rename(pmx_path)
+
+            npz_elapsed = time.time() - t_npz_start
+            npz_size = pmx_path.stat().st_size / (1024 * 1024)
+            print(f"[NPZ] Save: {pmx_path.name} ({npz_size:.1f} MB, {npz_elapsed:.1f}s)")
+
+            # Parallel HDF5 save for testing (alongside NPZ)
+            hdf5_path = pmx_path.with_suffix('.hdf5')
+            try:
+                from core.hdf5_io import save_state_to_hdf5
+                t_hdf5 = time.time()
+                save_state_to_hdf5(
+                    self.state, hdf5_path,
+                    include_raw_data=is_photometry,
+                    gmm_cache=gmm_cache,
+                    app_settings=app_settings,
+                    event_markers=event_markers_data,
+                    cta_data=cta_data,
+                    channel_config=channel_config,
+                )
+                hdf5_elapsed = time.time() - t_hdf5
+                hdf5_size = hdf5_path.stat().st_size / (1024 * 1024)
+                print(f"[HDF5] Parallel save: {hdf5_path.name} ({hdf5_size:.1f} MB, {hdf5_elapsed:.1f}s)")
+            except Exception as e:
+                print(f"[HDF5] Parallel save failed: {e}")
+                import traceback
+                traceback.print_exc()
 
             elapsed = time.time() - t_start
             size_mb = pmx_path.stat().st_size / (1024 * 1024)
@@ -5296,6 +5341,127 @@ class MainWindow(QMainWindow):
         n_sweeps = st.sweeps[st.stim_chan].shape[1]
         print(f"[stim] Detected stims for all {n_sweeps} sweeps")
 
+    # ---------- EKG / Heart Rate ----------
+
+    def _auto_detect_ekg_current_sweep(self):
+        """Auto-detect R-peaks on the current sweep's EKG channel."""
+        from core.services.ecg_service import detect_and_analyze
+        from core.domain.ecg.models import ECGConfig
+
+        st = self.state
+        if not st.ekg_chan or st.ekg_chan not in st.sweeps:
+            return
+
+        if not hasattr(st, 'ecg_results_by_sweep') or st.ecg_results_by_sweep is None:
+            st.ecg_results_by_sweep = {}
+        if not hasattr(st, 'ecg_config') or st.ecg_config is None:
+            st.ecg_config = ECGConfig.for_species("mouse")
+
+        Y = st.sweeps[st.ekg_chan]
+        s = max(0, min(st.sweep_idx, Y.shape[1] - 1))
+        y = Y[:, s]
+
+        result = detect_and_analyze(y, st.sr_hz, st.ecg_config)
+        st.ecg_results_by_sweep[s] = result
+
+        n_valid = int(np.sum(result.labels == 1))
+        hr = result.mean_hr_bpm(st.sr_hz)
+        inv = " (inv.)" if result.is_inverted else ""
+        q = int(result.quality_score * 100)
+        self.statusBar().showMessage(
+            f"EKG: {st.ekg_chan}{inv} -- {hr:.0f} BPM, "
+            f"{n_valid} beats, quality {q}%",
+            5000,
+        )
+
+    def _open_ekg_settings_dialog(self):
+        """Open the EKG detection settings dialog with live signal preview."""
+        from dialogs.ekg_settings_dialog import EKGSettingsDialog
+        from core.domain.ecg.models import ECGConfig
+
+        st = self.state
+        if not hasattr(st, 'ecg_config') or st.ecg_config is None:
+            st.ecg_config = ECGConfig.for_species("mouse")
+
+        # Get current sweep's EKG signal for the preview
+        signal = None
+        sr_hz = st.sr_hz or 1000.0
+        if st.ekg_chan and st.ekg_chan in st.sweeps:
+            Y = st.sweeps[st.ekg_chan]
+            s = max(0, min(st.sweep_idx, Y.shape[1] - 1))
+            signal = Y[:, s]
+
+        self._ekg_settings_dlg = EKGSettingsDialog(
+            st.ecg_config, signal=signal, sr_hz=sr_hz, parent=self
+        )
+        self._ekg_settings_dlg.detection_requested.connect(self._redetect_ekg_current_sweep)
+
+        self._ekg_settings_dlg.exec()
+        self._ekg_settings_dlg = None
+
+    def _redetect_ekg_current_sweep(self):
+        """Clear cached results and re-run detection with current config."""
+        st = self.state
+        ecg_dict = getattr(st, 'ecg_results_by_sweep', None)
+        if ecg_dict is not None:
+            ecg_dict.clear()
+        self._auto_detect_ekg_current_sweep()
+        self.redraw_main_plot()
+        self._push_ekg_stats_to_dialog()
+
+    def _push_ekg_stats_to_dialog(self):
+        """Send current detection stats to the open EKG settings dialog."""
+        dlg = getattr(self, '_ekg_settings_dlg', None)
+        if dlg is None:
+            return
+        st = self.state
+        ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+        s = max(0, min(st.sweep_idx, st.sweeps.get(st.ekg_chan, np.empty((0, 1))).shape[1] - 1))
+        result = ecg_results.get(s)
+        if result is None:
+            dlg.update_stats(0, 0, 0)
+        else:
+            n_valid = int(np.sum(result.labels == 1))
+            hr = result.mean_hr_bpm(st.sr_hz or 1000.0)
+            q = int(result.quality_score * 100)
+            dlg.update_stats(n_valid, hr, q, result.is_inverted)
+
+    def _ensure_ekg_current_sweep(self):
+        """Lazy detection: compute R-peaks for current sweep if missing."""
+        st = self.state
+        if not getattr(st, 'ekg_chan', None) or st.ekg_chan not in st.sweeps:
+            return
+        if not hasattr(st, 'ecg_results_by_sweep') or st.ecg_results_by_sweep is None:
+            st.ecg_results_by_sweep = {}
+        s = max(0, min(st.sweep_idx, st.sweeps[st.ekg_chan].shape[1] - 1))
+        if s not in st.ecg_results_by_sweep:
+            self._auto_detect_ekg_current_sweep()
+
+    def _detect_ekg_all_sweeps(self):
+        """Detect R-peaks on all sweeps for the EKG channel (off main thread)."""
+        from core.services.ecg_service import detect_and_analyze
+        from core.domain.ecg.models import ECGConfig
+
+        st = self.state
+        if not st.ekg_chan or st.ekg_chan not in st.sweeps:
+            return
+
+        if not hasattr(st, 'ecg_results_by_sweep') or st.ecg_results_by_sweep is None:
+            st.ecg_results_by_sweep = {}
+        if not hasattr(st, 'ecg_config') or st.ecg_config is None:
+            st.ecg_config = ECGConfig.for_species("mouse")
+
+        Y = st.sweeps[st.ekg_chan]
+        n_sweeps = Y.shape[1]
+        config = st.ecg_config
+
+        for s in range(n_sweeps):
+            if s not in st.ecg_results_by_sweep:
+                result = detect_and_analyze(Y[:, s], st.sr_hz, config)
+                st.ecg_results_by_sweep[s] = result
+
+        print(f"[ekg] Detected R-peaks for all {n_sweeps} sweeps")
+
     # ---------- Filters & redraw ----------
     def update_and_redraw(self, *args):
         st = self.state
@@ -5412,6 +5578,8 @@ class MainWindow(QMainWindow):
 
     def redraw_main_plot(self):
         """Delegate to PlotManager."""
+        # Lazy EKG detection: ensure current sweep has R-peaks
+        self._ensure_ekg_current_sweep()
         self.plot_manager.redraw_main_plot()
         # Invalidate the marker refresh cache so the next refresh will re-render
         # (plot items may have been rebuilt, e.g. after channel visibility change)
@@ -6757,6 +6925,10 @@ class MainWindow(QMainWindow):
             gmm_probs = gmm_probs_dict.get(s, None)
             metrics.set_gmm_probabilities(gmm_probs)
 
+            # Set ECG result for this sweep (if available, for HR Y2 metrics)
+            ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+            metrics.set_ecg_result(ecg_results.get(s, None))
+
             # Set peak candidate metrics for this sweep (if available)
             # Prefer current_peak_metrics_by_sweep (updated after edits) for Y2 plotting,
             # fallback to peak_metrics_by_sweep (original auto-detected) for ML training
@@ -6772,6 +6944,8 @@ class MainWindow(QMainWindow):
         metrics.set_gmm_probabilities(None)
         # Clear peak metrics after computation
         metrics.set_peak_metrics(None)
+        # Clear ECG result after computation
+        metrics.set_ecg_result(None)
 
     def on_y2_metric_changed(self, idx: int):
         key = self.y2plot_dropdown.itemData(idx)

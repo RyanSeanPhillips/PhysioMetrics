@@ -135,6 +135,9 @@ METRIC_SPECS: List[Tuple[str, str]] = [
     ("Breathing regularity score (RMSSD)",    "regularity"),
     ("Sniffing confidence (GMM)",             "sniff_conf"),
     ("Eupnea confidence (GMM)",               "eupnea_conf"),
+    # EKG / Heart Rate metrics
+    ("Heart rate (BPM)",                     "hr"),
+    ("RR interval (ms)",                     "rr_interval"),
     # Peak candidate metrics (for ML merge detection, noise classification)
     ("Gap to next peak (normalized)",        "gap_to_next_norm"),
     ("Trough ratio to next",                  "trough_ratio_next"),
@@ -2906,6 +2909,47 @@ def compute_amplitude_normalized(t, y, sr, pks, on, off, exm, exo):
     return _step_fill(N, spans, vals)
 
 
+# ── EKG / Heart Rate metrics (for Y2 overlay) ─────────────────────────
+# These use a module-level ECGResult holder, same pattern as GMM probs.
+
+_current_ecg_result = None  # ECGResult instance for current sweep
+
+
+def set_ecg_result(result):
+    """Set ECGResult for current sweep (called before Y2 computation)."""
+    global _current_ecg_result
+    _current_ecg_result = result
+
+
+def compute_hr(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None):
+    """Instantaneous heart rate (BPM) from ECG R-peaks, stepwise-constant."""
+    N = len(y) if y is not None else len(t)
+    if _current_ecg_result is None:
+        return np.full(N, np.nan, dtype=np.float64)
+    return _current_ecg_result.compute_hr_trace(sr_hz, N)
+
+
+def compute_rr_interval(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None):
+    """RR interval (ms), stepwise-constant between R-peaks."""
+    N = len(y) if y is not None else len(t)
+    if _current_ecg_result is None:
+        return np.full(N, np.nan, dtype=np.float64)
+    result = _current_ecg_result
+    vp = result.valid_r_peaks()
+    if len(vp) < 2:
+        return np.full(N, np.nan, dtype=np.float64)
+    rr_ms = np.diff(vp).astype(np.float64) * (1000.0 / sr_hz)
+    trace = np.full(N, np.nan, dtype=np.float64)
+    for i in range(len(rr_ms)):
+        start = int(vp[i])
+        end = int(vp[i + 1]) if i + 1 < len(vp) else N
+        end = min(end, N)
+        trace[start:end] = rr_ms[i]
+    if vp[-1] < N:
+        trace[int(vp[-1]):] = rr_ms[-1]
+    return trace
+
+
 # Registry: key -> function
 METRICS: Dict[str, Callable] = {
     "if":          compute_if,
@@ -2990,6 +3034,9 @@ METRICS: Dict[str, Callable] = {
     "prev_peak_te":                  _create_peak_metric_lookup_function('prev_peak_te'),
     "te_ratio_to_next":              _create_peak_metric_lookup_function('te_ratio_to_next'),
     "te_ratio_to_prev":              _create_peak_metric_lookup_function('te_ratio_to_prev'),
+    # EKG / Heart Rate metrics
+    "hr":                            compute_hr,
+    "rr_interval":                   compute_rr_interval,
 }
 
 # Optional: Enable robust metrics mode

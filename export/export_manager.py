@@ -102,6 +102,8 @@ class ExportManager:
         "regularity",   # Breathing regularity (RMSSD)
         "sniff_conf",   # Sniffing confidence (GMM)
         "eupnea_conf",  # Eupnea confidence (GMM)
+        "hr",           # Heart rate at breath onset (BPM) - from EKG channel
+        "rr_interval",  # RR interval at breath onset (ms) - from EKG channel
     ]
 
     # ML-ONLY METRICS: Neighbor comparison features for merge detection and classification

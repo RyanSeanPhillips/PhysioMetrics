@@ -73,6 +73,40 @@ def get_ml_npz_path_for_channel(data_path: Path, channel_name: str) -> Path:
     return ml_folder / f"{base}.{safe_channel}.ml.npz"
 
 
+def detect_session_format(path: Path) -> str:
+    """Detect whether a session file is NPZ or HDF5 by reading magic bytes.
+
+    Returns 'hdf5' if HDF5, 'npz' otherwise (default for any non-HDF5 file).
+    """
+    try:
+        with open(path, 'rb') as f:
+            magic = f.read(4)
+        if magic == b'\x89HDF':
+            return 'hdf5'
+    except (OSError, IOError):
+        pass
+    return 'npz'
+
+
+def load_session(path: Path, **kwargs):
+    """Universal session loader — auto-detects NPZ vs HDF5 format.
+
+    Returns the same 7-tuple as load_state_from_npz.
+    """
+    if detect_session_format(path) == 'hdf5':
+        from core.hdf5_io import load_state_from_hdf5
+        return load_state_from_hdf5(path, **kwargs)
+    return load_state_from_npz(path, **kwargs)
+
+
+def get_session_metadata(path: Path) -> dict:
+    """Universal metadata reader — auto-detects NPZ vs HDF5 format."""
+    if detect_session_format(path) == 'hdf5':
+        from core.hdf5_io import get_hdf5_metadata
+        return get_hdf5_metadata(path)
+    return get_npz_metadata(path)
+
+
 def get_pmx_path(
     data_path: Path,
     analysis_type: str = "pleth",
@@ -586,6 +620,23 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         metrics = state.stim_metrics_by_sweep[sweep_idx]
         data[f'stim_metrics_sweep_{sweep_idx}_json'] = json.dumps(metrics)
 
+    # ===== EKG / HEART RATE (per-sweep) =====
+    ekg_chan = getattr(state, 'ekg_chan', None)
+    data['ekg_chan'] = ekg_chan if ekg_chan else 'None'
+    ecg_results = getattr(state, 'ecg_results_by_sweep', {})
+    if ecg_results:
+        ecg_sweep_indices = sorted(ecg_results.keys())
+        data['ecg_sweep_indices'] = np.array(ecg_sweep_indices, dtype=int)
+        ecg_data_dict = {}
+        for si in ecg_sweep_indices:
+            r = ecg_results[si]
+            if hasattr(r, 'to_dict'):
+                ecg_data_dict[str(si)] = r.to_dict()
+        data['ecg_results_json'] = json.dumps(ecg_data_dict)
+    ecg_cfg = getattr(state, 'ecg_config', None)
+    if ecg_cfg is not None and hasattr(ecg_cfg, 'to_dict'):
+        data['ecg_config_json'] = json.dumps(ecg_cfg.to_dict())
+
     # ===== SAVE TO NPZ =====
     np.savez_compressed(npz_path, **data)
 
@@ -1005,6 +1056,28 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             metrics_json = str(data[f'stim_metrics_sweep_{sweep_idx}_json'])
             metrics = json.loads(metrics_json)
             state.stim_metrics_by_sweep[int(sweep_idx)] = metrics
+
+    # ===== EKG / HEART RATE (per-sweep) =====
+    ekg_chan_raw = str(data.get('ekg_chan', 'None'))
+    state.ekg_chan = ekg_chan_raw if ekg_chan_raw != 'None' else None
+
+    if 'ecg_results_json' in data:
+        try:
+            from core.domain.ecg.models import ECGResult
+            ecg_data_dict = json.loads(str(data['ecg_results_json']))
+            for si_str, rd in ecg_data_dict.items():
+                state.ecg_results_by_sweep[int(si_str)] = ECGResult.from_dict(rd)
+        except Exception:
+            pass  # graceful fallback if models not available
+
+    if 'ecg_config_json' in data:
+        try:
+            from core.domain.ecg.models import ECGConfig
+            state.ecg_config = ECGConfig.from_dict(
+                json.loads(str(data['ecg_config_json']))
+            )
+        except Exception:
+            pass
 
     # ===== CTA DATA =====
     cta_data = None
