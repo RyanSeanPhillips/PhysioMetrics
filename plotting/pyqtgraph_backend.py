@@ -1513,12 +1513,14 @@ class PyQtGraphPlotHost(QWidget):
         y_axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeVerCursor))
 
     def _set_mouse_mode_edit(self):
-        """Disable pan/zoom for click-based editing."""
+        """Disable drag-pan for click-based editing, but keep scroll-wheel X zoom."""
         for plot in self._subplots:
             try:
-                # Disable left-button pan and right-button zoom
-                plot.vb.setMouseEnabled(x=False, y=False)
-            except:
+                # Keep X mouse enabled so scroll wheel zoom works
+                plot.vb.setMouseEnabled(x=True, y=False)
+                # Disable left-button drag by switching to rect mode
+                plot.vb.setMouseMode(plot.vb.RectMode)
+            except Exception:
                 pass
 
     def _set_mouse_mode_normal(self):
@@ -1543,28 +1545,32 @@ class PyQtGraphPlotHost(QWidget):
                 self._show_context_menu(event, clicked_plot)
             return
 
-        # For left/middle clicks, pass to external callback
+        # For left/middle clicks, need a click callback (ADD/DEL mode active)
         if self._external_click_cb is None:
             return
 
-        # Check all subplots for click location
-        clicked_plot = self._find_plot_at_pos(pos)
-        if clicked_plot is None:
-            return
+        # Check if click is on an EKG panel — route to EKG handler
+        if self._ekg_click_cb:
+            clicked_plot = self._find_plot_at_pos(pos)
+            ekg_name = getattr(clicked_plot, '_ekg_channel_name', None) if clicked_plot else None
+            if clicked_plot and ekg_name:
+                mouse_point = clicked_plot.vb.mapSceneToView(pos)
+                print(f"[ekg-route] Routing click to EKG handler: {ekg_name}")
+                self._ekg_click_cb(mouse_point.x(), mouse_point.y(), ekg_name)
+                return
 
-        # Map click to data coordinates on the clicked subplot
-        mouse_point = clicked_plot.vb.mapSceneToView(pos)
-        x_data = mouse_point.x()
-        y_data = mouse_point.y()
-
-        # Check if this is an EKG panel click (has ekg_channel marker)
-        if getattr(clicked_plot, '_ekg_channel_name', None) and self._ekg_click_cb:
-            self._ekg_click_cb(x_data, y_data, clicked_plot._ekg_channel_name)
-            return
-
-        # For non-EKG panels, pass to regular callback (use main plot coords)
+        # Get the main plot for coordinate mapping
         main_plot = self._get_main_plot()
-        if main_plot is not None and clicked_plot == main_plot:
+        if main_plot is None:
+            return
+
+        # Get click position in data coordinates
+        if main_plot.sceneBoundingRect().contains(pos):
+            mouse_point = main_plot.vb.mapSceneToView(pos)
+            x_data = mouse_point.x()
+            y_data = mouse_point.y()
+
+            # Create matplotlib-compatible event wrapper
             wrapped_event = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
             self._external_click_cb(x_data, y_data, wrapped_event)
 

@@ -1470,7 +1470,7 @@ class PlotManager:
                 main_plot = self.plot_host._get_main_plot()
                 if main_plot is not None and main_plot.layout is not None:
                     main_plot.layout.removeItem(self.plot_host._y2_axis)
-            except:
+            except Exception:
                 pass
             self.plot_host._y2_axis = None
 

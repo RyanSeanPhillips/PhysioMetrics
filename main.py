@@ -5446,12 +5446,19 @@ class MainWindow(QMainWindow):
         s = st.sweep_idx
         result = ecg_results.get(s)
         if result is None or st.t is None:
+            print(f"[ekg-click] No ECG result for sweep {s}")
             return
 
         sr_hz = st.sr_hz or 1000.0
-        # Convert click time to sample index
-        click_sample = int(x_time * sr_hz)
+
+        # x_time is in plot coordinates (may be stim-offset).
+        # Convert back to absolute time by adding stim offset, then find nearest sample.
+        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
+        t0 = spans[0][0] if spans else 0.0
+        abs_time = x_time + t0
+        click_sample = int(np.searchsorted(st.t, abs_time))
         click_sample = max(0, min(click_sample, len(st.t) - 1))
+        print(f"[ekg-click] t_plot={x_time:.4f}s, t_abs={abs_time:.4f}s, sample={click_sample}")
 
         # Check if click is near an existing R-peak (within ±30ms)
         tolerance_samples = int(0.030 * sr_hz)
@@ -5473,7 +5480,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"Deleted R-peak at {x_time:.3f}s", 2000
                 )
-                self.redraw_main_plot()
+                self._refresh_after_ekg_edit()
                 return
 
         # Add a new peak — find the local max/min in filtered signal near click
@@ -5529,7 +5536,30 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Added R-peak at {x_time:.3f}s (sample {new_peak})", 2000
             )
-            self.redraw_main_plot()
+            self._refresh_after_ekg_edit()
+
+    def _refresh_after_ekg_edit(self):
+        """Recompute Y2 data and redraw after R-peak add/delete."""
+        st = self.state
+        key = getattr(st, 'y2_metric_key', None)
+        if key in ('hr', 'rr_interval', 'rsa_amplitude'):
+            # Recompute Y2 for current sweep only (fast)
+            s = st.sweep_idx
+            ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+            from core import metrics
+            metrics.set_ecg_result(ecg_results.get(s))
+            fn = metrics.METRICS.get(key)
+            if fn and st.t is not None and st.analyze_chan in st.sweeps:
+                y_proc = self._get_processed_for(st.analyze_chan, s)
+                pks = st.peaks_by_sweep.get(s, None)
+                br = st.breath_by_sweep.get(s, {})
+                y2 = fn(st.t, y_proc, st.sr_hz, pks,
+                        br.get('onsets'), br.get('offsets'),
+                        br.get('expmins'), br.get('expoffs'))
+                st.y2_values_by_sweep[s] = y2
+            metrics.set_ecg_result(None)
+        self.plot_host.clear_y2()
+        self.redraw_main_plot()
 
     def _ensure_ekg_current_sweep(self):
         """Lazy detection: compute R-peaks for current sweep if missing."""
