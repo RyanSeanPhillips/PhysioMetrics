@@ -138,6 +138,7 @@ METRIC_SPECS: List[Tuple[str, str]] = [
     # EKG / Heart Rate metrics
     ("Heart rate (BPM)",                     "hr"),
     ("RR interval (ms)",                     "rr_interval"),
+    ("RSA amplitude (BPM)",                  "rsa_amplitude"),
     # Peak candidate metrics (for ML merge detection, noise classification)
     ("Gap to next peak (normalized)",        "gap_to_next_norm"),
     ("Trough ratio to next",                  "trough_ratio_next"),
@@ -2950,6 +2951,49 @@ def compute_rr_interval(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=No
     return trace
 
 
+def compute_rsa_amplitude(t, y, sr_hz, peaks, onsets, offsets, expmins, expoffs=None):
+    """Respiratory sinus arrhythmia amplitude (BPM) per breath cycle.
+
+    For each breath (onset to next onset), finds the max and min
+    instantaneous HR from the ECG R-peaks within that breath, and
+    returns the difference.  Stepwise-constant over each breath.
+    Requires both Pleth peaks/onsets AND ECG result to be set.
+    """
+    N = len(y) if y is not None else len(t)
+    trace = np.full(N, np.nan, dtype=np.float64)
+
+    if _current_ecg_result is None or onsets is None or len(onsets) < 2:
+        return trace
+
+    vp = _current_ecg_result.valid_r_peaks()
+    if len(vp) < 4:
+        return trace
+
+    # Instantaneous HR at each R-peak
+    rr_sec = np.diff(vp) / sr_hz
+    hr_at_peak = 60.0 / rr_sec  # BPM, length = len(vp) - 1
+    peak_positions = vp[:-1]  # HR assigned to first peak of each pair
+
+    for i in range(len(onsets) - 1):
+        onset = onsets[i]
+        next_onset = onsets[i + 1]
+
+        # Find R-peaks within this breath cycle
+        mask = (peak_positions >= onset) & (peak_positions < next_onset)
+        if np.sum(mask) < 2:
+            continue
+
+        hr_in_breath = hr_at_peak[mask]
+        rsa = float(np.max(hr_in_breath) - np.min(hr_in_breath))
+
+        # Fill stepwise-constant
+        start = int(onset)
+        end = min(int(next_onset), N)
+        trace[start:end] = rsa
+
+    return trace
+
+
 # Registry: key -> function
 METRICS: Dict[str, Callable] = {
     "if":          compute_if,
@@ -3037,6 +3081,7 @@ METRICS: Dict[str, Callable] = {
     # EKG / Heart Rate metrics
     "hr":                            compute_hr,
     "rr_interval":                   compute_rr_interval,
+    "rsa_amplitude":                 compute_rsa_amplitude,
 }
 
 # Optional: Enable robust metrics mode

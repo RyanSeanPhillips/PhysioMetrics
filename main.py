@@ -6957,8 +6957,8 @@ class MainWindow(QMainWindow):
         key = self.y2plot_dropdown.itemData(idx)
         self.state.y2_metric_key = key  # None or e.g. "if"
 
-        # HR metrics need ECG results for all sweeps — detect if needed
-        if key in ("hr", "rr_interval") and getattr(self.state, 'ekg_chan', None):
+        # HR/RSA metrics need ECG results for all sweeps — detect if needed
+        if key in ("hr", "rr_interval", "rsa_amplitude") and getattr(self.state, 'ekg_chan', None):
             self._detect_ekg_all_sweeps()
 
         # Recompute Y2 (needs peaks/breaths for most metrics; IF falls back to peaks)

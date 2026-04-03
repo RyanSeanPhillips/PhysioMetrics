@@ -480,8 +480,13 @@ class PlotManager:
                     if t1_span > t0_span:
                         ax.axvspan(t0_span, t1_span, color="#2E5090", alpha=0.25)
 
-            # Set labels
-            ax.set_ylabel(config.name, fontsize=10)
+            # Descriptive Y-axis labels for typed channels
+            if config.channel_type == "Pleth":
+                ax.set_ylabel(f"Pleth ({config.name})", fontsize=10)
+            elif config.channel_type == "EKG":
+                ax.set_ylabel(f"EKG ({config.name})", fontsize=10)
+            else:
+                ax.set_ylabel(config.name, fontsize=10)
             ax.grid(False)
 
             # Apply Y-axis autoscaling
@@ -727,7 +732,13 @@ class PlotManager:
                 plots.append(plot)
                 self.plot_host._subplots.append(plot)
 
-                plot.setLabel('left', config.name)
+                # Descriptive Y-axis labels for typed channels
+                if config.channel_type == "Pleth":
+                    plot.setLabel('left', f"Pleth ({config.name})")
+                elif config.channel_type == "EKG":
+                    plot.setLabel('left', f"EKG ({config.name})")
+                else:
+                    plot.setLabel('left', config.name)
 
             # Batch x-link: block signals to avoid O(N) cascade during setup
             if len(plots) > 1:
@@ -1492,6 +1503,15 @@ class PlotManager:
         elif key == "eupnea_conf":
             label = "Eupnea Confidence"
             color = "#2ecc71"  # Green
+        elif key == "hr":
+            label = "Heart Rate (BPM)"
+            color = "#FF9800"  # Orange
+        elif key == "rr_interval":
+            label = "RR Interval (ms)"
+            color = "#FF9800"
+        elif key == "rsa_amplitude":
+            label = "RSA Amplitude (BPM)"
+            color = "#E91E63"  # Pink
         else:
             label = key
             color = "#39FF14"  # Default bright green
@@ -1549,8 +1569,14 @@ class PlotManager:
         self.plot_host._y2_update_connection = update_views  # Store reference for cleanup
         update_views()
 
-        # Auto-range the Y2 axis
-        y2_viewbox.autoRange()
+        # Auto-range the Y2 axis to actual data range (not NaN/0)
+        valid = arr[np.isfinite(arr)]
+        if len(valid) > 0:
+            ymin, ymax = float(np.min(valid)), float(np.max(valid))
+            margin = max(0.05 * (ymax - ymin), 1.0)  # at least 1 unit margin
+            y2_viewbox.setYRange(ymin - margin, ymax + margin, padding=0)
+        else:
+            y2_viewbox.autoRange()
 
     def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
         """Build ChannelPanelConfig list from channel manager.
@@ -2056,6 +2082,7 @@ class PlotManager:
         """Draw filtered signal, R-peak markers, and summary on a PyQtGraph EKG panel."""
         import pyqtgraph as pg
         st = self.state
+        sr_hz = st.sr_hz or 1000.0
         ecg_results = getattr(st, 'ecg_results_by_sweep', {})
         result = ecg_results.get(sweep_idx)
         if result is None:
@@ -2085,6 +2112,47 @@ class PlotManager:
                     filt_curve.setZValue(2)
                     if self.use_auto_downsample:
                         filt_curve.setDownsampling(auto=True, method='peak')
+            except Exception:
+                pass
+
+        # Show Pan-Tompkins integrated signal + threshold (scaled to fit, faint)
+        if filtered is not None and ecg_config is not None:
+            try:
+                from scipy.signal import find_peaks as _fp
+                h_deriv = np.array([-1.0, -2.0, 0.0, 2.0, 1.0]) * (sr_hz / 8.0)
+                deriv = np.convolve(filtered, h_deriv, mode='same')
+                squared = deriv ** 2
+                win = max(1, int(ecg_config.mwi_window_ms * sr_hz / 1000.0))
+                integrated = np.convolve(squared, np.ones(win) / win, mode='same')
+
+                # Scale integrated to fit in bottom 25% of signal range
+                sig_min, sig_max = np.nanmin(filtered), np.nanmax(filtered)
+                sig_range = sig_max - sig_min if sig_max > sig_min else 1.0
+                int_max = np.max(integrated) if np.max(integrated) > 0 else 1.0
+                scale = 0.25 * sig_range / int_max
+                offset = sig_min - 0.05 * sig_range
+                integrated_scaled = integrated * scale + offset
+
+                int_curve = plot.plot(
+                    t_plot, integrated_scaled,
+                    pen=pg.mkPen('#66BB6A', width=0.7, style=pg.QtCore.Qt.PenStyle.SolidLine),
+                )
+                int_curve.setZValue(1)
+                int_curve.setOpacity(0.4)
+
+                # Threshold line
+                pct_val = np.percentile(integrated, ecg_config.threshold_percentile)
+                if pct_val <= 0:
+                    pct_val = np.percentile(integrated, 99)
+                thresh_val = ecg_config.threshold_fraction * pct_val
+                thresh_scaled = thresh_val * scale + offset
+                thresh_line = pg.InfiniteLine(
+                    pos=thresh_scaled, angle=0,
+                    pen=pg.mkPen('#FF9800', width=1.0,
+                                 style=pg.QtCore.Qt.PenStyle.DashLine),
+                )
+                thresh_line.setZValue(1)
+                plot.addItem(thresh_line)
             except Exception:
                 pass
 
