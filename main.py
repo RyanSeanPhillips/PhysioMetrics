@@ -3358,6 +3358,12 @@ class MainWindow(QMainWindow):
         st.omitted_ranges.clear()
         st.proc_cache.clear()
 
+        # Clear EKG state
+        st.ekg_chan = None
+        st.ecg_config = None
+        if hasattr(st, 'ecg_results_by_sweep'):
+            st.ecg_results_by_sweep.clear()
+
         # Update filename display
         self._update_filename_display()
 

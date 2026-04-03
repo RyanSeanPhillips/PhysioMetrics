@@ -84,6 +84,12 @@ class FileLoadService:
         state.sweeps = result.sweeps_by_ch
         state.channel_names = result.channel_names
         state.t = result.time_array
+
+        # Clear EKG state from previous file
+        state.ekg_chan = None
+        state.ecg_config = None
+        if hasattr(state, 'ecg_results_by_sweep'):
+            state.ecg_results_by_sweep.clear()
         state.sweep_idx = 0
 
     def apply_multi_file_data(self, state, result: MultiFileLoadResult) -> None:
