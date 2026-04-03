@@ -229,6 +229,9 @@ class MainWindow(QMainWindow):
         # --- Setup Event Markers Widget ---
         self._setup_event_markers_widget()
 
+        # --- Setup EKG click handler ---
+        self._setup_ekg_click_handler()
+
         # --- Method Aliases (for backward compatibility with old code/plugins) ---
         self.refresh_plot = self.redraw_main_plot
         self._show_status = self._log_status_message
@@ -5431,6 +5434,102 @@ class MainWindow(QMainWindow):
             hr = result.mean_hr_bpm(st.sr_hz or 1000.0)
             q = int(result.quality_score * 100)
             dlg.update_stats(n_valid, hr, q, result.is_inverted)
+
+    def _setup_ekg_click_handler(self):
+        """Wire up click handler for adding/deleting R-peaks on EKG panels."""
+        self.plot_host._ekg_click_cb = self._on_ekg_panel_clicked
+
+    def _on_ekg_panel_clicked(self, x_time, y_val, channel_name):
+        """Handle click on EKG panel — add or delete nearest R-peak."""
+        st = self.state
+        ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+        s = st.sweep_idx
+        result = ecg_results.get(s)
+        if result is None or st.t is None:
+            return
+
+        sr_hz = st.sr_hz or 1000.0
+        # Convert click time to sample index
+        click_sample = int(x_time * sr_hz)
+        click_sample = max(0, min(click_sample, len(st.t) - 1))
+
+        # Check if click is near an existing R-peak (within ±30ms)
+        tolerance_samples = int(0.030 * sr_hz)
+        r_peaks = result.r_peaks
+
+        if len(r_peaks) > 0:
+            dists = np.abs(r_peaks - click_sample)
+            nearest_idx = np.argmin(dists)
+            if dists[nearest_idx] <= tolerance_samples:
+                # Delete this peak
+                new_peaks = np.delete(r_peaks, nearest_idx)
+                new_labels = np.delete(result.labels, nearest_idx)
+                new_sources = np.delete(result.label_source, nearest_idx)
+                from core.services.ecg_service import compute_rr_intervals_ms
+                result.r_peaks = new_peaks
+                result.labels = new_labels
+                result.label_source = new_sources
+                result.rr_intervals_ms = compute_rr_intervals_ms(new_peaks, sr_hz)
+                self.statusBar().showMessage(
+                    f"Deleted R-peak at {x_time:.3f}s", 2000
+                )
+                self.redraw_main_plot()
+                return
+
+        # Add a new peak — find the local max/min in filtered signal near click
+        ecg_config = getattr(st, 'ecg_config', None)
+        if channel_name in st.sweeps:
+            y = st.sweeps[channel_name][:, s]
+            # Filter the signal like detection does
+            try:
+                from scipy.signal import butter, sosfiltfilt
+                if ecg_config is not None:
+                    nyq = sr_hz / 2.0
+                    low = max(ecg_config.bandpass_low, 0.5)
+                    high = min(ecg_config.bandpass_high, nyq - 1.0)
+                    if low < high:
+                        sos = butter(ecg_config.filter_order, [low, high],
+                                     btype='band', fs=sr_hz, output='sos')
+                        y = sosfiltfilt(sos, y)
+            except Exception:
+                pass
+
+            # Find peak near click
+            search = int(0.030 * sr_hz)  # ±30ms
+            lo = max(0, click_sample - search)
+            hi = min(len(y), click_sample + search + 1)
+
+            force_inv = getattr(ecg_config, 'force_inverted', None) if ecg_config else None
+            baseline = np.mean(y)
+            window = y[lo:hi]
+            idx_max = np.argmax(window)
+            idx_min = np.argmin(window)
+
+            if force_inv is True:
+                new_peak = lo + idx_min
+            elif force_inv is False:
+                new_peak = lo + idx_max
+            else:
+                if abs(window[idx_max] - baseline) >= abs(window[idx_min] - baseline):
+                    new_peak = lo + idx_max
+                else:
+                    new_peak = lo + idx_min
+
+            # Insert into sorted peaks array
+            insert_pos = np.searchsorted(r_peaks, new_peak)
+            new_peaks = np.insert(r_peaks, insert_pos, new_peak)
+            new_labels = np.insert(result.labels, insert_pos, np.int8(1))
+            new_sources = np.insert(result.label_source, insert_pos, 'user')
+
+            from core.services.ecg_service import compute_rr_intervals_ms
+            result.r_peaks = new_peaks
+            result.labels = new_labels
+            result.label_source = new_sources
+            result.rr_intervals_ms = compute_rr_intervals_ms(new_peaks, sr_hz)
+            self.statusBar().showMessage(
+                f"Added R-peak at {x_time:.3f}s (sample {new_peak})", 2000
+            )
+            self.redraw_main_plot()
 
     def _ensure_ekg_current_sweep(self):
         """Lazy detection: compute R-peaks for current sweep if missing."""

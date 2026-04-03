@@ -211,6 +211,7 @@ class PyQtGraphPlotHost(QWidget):
 
         # Click callback
         self._external_click_cb = None
+        self._ekg_click_cb = None  # fn(x_time, y_val, channel_name) for EKG panel clicks
 
         # Theme state
         self._current_theme = 'dark'
@@ -1546,18 +1547,24 @@ class PyQtGraphPlotHost(QWidget):
         if self._external_click_cb is None:
             return
 
-        # Get the main plot for coordinate mapping
-        main_plot = self._get_main_plot()
-        if main_plot is None:
+        # Check all subplots for click location
+        clicked_plot = self._find_plot_at_pos(pos)
+        if clicked_plot is None:
             return
 
-        # Get click position in data coordinates
-        if main_plot.sceneBoundingRect().contains(pos):
-            mouse_point = main_plot.vb.mapSceneToView(pos)
-            x_data = mouse_point.x()
-            y_data = mouse_point.y()
+        # Map click to data coordinates on the clicked subplot
+        mouse_point = clicked_plot.vb.mapSceneToView(pos)
+        x_data = mouse_point.x()
+        y_data = mouse_point.y()
 
-            # Create matplotlib-compatible event wrapper
+        # Check if this is an EKG panel click (has ekg_channel marker)
+        if getattr(clicked_plot, '_ekg_channel_name', None) and self._ekg_click_cb:
+            self._ekg_click_cb(x_data, y_data, clicked_plot._ekg_channel_name)
+            return
+
+        # For non-EKG panels, pass to regular callback (use main plot coords)
+        main_plot = self._get_main_plot()
+        if main_plot is not None and clicked_plot == main_plot:
             wrapped_event = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
             self._external_click_cb(x_data, y_data, wrapped_event)
 

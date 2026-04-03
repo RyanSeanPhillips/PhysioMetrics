@@ -850,9 +850,12 @@ class PlotManager:
         # Draw EKG overlays on any EKG channel panels (pyqtgraph path)
         for i, config in enumerate(channel_configs):
             if config.is_ekg_channel and i < len(plots):
+                plots[i]._ekg_channel_name = config.name  # tag for click routing
                 if config.name in st.sweeps:
                     ekg_y = st.sweeps[config.name][:, s]
                     self._draw_ekg_overlays_pyqtgraph(plots[i], s, t_plot, ekg_y)
+            elif i < len(plots):
+                plots[i]._ekg_channel_name = None  # ensure non-EKG plots aren't tagged
 
         # Set title on first plot
         if plots:
@@ -1516,8 +1519,10 @@ class PlotManager:
             label = key
             color = "#39FF14"  # Default bright green
 
-        # Create a new ViewBox for Y2 data
+        # Create a new ViewBox for Y2 data (no mouse interaction — scroll/drag affects main plot only)
         y2_viewbox = pg.ViewBox()
+        y2_viewbox.setMouseEnabled(x=False, y=False)
+        y2_viewbox.setMenuEnabled(False)
         self.plot_host._y2_viewbox = y2_viewbox
 
         # Create Y2 axis on the right
