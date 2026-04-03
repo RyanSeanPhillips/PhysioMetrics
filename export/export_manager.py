@@ -741,6 +741,13 @@ class ExportManager:
             gmm_probs = st.gmm_sniff_probabilities[sweep]
             metrics.set_gmm_probabilities(gmm_probs)
 
+        # Set ECG result if computing hr or rr_interval
+        ecg_result = None
+        if key in ('hr', 'rr_interval') and sweep is not None:
+            ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+            ecg_result = ecg_results.get(sweep)
+            metrics.set_ecg_result(ecg_result)
+
         try:
             result = fn(t, y, sr_hz, peaks, on, off, exm, exo)  # new signature
         except TypeError:
@@ -749,6 +756,8 @@ class ExportManager:
             # Clear GMM probabilities after computation
             if gmm_probs is not None:
                 metrics.set_gmm_probabilities(None)
+            if ecg_result is not None:
+                metrics.set_ecg_result(None)
 
         return result
 
@@ -1902,7 +1911,12 @@ class ExportManager:
         all_keys     = self._metric_keys_in_order()
         # Use focused metrics for both preview AND PDF (same panels, much faster)
         # Full metric set is still available in the timeseries CSV export
-        keys_to_compute = self._PREVIEW_CORE_METRICS
+        keys_to_compute = list(self._PREVIEW_CORE_METRICS)
+        # Add HR metrics if EKG channel has results
+        if getattr(st, 'ecg_results_by_sweep', None):
+            for hk in ("hr", "rr_interval"):
+                if hk not in keys_to_compute:
+                    keys_to_compute.append(hk)
         Y_proc_ds    = np.full((M, S), np.nan, dtype=float)
         y2_ds_by_key = {k: np.full((M, S), np.nan, dtype=float) for k in keys_to_compute}
 
