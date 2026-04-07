@@ -1,9 +1,13 @@
 """
 Anonymous usage tracking and telemetry for PhysioMetrics.
 
-Uses Google Analytics 4 for usage statistics (unlimited events).
+Uses Google Analytics 4 Measurement Protocol for:
+- Active user count (session_start / session_end)
+- Geographic distribution (from request IP — automatic)
+- Key feature usage (file loads, exports, peak detection)
 
-No personal information, file names, or experimental data is collected.
+Design: fire-and-forget. If a send fails, we drop it.
+No local caching, no retry, no telemetry.log file.
 """
 
 import sys
@@ -11,7 +15,6 @@ import platform
 import json
 import threading
 from datetime import datetime
-from pathlib import Path
 
 from core.config import (
     get_config_dir,
@@ -21,45 +24,20 @@ from core.config import (
 from version_info import VERSION_STRING
 
 
-def _update_heartbeat(action: str, context: str = None):
-    """
-    Update heartbeat file and debug log for crash tracking.
-
-    This is called from telemetry functions to track what the user
-    was doing when the app is killed/crashes.
-    """
-    try:
-        from core import error_reporting
-        # Convert context string to dict if provided
-        extra_info = {"context": context} if context else None
-        error_reporting.update_heartbeat(action, extra_info)
-
-        # Also write to persistent debug log (survives app restart)
-        error_reporting.append_to_debug_log(action, context, level="info")
-    except Exception as e:
-        # Debug: print heartbeat errors during development
-        print(f"[Heartbeat] Error: {e}")
-
-
 # ============================================================================
-# CONFIGURATION - Add your credentials here
+# Configuration
 # ============================================================================
 
-# Google Analytics 4 Measurement Protocol
-# Get these from: https://analytics.google.com/
-# Admin → Data Streams → Your stream → Measurement Protocol API secrets
 GA4_MEASUREMENT_ID = "G-38M0HTXEQ2"
 GA4_API_SECRET = "2gmx-luNQFqTNDdZyASmkA"
+GA4_SEND_TIMEOUT = 3  # seconds — don't block the UI
 
 
 # ============================================================================
-# Global telemetry state
+# Global state
 # ============================================================================
 
 _telemetry_initialized = False
-_geo_data = None  # Cached geolocation data (fetched once per session)
-_geo_fetch_attempted = False  # Whether we've tried to fetch geo data
-_user_ip = None  # Cached public IP address (for GA4 geo lookup)
 
 _session_data = {
     'files_analyzed': 0,
@@ -69,19 +47,60 @@ _session_data = {
     'features_used': set(),
     'exports': {},
     'session_start': None,
-    'edits_made': 0,  # Total manual edits (add/delete/move) - session-wide
-    'edits_added': 0,  # False negatives (missed breaths) - session-wide
-    'edits_deleted': 0,  # False positives (wrong detections) - session-wide
-    'last_action': None,  # Last button/feature used (for crash tracking)
-    'timing_data': {},  # Track operation durations
-    # Per-file tracking (for ML evaluation - only saved files)
-    'current_file_edits_added': 0,  # Edits added for current file
-    'current_file_edits_deleted': 0,  # Edits deleted for current file
-    'current_file_breaths': 0,  # Total breaths in current file (when detected)
-    # Engagement tracking (for GA4 Realtime active users)
-    'last_engagement_time': None,  # Last time user interacted with app
-    'total_engagement_time_ms': 0,  # Cumulative engagement time
+    'edits_made': 0,
+    'edits_added': 0,
+    'edits_deleted': 0,
+    'last_action': None,
+    'timing_data': {},
+    'current_file_edits_added': 0,
+    'current_file_edits_deleted': 0,
+    'current_file_breaths': 0,
 }
+
+
+# ============================================================================
+# Heartbeat (for crash tracking — writes to debug_log, NOT telemetry)
+# ============================================================================
+
+def _update_heartbeat(action: str, context: str = None):
+    """Update heartbeat file and debug log for crash tracking."""
+    try:
+        from core import error_reporting
+        extra_info = {"context": context} if context else None
+        error_reporting.update_heartbeat(action, extra_info)
+        error_reporting.append_to_debug_log(action, context, level="info")
+    except Exception:
+        pass
+
+
+# ============================================================================
+# GA4 send — fire and forget
+# ============================================================================
+
+def _send_to_ga4(event_name, params=None):
+    """
+    Send event to GA4 in a background thread. If it fails, drop it.
+    No local caching, no retry.
+    """
+    if not GA4_MEASUREMENT_ID or not GA4_API_SECRET:
+        return
+
+    def _do_send():
+        try:
+            import requests
+            url = (f"https://www.google-analytics.com/mp/collect"
+                   f"?measurement_id={GA4_MEASUREMENT_ID}"
+                   f"&api_secret={GA4_API_SECRET}")
+            payload = {
+                "client_id": get_user_id(),
+                "events": [{"name": event_name, "params": params or {}}]
+            }
+            requests.post(url, json=payload, timeout=GA4_SEND_TIMEOUT)
+        except Exception:
+            pass  # Network down, requests missing, timeout — just drop it
+
+    thread = threading.Thread(target=_do_send, daemon=True)
+    thread.start()
 
 
 # ============================================================================
@@ -89,400 +108,68 @@ _session_data = {
 # ============================================================================
 
 def init_telemetry():
-    """
-    Initialize telemetry system.
-
-    Call this once at app startup (after first-launch dialog).
-    """
+    """Initialize telemetry. Call once at app startup."""
     global _telemetry_initialized, _session_data
 
     if not is_telemetry_enabled():
         return
 
     try:
-        # Reset session data
         _session_data['session_start'] = datetime.now().isoformat()
         _telemetry_initialized = True
 
-        # Fetch geolocation in background (for GA4 geographic reports)
-        # This runs async so it doesn't delay app startup
-        geo_thread = threading.Thread(target=_fetch_geolocation, daemon=True)
-        geo_thread.start()
+        # Clean up legacy telemetry.log if it exists (older versions cached here)
+        try:
+            log_file = get_config_dir() / 'telemetry.log'
+            if log_file.exists():
+                log_file.unlink()
+        except Exception:
+            pass
 
-        # Sync any cached events from previous sessions (when network was down)
-        sync_cached_events()
-
-        # Send session start event to GA4
+        # Send session start — this is the main signal for active user count
         log_event('session_start', {
             'version': VERSION_STRING,
             'platform': sys.platform,
             'python_version': platform.python_version()
         })
 
-        # Note: user_engagement events are sent by the heartbeat timer (every 45s)
-        # No need to send one here during initialization
-
-        print("Telemetry: Initialized (GA4 with geolocation)")
+        print("Telemetry: Initialized (GA4, fire-and-forget)")
 
     except Exception as e:
         print(f"Warning: Could not initialize telemetry: {e}")
 
 
-def _update_engagement_time():
-    """
-    Update engagement time tracking and return time since last engagement.
-
-    This helps GA4 recognize active users in Realtime reports.
-
-    Returns:
-        int: Milliseconds since last engagement (0 if first engagement)
-    """
-    global _session_data
-    import time
-
-    current_time = time.time()
-    last_time = _session_data.get('last_engagement_time')
-
-    if last_time is None:
-        # First engagement
-        _session_data['last_engagement_time'] = current_time
-        return 0
-
-    # Calculate time since last engagement (cap at 60 seconds for reasonable values)
-    elapsed_ms = int((current_time - last_time) * 1000)
-    elapsed_ms = min(elapsed_ms, 60000)  # Cap at 60 seconds
-
-    # Update tracking
-    _session_data['last_engagement_time'] = current_time
-    _session_data['total_engagement_time_ms'] += elapsed_ms
-
-    return elapsed_ms
-
-
 # ============================================================================
-# IP Geolocation (for GA4 geographic reports)
-# ============================================================================
-
-def _fetch_geolocation():
-    """
-    Fetch user's approximate geographic location and public IP address.
-
-    Uses ip-api.com (free, no API key required, 45 req/min limit).
-    Only fetches once per session and caches the result.
-
-    Returns:
-        dict: Geographic data with keys: country, country_code, region, city, lat, lon
-              Returns None if fetch fails or already attempted.
-
-    Privacy note: Only country/region-level data is sent to GA4, not precise coordinates.
-    The IP is used only to enable GA4's built-in geographic reports.
-    """
-    global _geo_data, _geo_fetch_attempted, _user_ip
-
-    # Return cached data if already fetched
-    if _geo_data is not None:
-        return _geo_data
-
-    # Don't retry if we already tried and failed
-    if _geo_fetch_attempted:
-        return None
-
-    _geo_fetch_attempted = True
-
-    try:
-        import requests
-
-        # ip-api.com - free, no API key, returns JSON with geo data
-        # Include 'query' field to get the public IP address
-        response = requests.get(
-            'http://ip-api.com/json/?fields=status,query,country,countryCode,regionName,city,lat,lon',
-            timeout=3  # Short timeout - don't delay app startup
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('status') == 'success':
-                # Cache the public IP for GA4 requests
-                _user_ip = data.get('query')
-
-                _geo_data = {
-                    'country': data.get('country', ''),
-                    'country_code': data.get('countryCode', ''),
-                    'region': data.get('regionName', ''),
-                    'city': data.get('city', ''),
-                    'lat': data.get('lat'),
-                    'lon': data.get('lon')
-                }
-                print(f"Telemetry: Geolocation detected - {_geo_data['city']}, {_geo_data['country']} (IP: {_user_ip})")
-                return _geo_data
-
-    except ImportError:
-        print("Telemetry: 'requests' module not available for geolocation")
-    except Exception as e:
-        print(f"Telemetry: Could not fetch geolocation: {e}")
-
-    return None
-
-
-def _get_geo_params():
-    """
-    Get geographic parameters to include in GA4 events.
-
-    Returns:
-        dict: Parameters for GA4 events (empty dict if geo unavailable)
-    """
-    geo = _fetch_geolocation()
-
-    if geo is None:
-        return {}
-
-    # Return country/region level data for GA4
-    # These are custom parameters that will show up in GA4 reports
-    params = {}
-
-    if geo.get('country'):
-        params['geo_country'] = geo['country']
-    if geo.get('country_code'):
-        params['geo_country_code'] = geo['country_code']
-    if geo.get('region'):
-        params['geo_region'] = geo['region']
-    if geo.get('city'):
-        params['geo_city'] = geo['city']
-
-    return params
-
-
-# ============================================================================
-# Google Analytics 4 Integration
-# ============================================================================
-
-def _send_to_google_analytics(event_name, params=None):
-    """
-    Send event to Google Analytics 4 in background thread (non-blocking).
-
-    Args:
-        event_name (str): Event name (e.g., "file_loaded", "gmm_clustering")
-        params (dict, optional): Event parameters (must not contain PII)
-
-    Docs: https://developers.google.com/analytics/devguides/collection/protocol/ga4
-
-    Note: This function returns immediately. Network call happens in background.
-    """
-    if not GA4_MEASUREMENT_ID or not GA4_API_SECRET:
-        # GA4 not configured - log locally
-        _log_event_locally({
-            'event': event_name,
-            'params': params,
-            'timestamp': datetime.now().isoformat()
-        })
-        return
-
-    # Send in background thread (non-blocking)
-    thread = threading.Thread(
-        target=_send_to_ga4_blocking,
-        args=(event_name, params),
-        daemon=True  # Don't block app exit
-    )
-    thread.start()  # Returns immediately
-
-
-def _send_to_ga4_blocking(event_name, params):
-    """
-    Actually send event to GA4 (runs in background thread).
-
-    This function blocks on network I/O, but it runs in a background thread
-    so it doesn't affect UI responsiveness.
-    """
-    try:
-        import requests
-
-        url = f"https://www.google-analytics.com/mp/collect?measurement_id={GA4_MEASUREMENT_ID}&api_secret={GA4_API_SECRET}"
-
-        # Build payload
-        payload = {
-            "client_id": get_user_id(),  # Anonymous UUID
-            "events": [{
-                "name": event_name,
-                "params": params or {}
-            }]
-        }
-
-        # Build headers - include user IP for GA4 geographic reports
-        headers = {
-            'Content-Type': 'application/json'
-        }
-
-        # Add X-Forwarded-For header with user's public IP
-        # This tells GA4 where the request originated for geo lookup
-        if _user_ip:
-            headers['X-Forwarded-For'] = _user_ip
-
-        # Send to GA4 (blocking, but in background thread)
-        response = requests.post(url, json=payload, headers=headers, timeout=5)
-        response.raise_for_status()
-
-        # Log success (helps with debugging)
-        if response.status_code in (200, 204):
-            ip_info = f" (IP: {_user_ip})" if _user_ip else ""
-            print(f"Telemetry: Sent '{event_name}' to GA4 (status {response.status_code}){ip_info}")
-
-    except ImportError:
-        # requests not available - log locally
-        print("Telemetry: 'requests' module not available, caching locally")
-        _log_event_locally({
-            'event': event_name,
-            'params': params,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        # Network error or timeout - log locally (never interrupt user)
-        print(f"Telemetry: GA4 send failed (logged locally): {e}")
-        _log_event_locally({
-            'event': event_name,
-            'params': params,
-            'timestamp': datetime.now().isoformat()
-        })
-
-
-def _log_event_locally(event):
-    """
-    Log event to local file (fallback when GA4 unavailable).
-
-    Args:
-        event (dict): Event data
-    """
-    try:
-        log_file = get_config_dir() / 'telemetry.log'
-
-        with open(log_file, 'a') as f:
-            f.write(json.dumps(event) + '\n')
-
-    except Exception:
-        # Silently fail - never interrupt user workflow
-        pass
-
-
-def sync_cached_events():
-    """
-    Upload any cached events from telemetry.log to GA4.
-
-    This is called on app startup to sync events that were cached
-    when the network was unavailable. Events are sent in background
-    threads and the log file is deleted after successful upload.
-    """
-    if not GA4_MEASUREMENT_ID or not GA4_API_SECRET:
-        return  # Can't sync without GA4 credentials
-
-    try:
-        log_file = get_config_dir() / 'telemetry.log'
-
-        if not log_file.exists():
-            return  # No cached events
-
-        # Read all cached events
-        with open(log_file, 'r') as f:
-            lines = f.readlines()
-
-        if not lines:
-            log_file.unlink()  # Delete empty file
-            return
-
-        # Send each event to GA4
-        uploaded = 0
-        for line in lines:
-            try:
-                event_data = json.loads(line.strip())
-
-                # Extract event name and params
-                event_name = event_data.get('event')
-                params = event_data.get('params', {})
-
-                if event_name:
-                    # Send to GA4 in background (non-blocking)
-                    _send_to_google_analytics(event_name, params)
-                    uploaded += 1
-
-            except Exception:
-                # Skip malformed lines
-                continue
-
-        # Delete log file after sending all events
-        log_file.unlink()
-
-        if uploaded > 0:
-            print(f"Telemetry: Synced {uploaded} cached event(s) to GA4")
-
-    except Exception as e:
-        # Silently fail - don't interrupt startup
-        print(f"Telemetry: Could not sync cached events: {e}")
-
-
-# ============================================================================
-# Public API - Usage Statistics (sent to Google Analytics)
+# Public API
 # ============================================================================
 
 def log_event(event_name, params=None):
     """
-    Log a usage event to Google Analytics 4.
+    Log a usage event to GA4. Fire-and-forget.
 
-    Args:
-        event_name (str): Event name (e.g., "file_loaded", "gmm_clustering")
-        params (dict, optional): Event parameters (must not contain PII)
-
-    Example:
-        log_event("file_loaded", {
-            "file_type": "abf",
-            "num_sweeps": 10,
-            "num_breaths": 247
-        })
+    GA4 automatically determines geographic location from the request IP.
+    No need for explicit geo lookup or X-Forwarded-For headers.
     """
     if not is_telemetry_enabled():
         return
 
     try:
-        # Add standard parameters
         if params is None:
             params = {}
 
-        # Calculate and add engagement time (helps GA4 count active users)
-        engagement_time_ms = _update_engagement_time()
-        if engagement_time_ms > 0:
-            params['engagement_time_msec'] = engagement_time_ms
-
-        # Add version and platform (sent with EVERY event for filtering)
-        params['app_version'] = VERSION_STRING  # Changed from 'version' for clarity
+        # Add standard params to every event
+        params['app_version'] = VERSION_STRING
         params['platform'] = sys.platform
         params['python_version'] = platform.python_version()
 
-        # Add geographic data (for GA4 map visualization)
-        geo_params = _get_geo_params()
-        params.update(geo_params)
+        _send_to_ga4(event_name, params)
 
-        # Send to Google Analytics
-        _send_to_google_analytics(event_name, params)
-
-    except Exception as e:
-        # Never crash app due to telemetry
-        print(f"Warning: Telemetry event failed: {e}")
+    except Exception:
+        pass
 
 
 def log_file_loaded(file_type, num_sweeps, num_breaths=None, **extra_params):
-    """
-    Log that a file was loaded.
-
-    Args:
-        file_type (str): File extension ('abf', 'smrx', 'edf')
-        num_sweeps (int): Number of sweeps in file
-        num_breaths (int, optional): Number of breaths detected
-        **extra_params: Additional file metadata
-            Examples: file_size_mb, sampling_rate_hz, duration_minutes,
-                     num_channels, selected_channel
-
-    Example:
-        log_file_loaded('abf', num_sweeps=10, num_breaths=247,
-                       file_size_mb=15.2, sampling_rate_hz=1000,
-                       duration_minutes=30, num_channels=4)
-    """
+    """Log that a file was loaded."""
     global _session_data
 
     _session_data['files_analyzed'] += 1
@@ -494,12 +181,10 @@ def log_file_loaded(file_type, num_sweeps, num_breaths=None, **extra_params):
     if num_breaths:
         _session_data['total_breaths'] += num_breaths
 
-    # Reset per-file edit tracking for new file
     _session_data['current_file_edits_added'] = 0
     _session_data['current_file_edits_deleted'] = 0
-    _session_data['current_file_breaths'] = 0  # Will be set after peak detection
+    _session_data['current_file_breaths'] = 0
 
-    # Update heartbeat for crash tracking
     _update_heartbeat(f'load_file:{file_type}', f'sweeps={num_sweeps}')
 
     params = {
@@ -508,98 +193,40 @@ def log_file_loaded(file_type, num_sweeps, num_breaths=None, **extra_params):
         'num_breaths': num_breaths or 0
     }
     params.update(extra_params)
-
     log_event('file_loaded', params)
 
 
 def log_feature_used(feature_name):
-    """
-    Log that a feature was used.
-
-    Args:
-        feature_name (str): Feature identifier
-            Examples: 'gmm_clustering', 'manual_editing_add_peak',
-                     'spectral_analysis', 'mark_sniff', 'move_point'
-    """
+    """Log that a feature was used."""
     global _session_data
     _session_data['features_used'].add(feature_name)
     _session_data['last_action'] = feature_name
-
-    # Update heartbeat for crash tracking
     _update_heartbeat(f'feature:{feature_name}')
-
     log_event('feature_used', {'feature': feature_name})
 
 
 def log_export(export_type):
-    """
-    Log that data was exported.
-
-    Args:
-        export_type (str): Export type identifier
-            Examples: 'summary_pdf', 'breaths_csv', 'timeseries_csv',
-                     'events_csv', 'npz_session'
-    """
+    """Log that data was exported."""
     global _session_data
     _session_data['exports'][export_type] = \
         _session_data['exports'].get(export_type, 0) + 1
     _session_data['last_action'] = f'export_{export_type}'
-
-    # Update heartbeat for crash tracking
     _update_heartbeat(f'export:{export_type}')
-
     log_event('export', {'export_type': export_type})
 
 
 def log_file_saved(save_type='npz', eupnea_count=None, sniff_count=None, **extra_params):
-    """
-    Log file save/export with per-file edit metrics for ML evaluation.
-
-    This is the KEY metric for measuring ML performance improvements:
-    - Only tracks files that were completed and saved by the user
-    - Excludes test files, abandoned analyses, and exploratory work
-    - Directly comparable across app versions
-
-    Args:
-        save_type (str): Type of save ('npz', 'csv', 'pdf', 'consolidated')
-        eupnea_count (int, optional): Number of breaths classified as eupnea
-        sniff_count (int, optional): Number of breaths classified as sniffing
-        **extra_params: Additional context (file_type, num_sweeps, etc.)
-
-    Example:
-        log_file_saved('npz', eupnea_count=180, sniff_count=20,
-                      file_type='abf', num_sweeps=10)
-    """
+    """Log file save with per-file edit metrics for ML evaluation."""
     global _session_data
 
-    # Get per-file metrics
     num_breaths = _session_data['current_file_breaths']
     edits_added = _session_data['current_file_edits_added']
     edits_deleted = _session_data['current_file_edits_deleted']
     edits_total = edits_added + edits_deleted
 
-    # Calculate per-file edit metrics (for ML evaluation)
-    if num_breaths > 0:
-        edit_percentage = (edits_total / num_breaths) * 100
-        false_negative_rate = (edits_added / num_breaths) * 100
-        false_positive_rate = (edits_deleted / num_breaths) * 100
-    else:
-        edit_percentage = 0
-        false_negative_rate = 0
-        false_positive_rate = 0
-
-    # Calculate eupnea/sniffing metrics (for breath pattern analysis)
-    eupnea_percentage = 0
-    sniff_percentage = 0
-    eupnea_to_sniff_ratio = 0
-
-    if eupnea_count is not None and sniff_count is not None:
-        total_classified = eupnea_count + sniff_count
-        if total_classified > 0:
-            eupnea_percentage = (eupnea_count / total_classified) * 100
-            sniff_percentage = (sniff_count / total_classified) * 100
-        if sniff_count > 0:
-            eupnea_to_sniff_ratio = eupnea_count / sniff_count
+    edit_percentage = (edits_total / num_breaths * 100) if num_breaths > 0 else 0
+    false_negative_rate = (edits_added / num_breaths * 100) if num_breaths > 0 else 0
+    false_positive_rate = (edits_deleted / num_breaths * 100) if num_breaths > 0 else 0
 
     params = {
         'save_type': save_type,
@@ -612,16 +239,11 @@ def log_file_saved(save_type='npz', eupnea_count=None, sniff_count=None, **extra
         'false_positive_rate': round(false_positive_rate, 2)
     }
 
-    # Add eupnea/sniffing metrics if available
     if eupnea_count is not None and sniff_count is not None:
         params['eupnea_count'] = eupnea_count
         params['sniff_count'] = sniff_count
-        params['eupnea_percentage'] = round(eupnea_percentage, 2)
-        params['sniff_percentage'] = round(sniff_percentage, 2)
-        params['eupnea_to_sniff_ratio'] = round(eupnea_to_sniff_ratio, 2)
 
     params.update(extra_params)
-
     log_event('file_saved', params)
 
     print(f"[telemetry] File saved with {edit_percentage:.1f}% edits "
@@ -630,106 +252,50 @@ def log_file_saved(save_type='npz', eupnea_count=None, sniff_count=None, **extra
 
 def log_user_engagement():
     """
-    Send a user_engagement event to GA4.
+    Send a lightweight engagement ping to GA4.
 
-    This is a special GA4 event that helps count active users in Realtime reports.
-    Call this periodically (e.g., every 30-60 seconds) while app is in use.
-
-    Can also be called on any user interaction to signal engagement.
+    Called every ~45s by a QTimer in MainWindow. Helps GA4 show accurate
+    realtime active user count. Fire-and-forget — if it fails, no caching.
     """
-    if not is_telemetry_enabled():
-        return
-
-    # engagement_time_msec is automatically added by log_event via _update_engagement_time
     log_event('user_engagement', {})
 
 
 def log_screen_view(screen_name, screen_class=None, **extra_params):
-    """
-    Log when user views a screen/dialog.
-
-    This is the desktop app equivalent of "page views" for websites.
-    Shows which screens users spend time in.
-
-    Args:
-        screen_name (str): Name of the screen/dialog (e.g., 'GMM Clustering Dialog')
-        screen_class (str, optional): Class name for grouping (e.g., 'dialog', 'main_screen')
-        **extra_params: Additional context
-
-    Example:
-        log_screen_view('GMM Clustering Dialog', screen_class='analysis_dialog')
-        log_screen_view('Main Analysis Screen')
-    """
+    """Log when user views a screen/dialog."""
     if not is_telemetry_enabled():
         return
-
-    params = {
-        'screen_name': screen_name,
-        'firebase_screen': screen_name,  # GA4 standard parameter for screen name
-    }
-
+    params = {'screen_name': screen_name}
     if screen_class:
         params['screen_class'] = screen_class
-        params['firebase_screen_class'] = screen_class  # GA4 standard parameter
-
     params.update(extra_params)
-
     log_event('screen_view', params)
 
 
 def log_session_end():
-    """
-    Log session summary when app closes.
-
-    Call this in the app's closeEvent.
-    """
+    """Log session summary when app closes."""
     if not is_telemetry_enabled():
         return
 
     try:
-        # Calculate session duration
         if _session_data['session_start']:
             start = datetime.fromisoformat(_session_data['session_start'])
             duration_minutes = (datetime.now() - start).total_seconds() / 60
         else:
             duration_minutes = 0
 
-        # Calculate edit metrics for ML performance tracking
         total_breaths = _session_data['total_breaths']
         edits_made = _session_data['edits_made']
-        edits_added = _session_data['edits_added']
-        edits_deleted = _session_data['edits_deleted']
-
-        # Edit percentage (% of breaths that needed manual correction)
         edit_percentage = (edits_made / total_breaths * 100) if total_breaths > 0 else 0
 
-        # False negative rate (missed breaths / total)
-        false_negative_rate = (edits_added / total_breaths * 100) if total_breaths > 0 else 0
-
-        # False positive rate (wrong detections / total)
-        false_positive_rate = (edits_deleted / total_breaths * 100) if total_breaths > 0 else 0
-
-        # Edits per file (average correction burden per file)
-        edits_per_file = (edits_made / _session_data['files_analyzed']) if _session_data['files_analyzed'] > 0 else 0
-
-        # Send session summary to GA4
         log_event('session_end', {
             'session_duration_minutes': round(duration_minutes, 1),
             'files_analyzed': _session_data['files_analyzed'],
-            'file_types_abf': _session_data['file_types'].get('abf', 0),
-            'file_types_smrx': _session_data['file_types'].get('smrx', 0),
-            'file_types_edf': _session_data['file_types'].get('edf', 0),
             'total_breaths': total_breaths,
             'total_sweeps': _session_data['total_sweeps'],
             'features_used_count': len(_session_data['features_used']),
             'exports_count': sum(_session_data['exports'].values()),
             'edits_made': edits_made,
-            'edits_added': edits_added,
-            'edits_deleted': edits_deleted,
-            'edit_percentage': round(edit_percentage, 2),
-            'false_negative_rate': round(false_negative_rate, 2),
-            'false_positive_rate': round(false_positive_rate, 2),
-            'edits_per_file': round(edits_per_file, 2)
+            'edit_percentage': round(edit_percentage, 2)
         })
 
     except Exception as e:
@@ -737,295 +303,135 @@ def log_session_end():
 
 
 # ============================================================================
-# Enhanced Tracking - Timing, Edits, and Detailed Usage
+# Detailed tracking (kept for feature usage analytics)
 # ============================================================================
 
 def log_timing(operation_name, duration_seconds, **extra_params):
-    """
-    Log timing data for operations.
-
-    Args:
-        operation_name (str): Name of operation
-            Examples: 'peak_detection', 'file_load', 'gmm_clustering',
-                     'channel_selection_to_save'
-        duration_seconds (float): Duration in seconds
-        **extra_params: Additional parameters (e.g., num_breaths, file_size)
-
-    Example:
-        log_timing('peak_detection', 2.5, num_breaths=247, file_size_mb=15)
-    """
+    """Log timing data for operations."""
     global _session_data
-
-    # Store in session data for aggregation
     if operation_name not in _session_data['timing_data']:
         _session_data['timing_data'][operation_name] = []
     _session_data['timing_data'][operation_name].append(duration_seconds)
 
-    # Send to GA4
-    params = {
-        'operation': operation_name,
-        'duration_seconds': round(duration_seconds, 2)
-    }
+    params = {'operation': operation_name, 'duration_seconds': round(duration_seconds, 2)}
     params.update(extra_params)
-
     log_event('timing', params)
 
 
 def log_edit(edit_type, **extra_params):
-    """
-    Log manual editing actions.
-
-    Args:
-        edit_type (str): Type of edit
-            Examples: 'add_peak', 'delete_peak', 'move_peak', 'mark_sniff'
-        **extra_params: Additional context (e.g., num_peaks_remaining)
-
-    Example:
-        log_edit('add_peak', num_peaks_after=248)
-    """
+    """Log manual editing actions."""
     global _session_data
-
-    # Track session-wide edits
     _session_data['edits_made'] += 1
     _session_data['last_action'] = f'edit_{edit_type}'
 
-    # Track add vs delete separately for ML performance metrics (session-wide)
     if edit_type == 'add_peak':
         _session_data['edits_added'] += 1
-        # Also track per-file (for ML evaluation of saved files)
         _session_data['current_file_edits_added'] += 1
     elif edit_type == 'delete_peak':
         _session_data['edits_deleted'] += 1
-        # Also track per-file (for ML evaluation of saved files)
         _session_data['current_file_edits_deleted'] += 1
 
     params = {'edit_type': edit_type}
     params.update(extra_params)
-
     log_event('manual_edit', params)
 
 
 def log_button_click(button_name, **extra_params):
-    """
-    Log button/UI interactions.
-
-    Args:
-        button_name (str): Button/action identifier
-            Examples: 'detect_peaks', 'apply_filter', 'run_gmm',
-                     'export_csv', 'save_session', 'load_session'
-        **extra_params: Additional context
-
-    Example:
-        log_button_click('detect_peaks', threshold=0.5)
-    """
+    """Log button/UI interactions."""
     global _session_data
-
     _session_data['last_action'] = button_name
 
-    # Update heartbeat for crash tracking
     context = ', '.join(f'{k}={v}' for k, v in extra_params.items()) if extra_params else None
     _update_heartbeat(f'button:{button_name}', context)
 
     params = {'button': button_name}
     params.update(extra_params)
-
     log_event('button_click', params)
 
 
 def log_breath_statistics(num_breaths, mean_frequency=None, regularity_score=None, **extra_params):
-    """
-    Log breathing analysis statistics.
-
-    Args:
-        num_breaths (int): Total breaths detected
-        mean_frequency (float, optional): Mean breathing frequency (Hz)
-        regularity_score (float, optional): Breathing regularity score
-        **extra_params: Additional metrics
-
-    Example:
-        log_breath_statistics(247, mean_frequency=1.2, regularity_score=0.85,
-                            eupnea_percentage=75, apnea_count=3)
-    """
-    params = {
-        'num_breaths': num_breaths
-    }
-
+    """Log breathing analysis statistics."""
+    params = {'num_breaths': num_breaths}
     if mean_frequency is not None:
         params['mean_frequency_hz'] = round(mean_frequency, 2)
-
     if regularity_score is not None:
         params['regularity_score'] = round(regularity_score, 3)
-
     params.update(extra_params)
-
     log_event('breath_statistics', params)
 
 
 def log_crash(error_message, **extra_params):
-    """
-    Log application crash/error to GA4.
-
-    Args:
-        error_message (str): Brief error description (no PII)
-        **extra_params: Additional context
-
-    Example:
-        log_crash('IndexError in peak detection',
-                 last_action=_session_data.get('last_action'),
-                 num_breaths=247)
-    """
+    """Log application crash/error to GA4."""
     global _session_data
-
     params = {
         'error_type': error_message,
         'last_action': _session_data.get('last_action', 'unknown')
     }
     params.update(extra_params)
-
     log_event('crash', params)
 
 
 def log_warning(warning_message, **extra_params):
-    """
-    Log non-critical warnings (e.g., "No peaks detected", "Filter unstable").
-
-    Args:
-        warning_message (str): Brief warning description
-        **extra_params: Additional context
-
-    Example:
-        log_warning('No peaks detected', threshold=0.5, data_points=10000)
-    """
+    """Log non-critical warnings."""
     params = {'warning_type': warning_message}
     params.update(extra_params)
-
     log_event('warning', params)
 
 
 def log_filter_applied(filter_type, **params):
-    """
-    Log filter application with settings.
-
-    Args:
-        filter_type (str): Type of filter ('butterworth', 'notch', 'mean_subtract')
-        **params: Filter parameters
-
-    Example:
-        log_filter_applied('butterworth', highpass=0.5, lowpass=10.0,
-                          order=4, data_points=100000)
-    """
+    """Log filter application with settings."""
     telemetry_params = {'filter_type': filter_type}
     telemetry_params.update(params)
-
     log_event('filter_applied', telemetry_params)
 
 
 def log_peak_detection(method, num_peaks, **params):
-    """
-    Log peak detection results.
-
-    Args:
-        method (str): Detection method ('auto_threshold', 'manual_threshold',
-                                        'template_matching', 'derivative')
-        num_peaks (int): Number of peaks detected
-        **params: Detection parameters
-
-    Example:
-        log_peak_detection('auto_threshold', num_peaks=247,
-                          threshold=0.42, min_distance=100)
-    """
+    """Log peak detection results."""
     global _session_data
-
-    # Set current file breath count (for per-file edit percentage tracking)
     num_breaths = params.get('num_breaths', num_peaks)
     _session_data['current_file_breaths'] = num_breaths
 
-    telemetry_params = {
-        'detection_method': method,
-        'num_peaks': num_peaks
-    }
+    telemetry_params = {'detection_method': method, 'num_peaks': num_peaks}
     telemetry_params.update(params)
-
     log_event('peak_detection', telemetry_params)
 
 
 def log_navigation(action, **params):
-    """
-    Log navigation actions (sweep changes, window scrolling, zooming).
-
-    Args:
-        action (str): Navigation action ('change_sweep', 'zoom_in', 'zoom_out',
-                                        'pan_left', 'pan_right', 'reset_view')
-        **params: Additional context
-
-    Example:
-        log_navigation('change_sweep', sweep_number=5, total_sweeps=10)
-    """
+    """Log navigation actions."""
     telemetry_params = {'navigation_action': action}
     telemetry_params.update(params)
-
     log_event('navigation', telemetry_params)
 
 
 def log_keyboard_shortcut(shortcut_name, **params):
-    """
-    Log keyboard shortcut usage.
-
-    Args:
-        shortcut_name (str): Shortcut identifier
-            Examples: 'shift_click_add_peak', 'ctrl_click_delete_peak',
-                     'f1_help', 'ctrl_s_save'
-        **params: Additional context
-
-    Example:
-        log_keyboard_shortcut('shift_click_add_peak')
-    """
+    """Log keyboard shortcut usage."""
     telemetry_params = {'shortcut': shortcut_name}
     telemetry_params.update(params)
-
     log_event('keyboard_shortcut', telemetry_params)
 
 
 def log_error(error, context=None):
-    """
-    Log an error or exception to GA4.
-
-    Args:
-        error (Exception): Exception object
-        context (dict, optional): Additional context (no PII)
-    """
+    """Log an error or exception to GA4."""
     if not is_telemetry_enabled():
         return
-
     try:
         error_data = {
             'error_type': type(error).__name__,
-            'error_message': str(error)[:100],  # Truncate long messages
+            'error_message': str(error)[:100],
         }
         if context:
             error_data.update(context)
-
         log_event('error', error_data)
-
-    except Exception as e:
-        # Silently fail - never interrupt user workflow
-        print(f"Warning: Could not log error: {e}")
+    except Exception:
+        pass
 
 
 # ============================================================================
-# Session Data Access (for crash reporting)
+# Session data access (for crash reporting)
 # ============================================================================
 
 def get_session_data() -> dict:
-    """
-    Get a copy of current session data for crash reports.
-
-    This exposes session context to the error reporting system
-    without creating circular dependencies.
-
-    Returns:
-        dict: Copy of session data (safe to modify)
-    """
+    """Get a copy of current session data for crash reports."""
     return {
         'files_analyzed': _session_data.get('files_analyzed', 0),
         'total_breaths': _session_data.get('total_breaths', 0),
@@ -1038,10 +444,6 @@ def get_session_data() -> dict:
         'edits_deleted': _session_data.get('edits_deleted', 0),
     }
 
-
-# ============================================================================
-# Utility
-# ============================================================================
 
 def is_active():
     """Check if telemetry is initialized and enabled."""

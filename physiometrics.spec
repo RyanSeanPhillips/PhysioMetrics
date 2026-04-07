@@ -48,6 +48,7 @@ hidden_imports = [
     'scipy',
     'scipy.signal',
     'scipy.ndimage',
+    'h5py',
 
     # Matplotlib backends
     'matplotlib',

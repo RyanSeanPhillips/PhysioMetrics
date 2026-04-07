@@ -330,9 +330,17 @@ Timestamp: {self.crash_report.timestamp}
             pass  # Not on Windows or API not available
 
     def _restore_geometry(self):
-        """Restore window position from settings."""
+        """Restore window position from settings, with off-screen protection."""
         if self.settings.contains("geometry"):
             self.restoreGeometry(self.settings.value("geometry"))
+            # Validate position is on a visible screen
+            from PyQt6.QtGui import QGuiApplication
+            if QGuiApplication.screenAt(self.geometry().center()) is None:
+                screen = QGuiApplication.primaryScreen()
+                if screen:
+                    center = screen.availableGeometry().center()
+                    self.move(center.x() - self.width() // 2,
+                              center.y() - self.height() // 2)
 
     def closeEvent(self, event):
         """Save geometry on close."""

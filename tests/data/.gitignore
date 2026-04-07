@@ -1,0 +1,8 @@
+# Test data files are large (100MB+) — don't commit to git.
+# These are copied from lab data for automated testing.
+*.abf
+*.smrx
+*.edf
+*.mat
+*.npz
+*.pmx

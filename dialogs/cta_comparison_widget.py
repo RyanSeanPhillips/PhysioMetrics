@@ -125,18 +125,28 @@ class CTAComparisonWidget(QWidget):
         trigger_radio_layout = QHBoxLayout()
         self._radio_event_markers = QRadioButton("Event Markers")
         self._radio_breath_events = QRadioButton("Breath Events")
+        self._radio_stim_events = QRadioButton("Stim Events")
         self._radio_event_markers.setChecked(True)
         trigger_radio_layout.addWidget(self._radio_event_markers)
         trigger_radio_layout.addWidget(self._radio_breath_events)
+        trigger_radio_layout.addWidget(self._radio_stim_events)
         trigger_layout.addLayout(trigger_radio_layout)
 
         # Disable breath events if no breath data available
-        print(f"[CTA Widget] breath_data is None: {self._breath_data is None}")
-        if self._breath_data is not None:
-            print(f"[CTA Widget] all_peaks keys: {list(self._breath_data.get('all_peaks', {}).keys())}")
         if self._breath_data is None:
             self._radio_breath_events.setEnabled(False)
             self._radio_breath_events.setToolTip("No breath data available (run peak detection first)")
+
+        # Disable stim events if no stim data available
+        stim_spans = self._get_stim_spans()
+        if not stim_spans:
+            self._radio_stim_events.setEnabled(False)
+            self._radio_stim_events.setToolTip("No stim channel detected")
+        else:
+            n_stim = sum(len(spans) for spans in stim_spans.values())
+            self._radio_stim_events.setToolTip(
+                f"Use laser/stimulus onset and offset as CTA triggers ({n_stim} stim events)"
+            )
 
         # Stacked widget: page 0 = marker categories, page 1 = breath config
         self._trigger_stack = QStackedWidget()
@@ -244,14 +254,35 @@ class CTAComparisonWidget(QWidget):
 
         self._trigger_stack.addWidget(breath_widget)
 
+        # Page 2: stim events info
+        stim_widget = QWidget()
+        stim_layout = QVBoxLayout(stim_widget)
+        stim_layout.setContentsMargins(0, 0, 0, 0)
+        stim_info = QLabel(
+            "CTA will be generated around detected laser/stimulus events.\n"
+            "Both onset and offset alignments will be included."
+        )
+        stim_info.setWordWrap(True)
+        stim_info.setStyleSheet("color: #999; font-size: 11px; padding: 4px;")
+        stim_layout.addWidget(stim_info)
+        stim_layout.addStretch()
+        self._trigger_stack.addWidget(stim_widget)
+
         trigger_layout.addWidget(self._trigger_stack)
         left_layout.addWidget(trigger_group)
 
-        # Connect radio buttons
-        self._radio_event_markers.toggled.connect(
-            lambda checked: self._trigger_stack.setCurrentIndex(0 if checked else 1)
-        )
+        # Connect radio buttons to switch stacked widget pages
+        def _update_trigger_page():
+            if self._radio_event_markers.isChecked():
+                self._trigger_stack.setCurrentIndex(0)
+            elif self._radio_breath_events.isChecked():
+                self._trigger_stack.setCurrentIndex(1)
+            elif self._radio_stim_events.isChecked():
+                self._trigger_stack.setCurrentIndex(2)
+
+        self._radio_event_markers.toggled.connect(_update_trigger_page)
         self._radio_breath_events.toggled.connect(self._on_trigger_source_changed)
+        self._radio_stim_events.toggled.connect(_update_trigger_page)
         self._breath_trigger_combo.currentIndexChanged.connect(self._on_breath_trigger_changed)
 
         # --- Time Windows (single line) ---
@@ -298,6 +329,9 @@ class CTAComparisonWidget(QWidget):
         self._spin_baseline_start.setDecimals(2)
         self._spin_baseline_start.setValue(self._viewmodel.config.baseline_start)
         self._spin_baseline_start.setToolTip("Start of baseline period (negative = before event)")
+        self._spin_baseline_start.setKeyboardTracking(True)
+        self._spin_baseline_start.lineEdit().setReadOnly(False)
+        self._spin_baseline_start.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._spin_baseline_start.valueChanged.connect(self._on_baseline_changed)
         zscore_layout.addWidget(self._spin_baseline_start)
 
@@ -308,6 +342,9 @@ class CTAComparisonWidget(QWidget):
         self._spin_baseline_end.setDecimals(2)
         self._spin_baseline_end.setValue(self._viewmodel.config.baseline_end)
         self._spin_baseline_end.setToolTip("End of baseline period (0 = event onset)")
+        self._spin_baseline_end.setKeyboardTracking(True)
+        self._spin_baseline_end.lineEdit().setReadOnly(False)
+        self._spin_baseline_end.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._spin_baseline_end.valueChanged.connect(self._on_baseline_changed)
         zscore_layout.addWidget(self._spin_baseline_end)
 
@@ -418,6 +455,15 @@ class CTAComparisonWidget(QWidget):
         left_layout.addWidget(self._chk_show_paired_lines)
 
         # Show baseline zone toggle
+        self._chk_show_stim = QCheckBox("Show stim period")
+        self._chk_show_stim.setChecked(True)
+        self._chk_show_stim.setToolTip(
+            "Shade the laser/stimulus on period on the CTA plot.\n"
+            "Uses stim onset/offset from the current file's detected stim channel."
+        )
+        self._chk_show_stim.toggled.connect(lambda: self._update_preview_plots())
+        left_layout.addWidget(self._chk_show_stim)
+
         self._chk_show_baseline = QCheckBox("Show baseline zone")
         self._chk_show_baseline.setChecked(True)
         self._chk_show_baseline.setToolTip(
@@ -934,6 +980,20 @@ class CTAComparisonWidget(QWidget):
             self._viewmodel.selected_metrics = metrics
             self._viewmodel.include_withdrawal = False  # Single markers, no withdrawal
             self._condition_group.setVisible(False)
+
+        elif self._radio_stim_events.isChecked():
+            # Stim onset/offset as trigger events
+            stim_markers = self._build_stim_markers()
+            if not stim_markers:
+                QMessageBox.warning(self, "No Stim Data", "No stim events detected.")
+                return
+
+            filtered_markers = stim_markers
+            categories = ['stimulus:laser']
+            self._viewmodel.selected_categories = categories
+            self._viewmodel.selected_metrics = metrics
+            self._viewmodel.include_withdrawal = True  # Include both onset and offset CTAs
+            print(f"[CTA Stim] Using {len(filtered_markers)} stim events as triggers")
 
         else:
             # Original event marker path
@@ -1456,7 +1516,9 @@ class CTAComparisonWidget(QWidget):
         is_zscored = self._viewmodel.config.zscore_baseline
         show_paired = self._chk_show_paired_lines.isChecked()
 
-        # Assign a color per condition (+ white for "All combined")
+        # Assign a color per condition — use user's metric colors when only
+        # one metric is selected; use condition palette when multiple metrics
+        # would cause color ambiguity
         _CONDITION_COLORS = [
             '#4488ff', '#ff6644', '#44cc66', '#cc44ff', '#ffcc44',
             '#44cccc', '#ff44aa', '#88cc44', '#ff8844', '#4466ff',
@@ -1466,6 +1528,27 @@ class CTAComparisonWidget(QWidget):
             name: _CONDITION_COLORS[i % len(_CONDITION_COLORS)]
             for i, name in enumerate(cond_names)
         }
+        # Build per-metric condition color maps: if the user set a metric color,
+        # derive condition variants from it (darker/lighter) so the user's
+        # color choice is respected while conditions remain distinguishable
+        _metric_cond_colors = {}  # {metric_key: {cond_name: color_str}}
+        for mk in self._get_selected_metrics():
+            user_color = self._metric_colors.get(mk)
+            if user_color is not None:
+                from PyQt6.QtGui import QColor
+                base = QColor(user_color) if isinstance(user_color, str) else user_color
+                h, s, l, _ = base.getHslF()
+                per_cond = {}
+                for ci, cn in enumerate(cond_names):
+                    # Shift lightness per condition: first=original, then lighter/darker
+                    if len(cond_names) == 1:
+                        per_cond[cn] = base.name()
+                    else:
+                        shift = (ci / max(len(cond_names) - 1, 1)) * 0.4 - 0.2  # -0.2 to +0.2
+                        new_l = max(0.15, min(0.85, l + shift))
+                        c = QColor.fromHslF(h, min(s * 1.1, 1.0), new_l)
+                        per_cond[cn] = c.name()
+                _metric_cond_colors[mk] = per_cond
 
         # Build "All combined" collection if there are multiple conditions
         all_combined = None
@@ -1521,6 +1604,7 @@ class CTAComparisonWidget(QWidget):
                 for spine in ax_onset.spines.values():
                     spine.set_color('#3a3a3a')
                 self._draw_baseline_zone(ax_onset)
+                self._draw_stim_zone(ax_onset)
                 ax_onset.axvline(0, color='#ff5555', linestyle='--', linewidth=1.5)
 
                 if has_withdrawal:
@@ -1530,6 +1614,7 @@ class CTAComparisonWidget(QWidget):
                     for spine in ax_w.spines.values():
                         spine.set_color('#3a3a3a')
                     self._draw_baseline_zone(ax_w)
+                    self._draw_stim_zone(ax_w)
                     ax_w.axvline(0, color='#ff5555', linestyle='--', linewidth=1.5)
 
                 metric_label_text = metric_key
@@ -1550,7 +1635,11 @@ class CTAComparisonWidget(QWidget):
                 for cond_name in cond_names:
                     collection = condition_collections[cond_name]
                     type_results = collection.get_results_for_marker_type(category, label)
-                    cond_color = cond_color_map[cond_name]
+                    # Use per-metric condition color if available, fall back to palette
+                    if metric_key in _metric_cond_colors and cond_name in _metric_cond_colors[metric_key]:
+                        cond_color = _metric_cond_colors[metric_key][cond_name]
+                    else:
+                        cond_color = cond_color_map[cond_name]
 
                     onset_result = type_results.get(f"{category}:{label}:onset:{metric_key}")
                     if onset_result:
@@ -1644,6 +1733,61 @@ class CTAComparisonWidget(QWidget):
 
         return combined
 
+    def _get_stim_spans(self) -> dict:
+        """Get stim spans from parent MainWindow's state."""
+        mw = self.window()
+        if mw and hasattr(mw, 'state'):
+            return getattr(mw.state, 'stim_spans_by_sweep', {})
+        return {}
+
+    def _build_stim_markers(self) -> list:
+        """Convert detected stim spans into EventMarker objects for CTA calculation."""
+        from core.domain.events.models import EventMarker
+        spans = self._get_stim_spans()
+        markers = []
+        for sweep_idx, sweep_spans in spans.items():
+            for i, (start, end) in enumerate(sweep_spans):
+                markers.append(EventMarker(
+                    start_time=start,
+                    end_time=end,
+                    sweep_idx=sweep_idx,
+                    category='stimulus',
+                    label='laser',
+                    is_paired=True,
+                ))
+        return markers
+
+    def _get_stim_duration(self) -> Optional[float]:
+        """Get stim duration from the parent MainWindow's state (seconds)."""
+        mw = self.window()
+        if mw and hasattr(mw, 'state'):
+            spans = getattr(mw.state, 'stim_spans_by_sweep', {})
+            if spans:
+                # Use first sweep's first span
+                first_sweep_spans = next(iter(spans.values()), [])
+                if first_sweep_spans:
+                    start, end = first_sweep_spans[0]
+                    return float(end - start)
+        return None
+
+    def _draw_stim_zone(self, ax, event_time_offset: float = 0.0):
+        """Draw stim on/off shading on a CTA plot.
+
+        For stim-triggered CTAs (event = stim onset), stim starts at t=0.
+        For other triggers, we'd need per-event stim offsets (future work).
+        For now, draws a shaded region from 0 to stim_duration.
+        """
+        if not self._chk_show_stim.isChecked():
+            return
+        stim_dur = self._get_stim_duration()
+        if stim_dur is None or stim_dur <= 0:
+            return
+        ax.axvspan(
+            event_time_offset, event_time_offset + stim_dur,
+            alpha=0.08, color='#4488ff', zorder=0,
+            label='Stim on',
+        )
+
     def _draw_baseline_zone(self, ax):
         """Draw the z-score baseline zone as a shaded region if enabled."""
         if not self._chk_show_baseline.isChecked():
@@ -1665,8 +1809,9 @@ class CTAComparisonWidget(QWidget):
         for spine in ax.spines.values():
             spine.set_color('#3a3a3a')
 
-        # Baseline zone (behind data)
+        # Baseline zone and stim zone (behind data)
         self._draw_baseline_zone(ax)
+        self._draw_stim_zone(ax)
 
         for trace in result.traces:
             ax.plot(trace.time, trace.values, color=color, alpha=0.2, linewidth=0.5)
@@ -1766,6 +1911,7 @@ class CTAComparisonWidget(QWidget):
             metric_colors={k: v.name() for k, v in self._metric_colors.items()},
             show_paired_lines=self._chk_show_paired_lines.isChecked(),
             show_baseline_zone=self._chk_show_baseline.isChecked(),
+            show_stim_period=self._chk_show_stim.isChecked(),
         ).to_dict()
 
         # Add CTA results (collection + condition_collections)
@@ -1904,6 +2050,8 @@ class CTAComparisonWidget(QWidget):
             # Display toggles
             self._chk_show_paired_lines.setChecked(cfg.show_paired_lines)
             self._chk_show_baseline.setChecked(cfg.show_baseline_zone)
+            if hasattr(cfg, 'show_stim_period'):
+                self._chk_show_stim.setChecked(cfg.show_stim_period)
 
         finally:
             for w in widgets_to_block:

@@ -1599,6 +1599,9 @@ class ExportManager:
         import numpy as np, csv, json, time
         from PyQt6.QtWidgets import QApplication
 
+        # Defaults for file flags (overridden by dialog when not in preview mode)
+        save_hr_csv = False
+
         st = self.window.state
         if not getattr(st, "in_path", None):
             self._show_message_box(QMessageBox.Icon.Information, "View Summary" if preview_only else "Save analyzed data", "Open an ABF first.")
@@ -1820,6 +1823,7 @@ class ExportManager:
             save_timeseries_csv = dialog_vals.get("save_timeseries_csv", True)
             save_breaths_csv = dialog_vals.get("save_breaths_csv", True)
             save_events_csv = dialog_vals.get("save_events_csv", True)
+            save_hr_csv = dialog_vals.get("save_hr_csv", True)  # Per-beat HR data
             save_pdf = dialog_vals.get("save_pdf", True)
             save_session = dialog_vals.get("save_session", True)  # Session state (.pleth.npz)
             save_ml_training = dialog_vals.get("save_ml_training", False)  # ML training data (3 CSVs)
@@ -1831,6 +1835,7 @@ class ExportManager:
             if save_timeseries_csv: expected_suffixes.append("_means_by_time.csv")
             if save_breaths_csv: expected_suffixes.append("_breaths.csv")
             if save_events_csv: expected_suffixes.append("_events.csv")
+            if save_hr_csv: expected_suffixes.append("_hr.csv")
             if save_pdf: expected_suffixes.append("_summary.pdf")
             if save_session: expected_suffixes.append("_session.npz")
             # Note: ML training data goes to separate centralized folder, not checked here
@@ -3193,6 +3198,56 @@ class ExportManager:
             else:
                 print(f"[CSV] - Events CSV skipped (computed in {t_elapsed:.2f}s, {event_summary})")
 
+        # -------------------- (3b) HR CSV (per-beat) --------------------
+        if not preview_only and save_hr_csv:
+            t_start = time.time()
+            ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+            if ecg_results:
+                hr_path = base_path.with_name(base_path.name + "_hr.csv")
+                hr_rows = []
+                for sweep_idx in kept_sweeps:
+                    ecg_result = ecg_results.get(sweep_idx)
+                    if ecg_result is None or not hasattr(ecg_result, 'r_peaks'):
+                        continue
+                    r_peaks = ecg_result.r_peaks
+                    rr_ms = ecg_result.rr_intervals_ms if hasattr(ecg_result, 'rr_intervals_ms') else np.array([])
+                    labels = ecg_result.labels if hasattr(ecg_result, 'labels') else np.ones(len(r_peaks))
+
+                    for i, pk_idx in enumerate(r_peaks):
+                        # Time relative to stim onset (consistent with other CSVs)
+                        t_abs = float(pk_idx) / float(st.sr_hz) if st.sr_hz else 0.0
+                        t_rel = t_abs - csv_t0
+
+                        rr_val = float(rr_ms[i]) if i < len(rr_ms) else np.nan
+                        hr_val = 60000.0 / rr_val if rr_val > 0 else np.nan
+                        label_val = int(labels[i]) if i < len(labels) else 1
+
+                        hr_rows.append([
+                            sweep_idx + 1,   # 1-based sweep
+                            i + 1,           # beat number
+                            f"{t_rel:.6f}",
+                            f"{rr_val:.2f}" if not np.isnan(rr_val) else "",
+                            f"{hr_val:.1f}" if not np.isnan(hr_val) else "",
+                            int(pk_idx),
+                            label_val,
+                        ])
+
+                if hr_rows:
+                    import pandas as pd
+                    df_hr = pd.DataFrame(
+                        hr_rows,
+                        columns=["sweep", "beat", "t", "rr_interval_ms", "hr_bpm",
+                                 "sample_index", "quality_label"]
+                    )
+                    df_hr.to_csv(hr_path, index=False, na_rep='')
+                    t_elapsed = time.time() - t_start
+                    print(f"[CSV] [OK] HR data written in {t_elapsed:.2f}s "
+                          f"({len(hr_rows)} beats across {len(kept_sweeps)} sweeps)")
+                else:
+                    print("[CSV] - HR CSV skipped (no R-peaks detected)")
+            else:
+                print("[CSV] - HR CSV skipped (no EKG channel)")
+
         # -------------------- (4) Summary PDF or Preview --------------------
         t_start = time.time()
         if progress_dialog:
@@ -3499,6 +3554,10 @@ class ExportManager:
                 file_list.append(breaths_path.name)
             if save_events_csv:
                 file_list.append(events_path.name)
+            if save_hr_csv and getattr(st, 'ecg_results_by_sweep', None):
+                hr_path = base_path.with_name(base_path.name + "_hr.csv")
+                if hr_path.exists():
+                    file_list.append(hr_path.name)
             if save_pdf and pulse_pdf_path:
                 file_list.append(pulse_pdf_path.name)
             if save_pdf and pdf_path:

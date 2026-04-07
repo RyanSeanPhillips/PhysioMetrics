@@ -40,6 +40,16 @@ class FirstLaunchDialog(ExportMixin, QDialog):
         self._apply_dark_theme()
         self._enable_dark_title_bar()
         self.setup_export_menu()
+        self._center_on_screen()
+
+    def _center_on_screen(self):
+        """Ensure dialog is centered on a visible screen."""
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            center = screen.availableGeometry().center()
+            self.move(center.x() - self.width() // 2,
+                      center.y() - self.height() // 2)
 
     def _enable_dark_title_bar(self):
         """Enable dark title bar on Windows 10/11."""

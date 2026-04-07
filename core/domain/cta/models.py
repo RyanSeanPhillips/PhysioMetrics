@@ -306,6 +306,7 @@ class CTATabConfig:
     # Display toggles
     show_paired_lines: bool = True
     show_baseline_zone: bool = True
+    show_stim_period: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -329,6 +330,7 @@ class CTATabConfig:
             'metric_colors': self.metric_colors,
             'show_paired_lines': self.show_paired_lines,
             'show_baseline_zone': self.show_baseline_zone,
+            'show_stim_period': self.show_stim_period,
         }
 
     @classmethod
@@ -354,6 +356,7 @@ class CTATabConfig:
             metric_colors=dict(d.get('metric_colors', {})),
             show_paired_lines=bool(d.get('show_paired_lines', True)),
             show_baseline_zone=bool(d.get('show_baseline_zone', True)),
+            show_stim_period=bool(d.get('show_stim_period', True)),
         )
 
 

@@ -86,6 +86,76 @@ from version_info import VERSION_STRING
 ORG = "PhysioMetrics"
 APP = "PhysioMetrics"
 
+
+def _startup_health_check():
+    """
+    Quick check of %APPDATA%/PhysioMetrics for issues that could prevent startup.
+    Runs before MainWindow init. Costs <1ms. Fixes problems silently where possible.
+    """
+    import json as _json
+
+    if sys.platform == 'win32':
+        config_dir = Path(os.environ.get('APPDATA', '')) / 'PhysioMetrics'
+    else:
+        config_dir = Path.home() / '.config' / 'PhysioMetrics'
+
+    if not config_dir.exists():
+        return
+
+    # Corrupted config.json — rename to .bak so first-launch dialog works
+    config_file = config_dir / 'config.json'
+    if config_file.exists():
+        try:
+            _json.loads(config_file.read_text(encoding='utf-8'))
+        except Exception:
+            print("[Health] Corrupted config.json — renaming to .json.bak")
+            try:
+                config_file.rename(config_file.with_suffix('.json.bak'))
+            except OSError:
+                pass
+
+    # Oversized telemetry.log — the sync loop in older versions could grow this
+    # to 1GB+, causing the app to hang on startup. Delete it unconditionally
+    # since we no longer cache telemetry events locally.
+    telemetry_log = config_dir / 'telemetry.log'
+    if telemetry_log.exists():
+        try:
+            size_mb = telemetry_log.stat().st_size / (1024 * 1024)
+            telemetry_log.unlink()
+            if size_mb > 1:
+                print(f"[Health] Removed telemetry.log ({size_mb:.0f} MB)")
+        except OSError:
+            pass
+
+    # Stale WAL files — clean up if no other PhysioMetrics process running
+    shm = config_dir / 'PhysioMetrics.db-shm'
+    wal = config_dir / 'PhysioMetrics.db-wal'
+    if shm.exists() or wal.exists():
+        other_running = False
+        try:
+            import psutil
+            current_pid = os.getpid()
+            for proc in psutil.process_iter(['pid', 'name']):
+                if (proc.info['pid'] != current_pid and
+                        'physiometrics' in (proc.info['name'] or '').lower()):
+                    other_running = True
+                    break
+        except Exception:
+            pass  # psutil not available, be conservative
+        if not other_running:
+            for f in (shm, wal):
+                if f.exists():
+                    try:
+                        f.unlink()
+                        print(f"[Health] Removed stale {f.name}")
+                    except OSError:
+                        pass
+
+
+# Run health check at import time (before MainWindow is created)
+_startup_health_check()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -239,6 +309,16 @@ class MainWindow(QMainWindow):
         saved_geom = self.settings.value("geometry")
         if saved_geom:
             self.restoreGeometry(saved_geom)
+            # Validate restored position is on a visible screen
+            from PyQt6.QtGui import QGuiApplication
+            screen = QGuiApplication.screenAt(self.geometry().center())
+            if screen is None:
+                print("[MainWindow] Restored geometry was off-screen, resetting to default")
+                self.resize(1200, 800)
+                primary = QGuiApplication.primaryScreen()
+                if primary:
+                    center = primary.availableGeometry().center()
+                    self.move(center.x() - 600, center.y() - 400)
 
         # --- Wire browse ---
         # Setup browse button with split-button dropdown (replaces original button)
@@ -419,11 +499,11 @@ class MainWindow(QMainWindow):
         # --- Initialize File Load ViewModel (MVVM) ---
         self._setup_file_load_viewmodel()
 
-        # --- Initialize Telemetry Heartbeat Timer ---
-        # Send periodic user_engagement events to help GA4 recognize active users
-        self.telemetry_heartbeat_timer = QTimer(self)
-        self.telemetry_heartbeat_timer.timeout.connect(telemetry.log_user_engagement)
-        self.telemetry_heartbeat_timer.start(45000)  # Send engagement event every 45 seconds
+        # Telemetry heartbeat — lightweight ping every 45s for GA4 realtime user count.
+        # Fire-and-forget: if the send fails, it's silently dropped (no local caching).
+        self._telemetry_timer = QTimer(self)
+        self._telemetry_timer.timeout.connect(telemetry.log_user_engagement)
+        self._telemetry_timer.start(45000)
 
         # --- Peak-detect UI wiring ---
         # Prominence field and Apply button already exist in UI file
@@ -587,10 +667,13 @@ class MainWindow(QMainWindow):
         # Wire Help button (from UI file)
         self.helpbutton.clicked.connect(self.on_help_clicked)
 
+        # --- Move update label + help button to tab bar corner (always visible) ---
+        self._setup_tab_corner_widget()
+
         # Add Claude Code launch button next to Help
         self._setup_claude_button()
 
-        # Set pointer cursor for update notification label (defined in UI file)
+        # Set pointer cursor for update notification label (now in corner widget)
         from PyQt6.QtGui import QCursor
         from PyQt6.QtCore import Qt
         self.update_notification_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -1516,11 +1599,21 @@ class MainWindow(QMainWindow):
 
         from PyQt6.QtWidgets import QToolButton
 
-        # Save status indicator
-        self._save_status_label = QLabel("", self)
-        self._save_status_label.setStyleSheet("QLabel { color: #888; padding: 2px 4px; }")
-        self._save_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.statusBar().addPermanentWidget(self._save_status_label)
+        # Save status indicator — clickable button with disk icon
+        self._save_status_btn = QToolButton(self)
+        self._save_status_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._save_status_btn.setIcon(self.style().standardIcon(
+            self.style().StandardPixmap.SP_DialogSaveButton))
+        self._save_status_btn.setAutoRaise(True)
+        self._save_status_btn.setToolTip("Save session (Ctrl+S)")
+        self._save_status_btn.clicked.connect(self._save_session_pmx)
+        self._save_status_btn.setStyleSheet(
+            "QToolButton { color: #888; padding: 2px 6px; border: none; }"
+            "QToolButton:hover { background-color: #333; border-radius: 3px; }"
+        )
+        self.statusBar().addPermanentWidget(self._save_status_btn)
+        # Keep a reference with the old name for compatibility
+        self._save_status_label = self._save_status_btn
 
         # Create label for filename display
         self.filename_label = QLabel("No file loaded", self)
@@ -1728,16 +1821,13 @@ class MainWindow(QMainWindow):
         from viewmodels.cta_viewmodel import CTAViewModel
         from PyQt6.QtWidgets import QMessageBox
 
-        # Get all markers (may be empty if using breath events only)
-        markers = list(self._event_marker_viewmodel.store.all())
-
-        # Check if we have either markers or breath data
-        has_breath_data = bool(
-            self.state.all_peaks_by_sweep and self.state.all_breaths_by_sweep
-        )
-        if not markers and not has_breath_data:
-            QMessageBox.warning(self, "No Events", "No event markers or breath data available for CTA generation.")
+        # Only requirement: a file must be loaded (need time array + signals)
+        if not hasattr(self.state, 't') or self.state.t is None or len(self.state.t) == 0:
+            QMessageBox.warning(self, "No Data", "Load a file first before generating CTAs.")
             return
+
+        # Get all markers (may be empty if using breath/stim triggers)
+        markers = list(self._event_marker_viewmodel.store.all())
 
         # Collect continuous signals suitable for CTA
         signals = {}
@@ -1767,12 +1857,18 @@ class MainWindow(QMainWindow):
             first_key = next(iter(self.state.sweeps.keys()), None)
 
             if isinstance(first_key, str):
-                # Photometry structure: sweeps = {'G0-dF/F': data, 'AI-0': data, ...}
+                # Channel-keyed structure: sweeps = {'IN 0': (n_samples, n_sweeps), ...}
+                # or photometry: sweeps = {'G0-dF/F': (n_samples,), ...}
                 for ch_name in channel_names:
                     if ch_name in self.state.sweeps:
                         ch_data = self.state.sweeps[ch_name]
                         if ch_data is not None:
-                            ch_array = np.asarray(ch_data).flatten()
+                            ch_arr = np.asarray(ch_data)
+                            # Handle 2D arrays (ABF: samples × sweeps)
+                            if ch_arr.ndim == 2 and sweep_idx < ch_arr.shape[1]:
+                                ch_array = ch_arr[:, sweep_idx]
+                            else:
+                                ch_array = ch_arr.flatten()
                             if len(ch_array) == n_samples:
                                 signals[ch_name] = ch_array
                                 if ch_name == dff_channel_name:
@@ -1822,6 +1918,9 @@ class MainWindow(QMainWindow):
             'area_exp':  'Expiratory Area',
             'ti_te_ratio': 'Ti/Te Ratio',
             'regularity': 'Regularity Score',
+            'hr':           'Heart Rate (BPM)',
+            'rr_interval':  'RR Interval (ms)',
+            'rsa_amplitude': 'RSA Amplitude (BPM)',
         }
 
         st = self.state
@@ -1845,6 +1944,9 @@ class MainWindow(QMainWindow):
             _metrics.set_peak_metrics(cur_pm if cur_pm is not None else orig_pm)
             gmm_probs = getattr(st, 'gmm_sniff_probabilities', {}).get(sweep_idx)
             _metrics.set_gmm_probabilities(gmm_probs)
+            # Set ECG result for HR/RR metrics
+            ecg_result = getattr(st, 'ecg_results_by_sweep', {}).get(sweep_idx)
+            _metrics.set_ecg_result(ecg_result)
 
             for mkey, mlabel in breath_metric_keys.items():
                 if mkey in _metrics.METRICS:
@@ -1858,6 +1960,7 @@ class MainWindow(QMainWindow):
 
             _metrics.set_peak_metrics(None)
             _metrics.set_gmm_probabilities(None)
+            _metrics.set_ecg_result(None)
 
         if not signals:
             # Debug: print what we have in state
@@ -1957,6 +2060,17 @@ class MainWindow(QMainWindow):
         # Create CTA viewmodel (persist on MainWindow so collection survives dialog close)
         if not hasattr(self, '_cta_viewmodel') or self._cta_viewmodel is None:
             self._cta_viewmodel = CTAViewModel(self)
+
+        # Reuse existing dialog if still open, otherwise create new
+        if hasattr(self, '_cta_dialog') and self._cta_dialog is not None:
+            try:
+                if self._cta_dialog.isVisible():
+                    self._cta_dialog.raise_()
+                    self._cta_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                pass  # Dialog was deleted
+
         dialog = PhotometryCTADialog(
             parent=self,
             viewmodel=self._cta_viewmodel,
@@ -1967,6 +2081,7 @@ class MainWindow(QMainWindow):
             channel_colors=channel_colors,
             breath_data=breath_data,
         )
+        self._cta_dialog = dialog
 
         # Restore saved workspace if available
         saved_workspace = getattr(self, '_cta_workspace_config', None)
@@ -1976,15 +2091,18 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[CTA] Failed to restore workspace: {e}")
 
-        dialog.exec()
+        # Capture workspace config when dialog closes
+        def _on_dialog_finished():
+            try:
+                workspace = dialog.get_workspace_config()
+                if workspace and workspace.get('tabs'):
+                    self._cta_workspace_config = workspace
+            except Exception as e:
+                print(f"[CTA] Failed to capture workspace config: {e}")
+            self._cta_dialog = None
 
-        # Capture workspace config on close for persistence
-        try:
-            workspace = dialog.get_workspace_config()
-            if workspace and workspace.get('tabs'):
-                self._cta_workspace_config = workspace
-        except Exception as e:
-            print(f"[CTA] Failed to capture workspace config: {e}")
+        dialog.finished.connect(_on_dialog_finished)
+        dialog.show()  # Non-blocking — user can interact with main window
 
     def _update_marker_count_display(self):
         """Update the marker count label in the UI."""
@@ -3056,19 +3174,16 @@ class MainWindow(QMainWindow):
 
     def _on_nav_window_changed(self, left: float, right: float):
         """Apply window bounds to the plot axes."""
-        if self.state.plotting_backend == 'pyqtgraph':
-            ph = self.plot_host
-            if hasattr(ph, 'plot_widget') and ph.plot_widget is not None:
-                ph.plot_widget.setXRange(left, right, padding=0)
-            elif hasattr(ph, '_subplots') and ph._subplots:
-                ph._subplots[0].setXRange(left, right, padding=0)
-        else:
-            ax = self.plot_host.fig.axes[0] if self.plot_host.fig.axes else None
-            if ax is None:
-                return
+        ph = self.plot_host
+        if hasattr(ph, '_subplots') and ph._subplots:
+            ph._subplots[0].setXRange(left, right, padding=0)
+        elif hasattr(ph, 'plot_widget') and ph.plot_widget is not None:
+            ph.plot_widget.setXRange(left, right, padding=0)
+        elif hasattr(ph, 'fig') and ph.fig.axes:
+            ax = ph.fig.axes[0]
             ax.set_xlim(left, right)
-            self.plot_host.fig.tight_layout()
-            self.plot_host.canvas.draw_idle()
+            ph.fig.tight_layout()
+            ph.canvas.draw_idle()
 
     def _on_nav_mode_changed(self, mode: str):
         """Update UI labels when navigation mode changes."""
@@ -4276,19 +4391,22 @@ class MainWindow(QMainWindow):
 
     def _update_save_status(self, status: str):
         """Update the save status indicator in the status bar."""
-        if not hasattr(self, '_save_status_label'):
+        if not hasattr(self, '_save_status_btn'):
             return
+        btn = self._save_status_btn
+        base = "QToolButton { padding: 2px 6px; border: none; color: %s; } QToolButton:hover { background-color: #333; border-radius: 3px; }"
         if status == "saved":
-            self._save_status_label.setText("Saved")
-            self._save_status_label.setStyleSheet("QLabel { color: #4caf50; padding: 2px 4px; }")
+            btn.setText(" Saved")
+            btn.setStyleSheet(base % "#4caf50")
         elif status == "modified":
-            self._save_status_label.setText("Modified")
-            self._save_status_label.setStyleSheet("QLabel { color: #ffa726; padding: 2px 4px; }")
+            btn.setText(" Modified")
+            btn.setStyleSheet(base % "#ffa726")
         elif status == "saving":
-            self._save_status_label.setText("Saving...")
-            self._save_status_label.setStyleSheet("QLabel { color: #888; padding: 2px 4px; }")
+            btn.setText(" Saving...")
+            btn.setStyleSheet(base % "#888")
         else:
-            self._save_status_label.setText("")
+            btn.setText("")
+            btn.setStyleSheet(base % "#888")
 
     def _close_current_file(self):
         """Close the current file and reset Analysis tab to blank state."""
@@ -4495,27 +4613,9 @@ class MainWindow(QMainWindow):
             npz_size = pmx_path.stat().st_size / (1024 * 1024)
             print(f"[NPZ] Save: {pmx_path.name} ({npz_size:.1f} MB, {npz_elapsed:.1f}s)")
 
-            # Parallel HDF5 save for testing (alongside NPZ)
-            hdf5_path = pmx_path.with_suffix('.hdf5')
-            try:
-                from core.hdf5_io import save_state_to_hdf5
-                t_hdf5 = time.time()
-                save_state_to_hdf5(
-                    self.state, hdf5_path,
-                    include_raw_data=is_photometry,
-                    gmm_cache=gmm_cache,
-                    app_settings=app_settings,
-                    event_markers=event_markers_data,
-                    cta_data=cta_data,
-                    channel_config=channel_config,
-                )
-                hdf5_elapsed = time.time() - t_hdf5
-                hdf5_size = hdf5_path.stat().st_size / (1024 * 1024)
-                print(f"[HDF5] Parallel save: {hdf5_path.name} ({hdf5_size:.1f} MB, {hdf5_elapsed:.1f}s)")
-            except Exception as e:
-                print(f"[HDF5] Parallel save failed: {e}")
-                import traceback
-                traceback.print_exc()
+            # HDF5 parallel save disabled for beta — save/load code in core/hdf5_io.py
+            # is complete but load path not yet connected. Will enable in next release
+            # after round-trip testing. See: core/hdf5_io.py, core/npz_io.py:load_session()
 
             elapsed = time.time() - t_start
             size_mb = pmx_path.stat().st_size / (1024 * 1024)
@@ -5540,6 +5640,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_after_ekg_edit(self):
         """Recompute Y2 data and redraw after R-peak add/delete."""
+        self._schedule_autosave()  # Mark as modified + queue auto-save
         st = self.state
         key = getattr(st, 'y2_metric_key', None)
         if key in ('hr', 'rr_interval', 'rsa_amplitude'):
@@ -7561,6 +7662,25 @@ class MainWindow(QMainWindow):
     def _on_help_dialog_closed(self):
         """Clear help dialog reference when closed so it can be reopened."""
         self.help_dialog = None
+
+    def _setup_tab_corner_widget(self):
+        """Move update_notification_label and helpbutton into the tab bar corner."""
+        from PyQt6.QtWidgets import QWidget, QHBoxLayout
+        from PyQt6.QtCore import Qt
+
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(12)
+
+        # Reparent existing widgets from the Analysis tab into the corner
+        self.update_notification_label.setParent(None)
+        self.helpbutton.setParent(None)
+
+        layout.addWidget(self.update_notification_label)
+        layout.addWidget(self.helpbutton)
+
+        self.Tabs.setCornerWidget(container, Qt.Corner.TopRightCorner)
 
     def _setup_claude_button(self):
         """Add a Claude Code launch button next to the Help button."""

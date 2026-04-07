@@ -133,7 +133,10 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         bottom.setSpacing(8)
 
         self._btn_export_all = QPushButton("Export All CSVs")
-        self._btn_export_all.setToolTip("Export CSV from every tab into a folder")
+        self._btn_export_all.setToolTip(
+            "Export a separate CSV file for each CTA tab into a single folder.\n"
+            "Each file is named: {source_file}_CTA_{tab_name}.csv"
+        )
         self._btn_export_all.setStyleSheet(
             "QPushButton { background-color: #1a4a6b; border: 1px solid #2a6a8a; }"
             "QPushButton:hover { background-color: #22628b; }"
@@ -186,6 +189,7 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         tab_name = widget.tab_name or f"CTA {self._tabs.count() + 1}"
         idx = self._tabs.addTab(widget, tab_name)
         self._tabs.setCurrentIndex(idx)
+        self._update_export_all_visibility()
 
     def _close_tab(self, index: int):
         """Close a tab (minimum 1 tab enforced)."""
@@ -196,6 +200,11 @@ class PhotometryCTADialog(ExportMixin, QDialog):
         self._tabs.removeTab(index)
         if widget:
             widget.deleteLater()
+        self._update_export_all_visibility()
+
+    def _update_export_all_visibility(self):
+        """Show 'Export All CSVs' only when there are multiple tabs."""
+        self._btn_export_all.setVisible(self._tabs.count() > 1)
 
     def _rename_tab(self, index: int):
         """Rename a tab on double-click."""
@@ -240,10 +249,14 @@ class PhotometryCTADialog(ExportMixin, QDialog):
                 stem = self._source_stem or "CTA"
                 filepath = str(folder_path / f"{stem}_CTA_{tab_name}.csv")
                 try:
-                    vm.export_to_csv_wide(filepath)
+                    # Build metadata from the widget (same as per-tab export)
+                    metadata = widget._build_export_metadata() if hasattr(widget, '_build_export_metadata') else {}
+                    vm.export_to_csv_wide(filepath, metadata=metadata)
                     exported += 1
                 except Exception as e:
-                    print(f"[CTA Export All] Error exporting tab {i}: {e}")
+                    print(f"[CTA Export All] Error exporting tab '{tab_name}': {e}")
+                    import traceback
+                    traceback.print_exc()
 
         if exported:
             QMessageBox.information(
@@ -388,10 +401,12 @@ class PhotometryCTADialog(ExportMixin, QDialog):
             }
             QTabBar::tab:hover:!selected { background-color: #333; color: #ddd; }
             QTabBar::close-button {
-                image: none; subcontrol-position: right;
-                border: none; padding: 2px;
+                subcontrol-position: right;
+                border: none; padding: 2px; margin: 2px;
+                width: 12px; height: 12px;
+                background: #555; border-radius: 6px;
             }
-            QTabBar::close-button:hover { background-color: #c44; border-radius: 2px; }
+            QTabBar::close-button:hover { background-color: #c44; }
             QGroupBox {
                 font-weight: bold; border: 1px solid #3a3a3a; border-radius: 4px;
                 margin-top: 8px; padding-top: 12px; background-color: #252525;

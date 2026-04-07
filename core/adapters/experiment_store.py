@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS backups (
     backup_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     backup_path      TEXT NOT NULL,
     trigger_event    TEXT NOT NULL,
-    created_at       TEXT NOT NULL
+    created_at       TEXT NOT NULL,
+    row_count        INTEGER DEFAULT -1
 );
 
 -- Experiment groups (for consolidation/comparison)
@@ -209,13 +210,168 @@ class ExperimentStore:
         self.db_path = Path(db_path) if db_path else _db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        self._conn.row_factory = sqlite3.Row
+        # Clean up stale WAL files before connecting
+        self._cleanup_stale_wal()
+
+        try:
+            self._conn = sqlite3.connect(
+                str(self.db_path),
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5,
+            )
+            self._conn.row_factory = sqlite3.Row
+            # Quick health check — if this fails, DB is corrupted
+            self._conn.execute("SELECT 1").fetchone()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
+            print(f"[DB] Database error: {e} — attempting recovery")
+            self._recover_database()
+            self._conn = sqlite3.connect(
+                str(self.db_path),
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5,
+            )
+            self._conn.row_factory = sqlite3.Row
+
         self._init_schema()
+        self._maybe_startup_backup()
+
+    def _cleanup_stale_wal(self):
+        """Remove stale WAL/SHM files if no other process has the DB open."""
+        shm = self.db_path.with_suffix('.db-shm')
+        wal = self.db_path.with_suffix('.db-wal')
+
+        if not shm.exists() and not wal.exists():
+            return
+
+        # Check if another PhysioMetrics process is running
+        try:
+            import psutil
+            current_pid = os.getpid()
+            for proc in psutil.process_iter(['pid', 'name']):
+                if proc.info['pid'] != current_pid and 'physiometrics' in (proc.info['name'] or '').lower():
+                    print(f"[DB] Another PhysioMetrics process running (PID {proc.info['pid']}), keeping WAL files")
+                    return
+        except (ImportError, Exception):
+            pass  # psutil not available, be conservative
+
+        # No other instance — safe to clean up stale WAL
+        for f in (shm, wal):
+            if f.exists():
+                try:
+                    f.unlink()
+                    print(f"[DB] Removed stale {f.name}")
+                except OSError:
+                    pass  # File locked, skip
+
+    def _recover_database(self):
+        """Attempt to recover a corrupted database — try WAL cleanup, then restore from backup."""
+
+        # Try 1: delete WAL files and retry
+        for ext in ('.db-shm', '.db-wal'):
+            f = self.db_path.with_suffix(ext)
+            if f.exists():
+                try:
+                    f.unlink()
+                    print(f"[DB] Removed {f.name} for recovery")
+                except OSError:
+                    pass
+
+        # Try 2: check if DB is readable after WAL cleanup
+        try:
+            conn = sqlite3.connect(str(self.db_path), timeout=2)
+            conn.execute("SELECT 1").fetchone()
+            conn.close()
+            print("[DB] Database recovered after WAL cleanup")
+            return
+        except Exception:
+            pass
+
+        # Try 3: restore from backup — prefer the one with the most rows
+        # (protects against restoring a backup that captured corrupted/empty state)
+        backup_dir = _backup_dir()
+        backups = sorted(backup_dir.glob("PhysioMetrics_*.db"),
+                         key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+
+        # Score backups by row count (verify each one)
+        best_backup = None
+        best_count = -1
+        for bp in backups:
+            try:
+                conn = sqlite3.connect(str(bp), timeout=2)
+                count = conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
+                conn.close()
+                if count > best_count:
+                    best_count = count
+                    best_backup = bp
+            except Exception:
+                continue  # Skip unreadable backups
+
+        if best_backup:
+            latest_backup = best_backup
+            print(f"[DB] Restoring from backup: {latest_backup.name} ({best_count} experiments)")
+            try:
+                # Move corrupted DB aside
+                corrupted = self.db_path.with_suffix('.db.corrupted')
+                if corrupted.exists():
+                    corrupted.unlink()
+                self.db_path.rename(corrupted)
+
+                # Copy backup into place
+                import shutil
+                shutil.copy2(latest_backup, self.db_path)
+
+                # Verify the restored backup works
+                conn = sqlite3.connect(str(self.db_path), timeout=2)
+                conn.execute("SELECT 1").fetchone()
+                count = conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
+                conn.close()
+                print(f"[DB] Restored from backup ({count} experiments). "
+                      f"Some recent changes may be lost.")
+                self._db_was_restored = True
+                return
+            except Exception as e:
+                print(f"[DB] Backup restore failed: {e}")
+
+        # Try 4: last resort — start fresh
+        print(f"[DB] No usable backup found — starting fresh")
+        print(f"[DB] NOTE: Project file list will be empty. Re-scan your folders to rebuild.")
+        self._db_was_reset = True
+        try:
+            corrupted = self.db_path.with_suffix('.db.corrupted')
+            if corrupted.exists():
+                corrupted.unlink()
+            self.db_path.rename(corrupted)
+            print(f"[DB] Moved corrupted DB to {corrupted.name}")
+        except OSError as e:
+            print(f"[DB] Could not rename corrupted DB: {e}")
+            try:
+                self.db_path.unlink()
+            except OSError:
+                pass
+
+    def _maybe_startup_backup(self):
+        """Create a backup on startup if the DB has changed since the last backup."""
+        backup_dir = _backup_dir()
+        if not backup_dir.exists():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find most recent backup
+        backups = sorted(backup_dir.glob("PhysioMetrics_*.db"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+
+        if backups:
+            last_backup_mtime = backups[0].stat().st_mtime
+            db_mtime = self.db_path.stat().st_mtime if self.db_path.exists() else 0
+            if db_mtime <= last_backup_mtime:
+                return  # DB hasn't changed since last backup
+
+        try:
+            self.backup(trigger_event="startup")
+            print(f"[DB] Startup backup created")
+        except Exception as e:
+            print(f"[DB] Startup backup failed: {e}")
 
     def _init_schema(self):
         """Create tables if they don't exist, auto-migrate v1->v2 if needed."""
@@ -1084,8 +1240,24 @@ class ExperimentStore:
     # ------------------------------------------------------------------
 
     def backup(self, trigger_event: str = "manual") -> str:
-        """Create a backup using SQLite's backup API. Returns backup path."""
+        """Create a backup using SQLite's backup API. Only keeps it if integrity check passes."""
         backup_path = _backup_dir() / f"PhysioMetrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+
+        # Run integrity check on current DB before backing up
+        try:
+            result = self._conn.execute("PRAGMA integrity_check").fetchone()
+            if result[0] != 'ok':
+                print(f"[DB] WARNING: integrity_check failed: {result[0]}")
+                print(f"[DB] Skipping backup of potentially corrupted database")
+                return ""
+        except Exception as e:
+            print(f"[DB] integrity_check error: {e}")
+
+        # Also record the row count so we can detect silent data loss
+        try:
+            count = self._conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
+        except Exception:
+            count = -1
 
         backup_conn = sqlite3.connect(str(backup_path))
         try:
@@ -1093,9 +1265,19 @@ class ExperimentStore:
         finally:
             backup_conn.close()
 
+        # Verify the backup is readable and has the same row count
+        try:
+            verify_conn = sqlite3.connect(str(backup_path))
+            verify_count = verify_conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
+            verify_conn.close()
+            if count >= 0 and verify_count != count:
+                print(f"[DB] WARNING: backup has {verify_count} rows but source has {count}")
+        except Exception:
+            pass
+
         self._conn.execute(
-            "INSERT INTO backups (backup_path, trigger_event, created_at) VALUES (?, ?, ?)",
-            (str(backup_path), trigger_event, _now()),
+            "INSERT INTO backups (backup_path, trigger_event, created_at, row_count) VALUES (?, ?, ?, ?)",
+            (str(backup_path), trigger_event, _now(), count),
         )
 
         self._prune_backups()

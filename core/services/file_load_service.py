@@ -49,6 +49,12 @@ class FileLoadService:
         if hasattr(state, 'bout_annotations'):
             state.bout_annotations.clear()
 
+        # Clear EKG state (prevent stale HR data from previous file)
+        state.ekg_chan = None
+        state.ecg_config = None
+        if hasattr(state, 'ecg_results_by_sweep'):
+            state.ecg_results_by_sweep.clear()
+
     def reset_caches(self, mw_state_holder) -> None:
         """
         Clear MainWindow-level caches that live outside AppState.
@@ -64,6 +70,12 @@ class FileLoadService:
         mw_state_holder._export_metric_cache = {}
         mw_state_holder.zscore_global_mean = None
         mw_state_holder.zscore_global_std = None
+
+        # Clear CTA workspace (prevent stale CTAs from previous file)
+        if hasattr(mw_state_holder, '_cta_workspace_config'):
+            mw_state_holder._cta_workspace_config = None
+        if hasattr(mw_state_holder, '_cta_viewmodel') and mw_state_holder._cta_viewmodel is not None:
+            mw_state_holder._cta_viewmodel.clear()
 
     def apply_single_file_data(self, state, result: FileLoadResult) -> None:
         """

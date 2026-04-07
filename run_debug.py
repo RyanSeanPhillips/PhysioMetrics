@@ -62,6 +62,79 @@ def check_imports():
         print("All imports successful!")
         return True
 
+def startup_health_check():
+    """
+    Check %APPDATA%/PhysioMetrics for issues that could prevent startup.
+
+    Runs BEFORE any Qt or heavy imports. Fixes problems silently where
+    possible, logs warnings otherwise.
+    """
+    import json
+
+    if sys.platform == 'win32':
+        config_dir = Path(os.environ.get('APPDATA', '')) / 'PhysioMetrics'
+    else:
+        config_dir = Path.home() / '.config' / 'PhysioMetrics'
+
+    if not config_dir.exists():
+        return  # First ever launch, nothing to check
+
+    issues = []
+
+    # 1. Stale session lock — check if the PID is still running
+    lock_file = config_dir / '.session_lock'
+    if lock_file.exists():
+        try:
+            lock_data = json.loads(lock_file.read_text(encoding='utf-8'))
+            pid = lock_data.get('pid')
+            if pid:
+                try:
+                    import psutil
+                    if not psutil.pid_exists(int(pid)):
+                        issues.append(f"Stale session lock (PID {pid} not running)")
+                        # Don't delete — error_reporting handles this
+                except (ImportError, ValueError):
+                    pass
+        except Exception:
+            issues.append("Corrupted .session_lock file")
+
+    # 2. Stale WAL files without a running process
+    db_path = config_dir / 'PhysioMetrics.db'
+    shm = config_dir / 'PhysioMetrics.db-shm'
+    wal = config_dir / 'PhysioMetrics.db-wal'
+    if shm.exists() or wal.exists():
+        issues.append(f"Stale WAL files found ({shm.name}, {wal.name})")
+
+    # 3. Corrupted config.json
+    config_file = config_dir / 'config.json'
+    if config_file.exists():
+        try:
+            json.loads(config_file.read_text(encoding='utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            issues.append("Corrupted config.json — resetting to defaults")
+            try:
+                config_file.rename(config_file.with_suffix('.json.bak'))
+            except OSError:
+                pass
+
+    # 4. Very large crash_reports folder (>50MB could slow startup)
+    crash_dir = config_dir / 'crash_reports'
+    if crash_dir.exists():
+        try:
+            total_size = sum(f.stat().st_size for f in crash_dir.glob('*.json'))
+            if total_size > 50 * 1024 * 1024:
+                issues.append(f"Crash reports folder is {total_size // (1024*1024)}MB — consider cleaning")
+        except Exception:
+            pass
+
+    if issues:
+        print("[Startup Health Check]")
+        for issue in issues:
+            print(f"  - {issue}")
+    else:
+        print("[Startup Health Check] OK")
+
+
 def main():
     """Main debug launcher."""
     print("="*50)
@@ -72,6 +145,7 @@ def main():
     print(f"[DEBUG] PLETHAPP_TESTING = '{os.environ.get('PLETHAPP_TESTING', 'NOT SET')}'")
 
     setup_environment()
+    startup_health_check()
 
     if not check_imports():
         print("\nSome imports failed. The application may not work correctly.")

@@ -81,10 +81,18 @@ class CTAService:
         window_after = float(config.window_after)
         n_points = int(config.n_points)  # Ensure integer for np.linspace
 
-        # Auto-scale n_points for large windows to maintain ~16.7 Hz resolution
-        # Default: 1000 points over 60s = 16.7 pts/s
+        # Auto-scale n_points based on source signal resolution.
+        # We don't want to go below the source sampling rate (e.g. 30 Hz photometry)
+        # or lose waveform detail for high-rate signals (pleth at 10 kHz).
+        # Cap at 200 Hz — enough to capture breath waveforms, not wasteful for storage.
         total_window = window_before + window_after
-        min_points = int(total_window * 16.7)
+        if len(time_array) > 1:
+            source_hz = 1.0 / np.median(np.diff(time_array[:1000]))
+            target_hz = min(source_hz, 200.0)  # Cap at 200 Hz
+            target_hz = max(target_hz, 17.0)   # Floor at 17 Hz
+        else:
+            target_hz = 50.0
+        min_points = int(total_window * target_hz)
         if min_points > n_points:
             n_points = min_points
         zscore_baseline = config.zscore_baseline
@@ -133,28 +141,31 @@ class CTAService:
             if paired_event_times is not None and i < len(paired_event_times) and paired_event_times[i] is not None:
                 paired_offset = float(paired_event_times[i] - event_time)
 
-            trace = CTATrace(
-                event_id=event_ids[i] if i < len(event_ids) else f"event_{i}",
-                sweep_idx=sweep_idx,
-                event_time=float(event_time),
-                time=t_window,
-                values=vals_window,
-                paired_event_offset=paired_offset,
-            )
-            traces.append(trace)
+            traces.append((
+                event_ids[i] if i < len(event_ids) else f"event_{i}",
+                sweep_idx, float(event_time), t_window, vals_window, paired_offset,
+            ))
 
         # Create common time base
         t_common = np.linspace(-window_before, window_after, n_points)
 
-        # Interpolate all traces to common time base
+        # Interpolate all traces to common time base and store at reduced resolution
+        # (raw traces at 10kHz × 60s = 600K pts per event — store at CTA resolution instead)
         interp_traces = []
-        for trace in traces:
-            if len(trace.time) > 1:
+        final_traces = []
+        for (eid, sidx, etime, t_win, v_win, p_offset) in traces:
+            if len(t_win) > 1:
                 interp_vals = np.interp(
-                    t_common, trace.time, trace.values,
+                    t_common, t_win, v_win,
                     left=np.nan, right=np.nan
                 )
                 interp_traces.append(interp_vals)
+                # Store trace at interpolated resolution (not raw 10kHz)
+                final_traces.append(CTATrace(
+                    event_id=eid, sweep_idx=sidx, event_time=etime,
+                    time=t_common, values=interp_vals,
+                    paired_event_offset=p_offset,
+                ))
 
         # Compute mean and SEM
         mean = None
@@ -171,11 +182,11 @@ class CTAService:
             category=category,
             label=label,
             config=config,
-            traces=traces,
+            traces=final_traces,
             time_common=t_common,
             mean=mean,
             sem=sem,
-            n_events=len(traces),
+            n_events=len(final_traces),
         )
 
     def calculate_for_markers(

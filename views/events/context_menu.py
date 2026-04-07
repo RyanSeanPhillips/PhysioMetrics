@@ -17,6 +17,19 @@ from viewmodels.event_marker_viewmodel import EventMarkerViewModel
 from core.domain.events import EventCategory, MarkerType
 
 
+def _colored_icon(hex_color: str, size: int = 10) -> QIcon:
+    """Create a small colored circle icon for menu items."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(hex_color))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(0, 0, size, size)
+    painter.end()
+    return QIcon(pix)
+
+
 class TypeSelectorWidget(QWidget):
     """
     Widget for the sticky type selector dropdown in the context menu.
@@ -155,116 +168,94 @@ class EventMarkerContextMenu(QMenu):
         self._build_menu()
 
     def _build_menu(self) -> None:
-        """Build the menu structure."""
+        """Build the menu structure with color-coded sections."""
+        # --- Color-coded icons for menu sections ---
+        # Green = add/create, Blue = analysis, Orange = detection, Red = delete, Gray = settings
+
         # Type selector widget
         type_widget = TypeSelectorWidget(self._viewmodel)
         type_action = QWidgetAction(self)
         type_action.setDefaultWidget(type_widget)
         self.addAction(type_action)
 
-        self.addSeparator()
+        # ── Markers (green) ──
+        self._add_section_header("Markers")
 
-        # Add Single Marker
-        add_single = self.addAction("Add Single Marker (S+Click)")
+        add_single = self.addAction(_colored_icon("#44bb44"), "Add Single Marker  (S+Click)")
         add_single.triggered.connect(lambda: self.add_single_requested.emit(self._click_time))
 
-        # Add Paired Marker (D for Double)
-        add_paired = self.addAction("Add Paired Marker (D+Click)")
+        add_paired = self.addAction(_colored_icon("#44bb44"), "Add Paired Marker  (D+Click)")
         add_paired.triggered.connect(lambda: self.add_paired_requested.emit(self._click_time))
-
-        self.addSeparator()
 
         # Auto-Detect Events (uses the clicked channel directly)
         if self._channel_names:
             target_channel = self._clicked_channel or self._channel_names[0]
-            auto_detect = self.addAction(f"Auto-Detect on {target_channel}")
+            auto_detect = self.addAction(_colored_icon("#ee9922"), f"Auto-Detect on {target_channel}")
             auto_detect.setToolTip(f"Open detection dialog for channel: {target_channel}")
             auto_detect.triggered.connect(lambda: self.auto_detect_requested.emit(target_channel))
 
-        # Separator before existing actions
-        if self._existing_actions:
-            self.addSeparator()
-
-            # Add existing actions (Auto Scale Y, Reset View, etc.)
-            for action in self._existing_actions:
-                self.addAction(action)
-
-        self.addSeparator()
-
         # Delete submenu (only show if there are markers)
         if self._viewmodel.marker_count > 0:
-            delete_menu = self.addMenu("Delete Markers...")
+            delete_menu = self.addMenu(_colored_icon("#dd4444"), "Delete Markers...")
 
             total_count = self._viewmodel.marker_count
 
-            # Delete all markers everywhere
             delete_all = delete_menu.addAction(f"Delete All ({total_count})")
             delete_all.triggered.connect(self.delete_all_requested.emit)
 
-            # Delete all in this sweep
             delete_sweep = delete_menu.addAction("Delete All (This Sweep)")
             delete_sweep.triggered.connect(self.delete_all_sweep_requested.emit)
 
             delete_menu.addSeparator()
 
-            # Delete by Category submenu
             delete_by_cat_menu = delete_menu.addMenu("Delete by Category...")
-
-            # This Sweep submenu
             this_sweep_menu = delete_by_cat_menu.addMenu("This Sweep")
-
-            # All Sweeps submenu
             all_sweeps_menu = delete_by_cat_menu.addMenu("All Sweeps")
 
-            # Get all unique categories that have markers
             existing_categories = set()
             for m in self._viewmodel.store.all():
                 existing_categories.add(m.category)
 
             if existing_categories:
                 for cat_name in sorted(existing_categories):
-                    # Get display name for category
                     cat_obj = self._viewmodel.service.registry.get(cat_name)
                     cat_display = cat_obj.display_name if cat_obj else cat_name.title()
-
-                    # Count markers in this category
                     cat_markers = self._viewmodel.store.get_by_category(cat_name)
                     count = len(cat_markers)
 
-                    # Add to "This Sweep" menu
                     action_sweep = this_sweep_menu.addAction(f"{cat_display} ({count})")
                     action_sweep.triggered.connect(
                         lambda checked, c=cat_name: self.delete_category_sweep_requested.emit(c)
                     )
-
-                    # Add to "All Sweeps" menu
                     action_all = all_sweeps_menu.addAction(f"{cat_display} ({count})")
                     action_all.triggered.connect(
                         lambda checked, c=cat_name: self.delete_category_all_requested.emit(c)
                     )
             else:
-                # No markers - disable menus
                 this_sweep_menu.setEnabled(False)
                 all_sweeps_menu.setEnabled(False)
 
-        self.addSeparator()
+        # ── Analysis (blue) ──
+        self._add_section_header("Analysis")
 
-        # Generate CTA (only show if there are markers and photometry data is available)
-        if self._viewmodel.marker_count > 0:
-            generate_cta = self.addAction("Generate Photometry CTA...")
-            generate_cta.setToolTip(
-                "Generate Condition-Triggered Averages aligned to event markers.\n"
-                "Useful for analyzing photometry signals around behavioral events."
-            )
-            generate_cta.triggered.connect(self.generate_cta_requested.emit)
+        generate_cta = self.addAction(_colored_icon("#4488ff"), "Generate CTA...")
+        generate_cta.setToolTip(
+            "Condition-Triggered Average — align any signal to trigger events.\n"
+            "Triggers: breath onsets, stim events, or event markers.\n"
+            "Signals: pleth waveform, heart rate, respiratory rate, RSA, raw channels."
+        )
+        generate_cta.triggered.connect(self.generate_cta_requested.emit)
 
-        self.addSeparator()
+        # ── View & Plot (gray) ──
+        self._add_section_header("View")
 
-        # View Options
-        view_menu = self.addMenu("View Options")
+        # Existing actions (Auto Scale Y, Reset View, etc.)
+        if self._existing_actions:
+            for action in self._existing_actions:
+                self.addAction(action)
 
         # Derivative overlay toggle
-        derivative_toggle = view_menu.addAction("Show Derivative on Drag")
+        derivative_toggle = self.addAction("Show Derivative on Drag")
         derivative_toggle.setCheckable(True)
         derivative_toggle.setChecked(self._show_derivative_on_drag)
         derivative_toggle.setToolTip(
@@ -275,11 +266,19 @@ class EventMarkerContextMenu(QMenu):
             lambda checked: self.derivative_toggle_changed.emit(checked)
         )
 
-        self.addSeparator()
-
         # Settings
-        settings = self.addAction("Marker Settings...")
+        settings = self.addAction(_colored_icon("#999999"), "Marker Settings...")
         settings.triggered.connect(self.settings_requested.emit)
+
+    def _add_section_header(self, text: str) -> None:
+        """Add a disabled, styled section header to the menu."""
+        self.addSeparator()
+        header = self.addAction(text)
+        header.setEnabled(False)
+        font = header.font()
+        font.setBold(True)
+        font.setPointSize(font.pointSize() - 1)
+        header.setFont(font)
 
 
 class MarkerContextMenu(QMenu):

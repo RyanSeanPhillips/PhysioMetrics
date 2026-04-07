@@ -144,8 +144,8 @@ class MinimapNavigation(NavigationBarBase):
         super().__init__(parent)
         import pyqtgraph as pg
 
-        self._expanded = False
-        self._expandable = True  # Whether hover-expand is enabled
+        self._expanded = True
+        self._expandable = False  # Whether hover-expand is enabled
 
         self._plot = pg.PlotWidget(background='#0a0a0a')
         self._plot.hideAxis('bottom')
@@ -157,15 +157,61 @@ class MinimapNavigation(NavigationBarBase):
         self._plot.getPlotItem().getAxis('left').setStyle(showValues=False)
         self._plot.getPlotItem().getAxis('left').setPen(pg.mkPen(None))
 
-        # Viewport region
+        # Dark overlays outside viewport — dims non-visible regions
+        self._left_shade = pg.LinearRegionItem(
+            values=[0, 0], movable=False,
+            brush=pg.mkBrush(0, 0, 0, 140),
+            pen=pg.mkPen(None),
+        )
+        self._right_shade = pg.LinearRegionItem(
+            values=[1, 1], movable=False,
+            brush=pg.mkBrush(0, 0, 0, 140),
+            pen=pg.mkPen(None),
+        )
+        self._left_shade.setZValue(8)
+        self._right_shade.setZValue(8)
+        self._plot.addItem(self._left_shade)
+        self._plot.addItem(self._right_shade)
+
+        # Viewport region — green to distinguish from blue stim markers
         self._region = pg.LinearRegionItem(
             values=[0, 1],
-            brush=pg.mkBrush(0, 122, 204, 64),
-            pen=pg.mkPen('#007acc', width=1),
+            brush=pg.mkBrush(46, 204, 113, 35),       # subtle green fill
+            pen=pg.mkPen('#2ecc71', width=2),          # green edge lines
+            hoverBrush=pg.mkBrush(46, 204, 113, 55),   # brighter on hover
+            hoverPen=pg.mkPen('#5dde9e', width=3),     # thicker edges on hover
             movable=True,
         )
         self._region.setZValue(10)
         self._plot.addItem(self._region)
+
+        # Style edge lines: arrows pointing outward + resize cursor
+        left_line, right_line = self._region.lines
+        left_line.setCursor(Qt.CursorShape.SizeHorCursor)
+        left_line.addMarker('|>', position=0.5, size=10)   # arrow pointing right (inward)
+        right_line.setCursor(Qt.CursorShape.SizeHorCursor)
+        right_line.addMarker('<|', position=0.5, size=10)  # arrow pointing left (inward)
+
+        # Sync dark overlays when region moves
+        self._region.sigRegionChanged.connect(self._update_shade_regions)
+
+        # Duration label — shown while dragging edges
+        self._duration_label = pg.TextItem(
+            text='', color='#ffffff', anchor=(0.5, 1.0),
+        )
+        self._duration_label.setZValue(20)
+        self._duration_label.setVisible(False)
+        font = self._duration_label.textItem.font()
+        font.setPointSize(8)
+        font.setBold(True)
+        self._duration_label.setFont(font)
+        self._plot.addItem(self._duration_label)
+
+        # Track edge dragging for duration tooltip
+        self._dragging_edge = False
+        for line in self._region.lines:
+            line.sigDragged.connect(self._on_edge_dragged)
+        self._region.sigRegionChangeFinished.connect(self._on_edge_drag_finished)
 
         # Thin center line visible in collapsed state
         self._center_line = pg.InfiniteLine(
@@ -183,9 +229,9 @@ class MinimapNavigation(NavigationBarBase):
         layout.setSpacing(0)
         layout.addWidget(self._plot)
 
-        # Start collapsed
-        self._apply_height(self.COLLAPSED_HEIGHT)
-        self._set_expanded_visuals(False)
+        # Start expanded (always visible)
+        self._apply_height(self.EXPANDED_HEIGHT)
+        self._set_expanded_visuals(True)
 
         self._region.sigRegionChanged.connect(self._on_region_changed)
         self.setMouseTracking(True)
@@ -242,7 +288,7 @@ class MinimapNavigation(NavigationBarBase):
 
     def _do_expand(self):
         self._leave_timer.stop()
-        if self._expanded:
+        if self._expanded and self.height() == self.EXPANDED_HEIGHT:
             return
         self._set_expanded_visuals(True)
         self._animate_to(self.EXPANDED_HEIGHT)
@@ -255,10 +301,18 @@ class MinimapNavigation(NavigationBarBase):
         # Visuals update when animation finishes (_on_anim_finished)
 
     def set_expandable(self, expandable):
-        """Enable/disable hover-to-expand behavior."""
+        """Enable/disable hover-to-expand behavior.
+
+        When disabled, the minimap stays permanently expanded.
+        When enabled, it collapses and only expands on hover.
+        """
         self._expandable = expandable
-        if not expandable and self._expanded:
+        if expandable and self._expanded:
+            # Switching to hover mode — start collapsed
             self._do_collapse()
+        elif not expandable and not self._expanded:
+            # Switching to always-visible — expand now
+            self._do_expand()
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -270,9 +324,50 @@ class MinimapNavigation(NavigationBarBase):
         if self._expandable:
             self._leave_timer.start()
 
+    def _update_shade_regions(self):
+        """Sync dark overlays to the current viewport region."""
+        x_min, x_max = self._region.getRegion()
+        self._left_shade.blockSignals(True)
+        self._right_shade.blockSignals(True)
+        self._left_shade.setRegion([self._data_min - 1, x_min])
+        self._right_shade.setRegion([x_max, self._data_max + 1])
+        self._left_shade.blockSignals(False)
+        self._right_shade.blockSignals(False)
+
+    def _on_edge_dragged(self):
+        """Show duration tooltip while an edge is being dragged."""
+        x_min, x_max = self._region.getRegion()
+        duration = x_max - x_min
+        if duration >= 60:
+            text = f"{duration / 60:.1f} min"
+        else:
+            text = f"{duration:.1f}s"
+        center_x = (x_min + x_max) / 2.0
+        # Position at top of the plot area
+        y_range = self._plot.getPlotItem().getViewBox().viewRange()[1]
+        self._duration_label.setText(text)
+        self._duration_label.setPos(center_x, y_range[1])
+        self._duration_label.setVisible(True)
+        self._dragging_edge = True
+
+    def _on_edge_drag_finished(self):
+        """Hide duration tooltip when drag ends."""
+        if self._dragging_edge:
+            # Hide after a short delay so user can read the final value
+            QTimer.singleShot(800, self._hide_duration_label)
+            self._dragging_edge = False
+
+    def _hide_duration_label(self):
+        self._duration_label.setVisible(False)
+
     def set_data_range(self, t_min: float, t_max: float):
         super().set_data_range(t_min, t_max)
-        self._plot.setXRange(t_min, t_max, padding=0)
+        # Add 3% padding so edge handles are visible at full zoom
+        # (main plot uses 2% padding, so minimap needs slightly more)
+        span = t_max - t_min
+        pad = span * 0.03 if span > 0 else 0.5
+        self._plot.setXRange(t_min - pad, t_max + pad, padding=0)
+        self._update_shade_regions()
 
     def set_markers(self, markers):
         """Draw event markers on the minimap.
@@ -416,6 +511,7 @@ class MinimapNavigation(NavigationBarBase):
             self._region.blockSignals(True)
             self._region.setRegion([x_min, x_max])
             self._region.blockSignals(False)
+            self._update_shade_regions()
         finally:
             self._guard = False
 
@@ -469,6 +565,36 @@ class MinimapNavigation(NavigationBarBase):
 
         event.accept()
 
+    def mouseDoubleClickEvent(self, event):
+        """Double-click centers the viewport on the clicked position."""
+        plot_item = self._plot.getPlotItem()
+        vb = plot_item.getViewBox()
+        mouse_point = vb.mapSceneToView(event.position())
+        center = mouse_point.x()
+
+        x_min, x_max = self._region.getRegion()
+        half_span = (x_max - x_min) / 2.0
+
+        new_min = center - half_span
+        new_max = center + half_span
+
+        # Clamp to data bounds
+        if new_min < self._data_min:
+            new_min = self._data_min
+            new_max = new_min + 2 * half_span
+        if new_max > self._data_max:
+            new_max = self._data_max
+            new_min = new_max - 2 * half_span
+
+        self._guard = True
+        try:
+            self._region.setRegion([new_min, new_max])
+            self.view_range_requested.emit(float(new_min), float(new_max))
+        finally:
+            self._guard = False
+
+        event.accept()
+
     def _on_region_changed(self):
         if self._guard:
             return
@@ -487,7 +613,7 @@ def load_nav_settings():
         'bar_visible': s.value('bar_visible', True, type=bool),
         'bar_mode': s.value('bar_mode', 'minimap', type=str),
         'wheel_mode': s.value('wheel_mode', 'zoom', type=str),
-        'expandable': s.value('expandable', True, type=bool),
+        'expandable': s.value('expandable', False, type=bool),
     }
 
 

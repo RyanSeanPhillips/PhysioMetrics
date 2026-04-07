@@ -252,7 +252,7 @@ class PyQtGraphPlotHost(QWidget):
         self._minimap_nav = MinimapNavigation(self)
         self._nav_bar_mode = nav_prefs['bar_mode']   # 'scrollbar' | 'minimap'
         self._nav_bar_visible = nav_prefs['bar_visible']
-        self._nav_expandable = nav_prefs.get('expandable', True)
+        self._nav_expandable = nav_prefs.get('expandable', False)
         self._minimap_nav.set_expandable(self._nav_expandable)
         self._wheel_mode = nav_prefs['wheel_mode']   # 'zoom' | 'pan'
         self._nav_sync_guard = False
