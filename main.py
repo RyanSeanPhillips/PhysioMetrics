@@ -155,10 +155,15 @@ def _startup_health_check():
 # Run health check at import time (before MainWindow is created)
 _startup_health_check()
 
+# Import startup logger for use inside __init__ (no-op if not initialized yet)
+import logging as _logging
+_startup = _logging.getLogger('physiometrics.startup')
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        _startup.info("MainWindow.__init__ start")
 
         # Initialize managers
         self.consolidation_manager = ConsolidationManager(self)
@@ -167,7 +172,9 @@ class MainWindow(QMainWindow):
         self._project_builder = None  # Initialized after UI load
 
         ui_file = Path(__file__).parent / "ui" / "pleth_app_layout_05_horizontal.ui"
+        _startup.info("Loading UI file...")
         uic.loadUi(ui_file, self)
+        _startup.info("UI file loaded")
 
         # icon_path = Path(__file__).parent / "assets" / "plethapp_thumbnail_light_02.ico"
         icon_path = Path(__file__).parent / "assets" / "plethapp_thumbnail_dark_round.ico"
@@ -386,8 +393,10 @@ class MainWindow(QMainWindow):
 
         # Defer ML model loading — runs after window is visible, then updates dropdowns
         def _deferred_ml_load():
+            _startup.info("ML model loading (deferred)...")
             self._classifier_manager.auto_load_ml_models_on_startup()
             self._classifier_manager.update_classifier_dropdowns()
+            _startup.info("ML model loading done")
             # Switch to ML defaults if models were loaded successfully
             if getattr(self.state, 'loaded_ml_models', None):
                 self.peak_detec_combo.setCurrentText("XGBoost")
@@ -798,10 +807,15 @@ class MainWindow(QMainWindow):
 
         # Load all experiments from central SQLite DB on startup
         from PyQt6.QtCore import QTimer as _QTimer
-        _QTimer.singleShot(0, self._load_experiments_from_db)
+        def _deferred_db_load():
+            _startup.info("Loading experiments from DB...")
+            self._load_experiments_from_db()
+            _startup.info("DB load done")
+        _QTimer.singleShot(0, _deferred_db_load)
 
         # === Live DB Watcher — auto-refresh when Claude updates DB via MCP ===
         self._setup_db_watcher()
+        _startup.info("MainWindow.__init__ complete")
 
     # --- Lazy-loaded properties for startup performance ---
 
@@ -10740,12 +10754,35 @@ class MainWindow(QMainWindow):
         return "cancel"
 
 if __name__ == "__main__":
+    import argparse
     from PyQt6.QtWidgets import QSplashScreen, QProgressBar, QVBoxLayout, QLabel, QWidget
     from PyQt6.QtGui import QPixmap
     from PyQt6.QtCore import Qt, QTimer
     from version_info import VERSION_STRING
 
-    app = QApplication(sys.argv)
+    # Parse CLI args (works for both .exe and python main.py)
+    parser = argparse.ArgumentParser(description="PhysioMetrics — Breath Analysis Tool")
+    parser.add_argument('--console', action='store_true',
+                        help='Show console window with startup log output')
+    args, qt_args = parser.parse_known_args()
+
+    # Allocate console window if --console flag passed (for built .exe with console=False)
+    if args.console and sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.kernel32.AllocConsole()
+            # Reopen stdout/stderr to the new console
+            sys.stdout = open('CONOUT$', 'w')
+            sys.stderr = open('CONOUT$', 'w')
+        except Exception:
+            pass  # Not on Windows or console allocation failed
+
+    # Set up structured startup logging (always writes to file, optionally to console)
+    from core.startup_logger import setup_startup_logging, log_phase
+    _startup_log = setup_startup_logging(console=args.console or not getattr(sys, 'frozen', False))
+
+    with log_phase("QApplication init"):
+        app = QApplication(qt_args)
 
     # Check for first launch and show welcome dialog
     from core import config as app_config
@@ -10765,11 +10802,13 @@ if __name__ == "__main__":
             app_config.mark_first_launch_complete()
 
     # Initialize telemetry (after first-launch dialog)
-    telemetry.init_telemetry()
+    with log_phase("Telemetry init"):
+        telemetry.init_telemetry()
 
     # Initialize error reporter (writes session lock, registers cleanup)
     from core import error_reporting
-    error_reporter = error_reporting.init_error_reporter()
+    with log_phase("Error reporter init"):
+        error_reporter = error_reporting.init_error_reporter()
 
     # Check if previous session crashed (before installing new hook)
     previous_crash = error_reporting.was_previous_session_crashed()
@@ -10850,11 +10889,13 @@ if __name__ == "__main__":
     app.processEvents()
 
     # Create main window (this is where the loading time happens)
-    w = MainWindow()
+    with log_phase("MainWindow init"):
+        w = MainWindow()
 
     # Close splash and show main window
-    splash.finish(w)
-    w.show()
+    with log_phase("Window show"):
+        splash.finish(w)
+        w.show()
 
     # Check for previous crash and show dialog (after window is visible)
     if pending_report and app_config.is_crash_reports_enabled():

@@ -232,10 +232,17 @@ def main():
         from PyQt6.QtWidgets import QApplication, QSplashScreen
         from PyQt6.QtGui import QPixmap
         from PyQt6.QtCore import Qt
-        from main import MainWindow
-        from version_info import VERSION_STRING
+        from core.startup_logger import setup_startup_logging, log_phase
 
-        app = QApplication(sys.argv)
+        # Debug mode: always log to console
+        _startup_log = setup_startup_logging(console=True)
+
+        with log_phase("Imports"):
+            from main import MainWindow
+            from version_info import VERSION_STRING
+
+        with log_phase("QApplication init"):
+            app = QApplication(sys.argv)
 
         # Check for first launch and show welcome dialog
         from core import config as app_config
@@ -339,7 +346,8 @@ def main():
         app.processEvents()
 
         # Create main window
-        w = MainWindow()
+        with log_phase("MainWindow init"):
+            w = MainWindow()
 
         # Add test crash shortcuts for debugging crash reporter
         from PyQt6.QtGui import QShortcut, QKeySequence
