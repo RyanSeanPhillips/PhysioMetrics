@@ -164,6 +164,67 @@ class ExportManager:
         self.settings = main_window.settings
         self._get_processed_fn = main_window._get_processed_for
         self._status_fn = main_window._log_status_message
+        # Metric cache (was on MainWindow, now local)
+        self._export_metric_cache = {}
+        # Save state (was written back to MainWindow, now local)
+        self._save_dir = None
+        self._save_base = None
+        self._save_meta = None
+        # Accessors that still fallback to self.window (will be fully decoupled later)
+        self._event_marker_vm = getattr(main_window, '_event_marker_viewmodel', None)
+        self._nav_vm = getattr(main_window, '_nav_vm', None)
+
+    # ── Config accessors (read from AnalysisConfig or fallback to window) ──
+
+    def _get_filter_order(self):
+        cfg = getattr(self.state, 'filter_config', None)
+        if cfg and hasattr(cfg, 'filter_order'):
+            return cfg.filter_order
+        return getattr(self.window, 'filter_order', 4)
+
+    def _get_notch_lower(self):
+        cfg = getattr(self.state, 'filter_config', None)
+        if cfg and hasattr(cfg, 'notch_lower'):
+            return cfg.notch_lower
+        return getattr(self.window, 'notch_filter_lower', None)
+
+    def _get_notch_upper(self):
+        cfg = getattr(self.state, 'filter_config', None)
+        if cfg and hasattr(cfg, 'notch_upper'):
+            return cfg.notch_upper
+        return getattr(self.window, 'notch_filter_upper', None)
+
+    def _get_use_zscore(self):
+        cfg = getattr(self.state, 'filter_config', None)
+        if cfg and hasattr(cfg, 'use_zscore'):
+            return cfg.use_zscore
+        return getattr(self.window, 'use_zscore_normalization', True)
+
+    def _get_eupnea_freq_threshold(self):
+        cfg = getattr(self.state, 'peak_config', None)
+        if cfg and hasattr(cfg, 'eupnea_freq_threshold'):
+            return cfg.eupnea_freq_threshold
+        return getattr(self.window, 'eupnea_freq_threshold', 5.0)
+
+    def _get_eupnea_min_duration(self):
+        cfg = getattr(self.state, 'peak_config', None)
+        if cfg and hasattr(cfg, 'eupnea_min_duration'):
+            return cfg.eupnea_min_duration
+        return getattr(self.window, 'eupnea_min_duration', 2.0)
+
+    def _get_apnea_threshold(self):
+        val = getattr(self.window, 'ApneaThresh', None)
+        if val is not None:
+            parse = getattr(self.window, '_parse_float', None)
+            if parse:
+                return parse(val) or 0.5
+        return 0.5
+
+    def _compute_eupnea_mask(self, sweep_idx, signal_length):
+        fn = getattr(self.window, '_compute_eupnea_from_active_classifier', None)
+        if fn:
+            return fn(sweep_idx, signal_length)
+        return np.zeros(signal_length, dtype=float)
 
     def _is_breath_sniffing(self, sweep_idx, breath_idx, onsets):
         """Check if a breath is in a sniffing region. Delegates to export_service."""
@@ -477,7 +538,7 @@ class ExportManager:
             self.window.eupnea_sniffing_out_of_date = False
             self.window.redraw_main_plot()
             # Clear the persistent warning
-            self.window.statusBar().clearMessage()
+            self._status_fn("", 0)
             print("[Save Data] Eupnea/sniffing detection updated")
             self._status_fn("Preparing data export...")
 
@@ -571,7 +632,7 @@ class ExportManager:
             self.window.eupnea_sniffing_out_of_date = False
             self.window.redraw_main_plot()
             # Clear the persistent warning
-            self.window.statusBar().clearMessage()
+            self._status_fn("", 0)
             print("[View Summary] Eupnea/sniffing detection updated")
             self._status_fn("Generating summary...")
 
@@ -1500,7 +1561,7 @@ class ExportManager:
         if not preview_only:
             # --- Build an auto stim string from current sweep metrics, if available ---
             def _auto_stim_from_metrics() -> str:
-                s = max(0, min(getattr(st, "sweep_idx", 0), self.window._nav_vm.sweep_count()-1))
+                s = max(0, min(getattr(st, "sweep_idx", 0), self._nav_vm.sweep_count()-1))
                 m = st.stim_metrics_by_sweep.get(s, {}) if getattr(st, "stim_metrics_by_sweep", None) else {}
                 if not m:
                     return ""
@@ -1617,9 +1678,9 @@ class ExportManager:
                 # IMPORTANT: Do NOT overwrite 'save_root' here — we don't want to "remember" anything for the unchecked case.
 
             # Set base name + meta, then export
-            self.window._save_dir = final_dir
-            self.window._save_base = suggested
-            self.window._save_meta = dialog_vals
+            self._save_dir = final_dir
+            self._save_base = suggested
+            self._save_meta = dialog_vals
 
             # Get export strategy based on experiment type
             experiment_type = dialog_vals.get("experiment_type", "30hz_stim")
@@ -1666,10 +1727,10 @@ class ExportManager:
                 if reply == QMessageBox.StandardButton.No:
                     return  # User chose not to overwrite
 
-            base_path = self.window._save_dir / self.window._save_base
+            base_path = self._save_dir / self._save_base
             print(f"[save] base path set: {base_path}")
             try:
-                self.window.statusbar.showMessage(f"Saving to: {base_path}", 4000)
+                self._status_fn(f"Saving to: {base_path}", 4000)
             except Exception:
                 pass
 
@@ -1920,7 +1981,7 @@ class ExportManager:
         # -------------------- Save files (skip if preview_only) --------------------
         if not preview_only:
             # -------------------- (1) NPZ bundle (downsampled) --------------------
-            base     = self.window._save_dir / self.window._save_base
+            base     = self._save_dir / self._save_base
             # Ensure output directory exists (may not exist for photometry paths)
             base.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1992,10 +2053,10 @@ class ExportManager:
                 "low_hz": float(st.low_hz) if st.low_hz else None,
                 "high_hz": float(st.high_hz) if st.high_hz else None,
                 "mean_val": float(st.mean_val),
-                "filter_order": int(self.window.filter_order),
+                "filter_order": int(self._get_filter_order()),
                 # Notch filter (if active)
-                "notch_filter_lower": float(self.window.notch_filter_lower) if self.window.notch_filter_lower else None,
-                "notch_filter_upper": float(self.window.notch_filter_upper) if self.window.notch_filter_upper else None,
+                "notch_filter_lower": float(self._get_notch_lower()) if self._get_notch_lower() else None,
+                "notch_filter_upper": float(self._get_notch_upper()) if self._get_notch_upper() else None,
                 # Channel info (for reopening)
                 "channel_names": list(st.channel_names) if st.channel_names else [],
                 "stim_chan": str(st.stim_chan) if st.stim_chan else None,
@@ -2090,7 +2151,7 @@ class ExportManager:
                 if s not in self._eupnea_masks_cache:
                     y_proc = self._get_processed_fn(st.analyze_chan, s)
                     # Use active classifier for eupnea detection (works with GMM, XGBoost, RF, MLP)
-                    eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
+                    eupnea_mask = self._compute_eupnea_mask(s, len(y_proc))
                     # Fallback to traditional method if no classifier data available
                     if eupnea_mask.sum() == 0:
                         pks = st.peaks_by_sweep.get(s, np.array([]))
@@ -2200,7 +2261,7 @@ class ExportManager:
                 QApplication.processEvents()
 
             t_start = time.time()
-            self.window.setCursor(Qt.CursorShape.WaitCursor)
+            if self.window: self.window.setCursor(Qt.CursorShape.WaitCursor)
             try:
                 # Build DataFrame from existing numpy arrays (2-3× faster than row-by-row)
                 import pandas as pd
@@ -2243,7 +2304,7 @@ class ExportManager:
                     df.to_csv(csv_time_path, index=False, float_format='%.9g', na_rep='')
 
             finally:
-                self.window.unsetCursor()
+                if self.window: self.window.unsetCursor()
 
             t_elapsed = time.time() - t_start
             if save_timeseries_csv:
@@ -2305,8 +2366,8 @@ class ExportManager:
             eupnea_b_by_k = {}
 
             # Get thresholds from UI (for breath classification)
-            eupnea_thresh = self.window.eupnea_freq_threshold  # Hz
-            apnea_thresh = self.window._parse_float(self.window.ApneaThresh) or 0.5    # seconds
+            eupnea_thresh = self._get_eupnea_freq_threshold()  # Hz
+            apnea_thresh = self._get_apnea_threshold()    # seconds
 
             t_start = time.time()
             print(f"[CSV] Pre-computing eupnea masks for {len(kept_sweeps)} sweeps...")
@@ -2339,7 +2400,7 @@ class ExportManager:
             # Use pre-computed cached traces (already built before save/preview split)
             # This cache is reused in PDF generation to avoid recomputing expensive metrics.
             if not hasattr(self.window, '_export_metric_cache'):
-                self.window._export_metric_cache = {}
+                self._export_metric_cache = {}
 
             for s in kept_sweeps:
                 # Keep UI responsive during long computation
@@ -2363,7 +2424,7 @@ class ExportManager:
                 traces_for_sweep = cached_traces_by_sweep.get(s, {})
 
                 # Store globally for PDF reuse
-                self.window._export_metric_cache[s] = traces_for_sweep
+                self._export_metric_cache[s] = traces_for_sweep
 
                 # Collect baseline eupneic breath values
                 for i, mid_idx in enumerate(mids):
@@ -2746,8 +2807,8 @@ class ExportManager:
             events_rows = []
 
             # Get thresholds from UI
-            eupnea_thresh = self.window.eupnea_freq_threshold  # Hz
-            apnea_thresh = self.window._parse_float(self.window.ApneaThresh) or 0.5    # seconds
+            eupnea_thresh = self._get_eupnea_freq_threshold()  # Hz
+            apnea_thresh = self._get_apnea_threshold()    # seconds
 
             for s in kept_sweeps:
                 y_proc = self._get_processed_fn(st.analyze_chan, s)
@@ -2804,7 +2865,7 @@ class ExportManager:
                     eupnea_mask = self._eupnea_masks_cache.get(s, None)
                     if eupnea_mask is None:
                         # Fallback: compute if not cached - use active classifier
-                        eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
+                        eupnea_mask = self._compute_eupnea_mask(s, len(y_proc))
                         # Fallback to traditional method if no classifier data available
                         if eupnea_mask.sum() == 0:
                             eupnea_mask = metrics.detect_eupnic_regions(
@@ -2949,8 +3010,8 @@ class ExportManager:
                     ])
 
             # Add MVVM event markers (user-placed markers from the event marker system)
-            if hasattr(self.window, '_event_marker_viewmodel') and self.window._event_marker_viewmodel:
-                for marker in self.window._event_marker_viewmodel.store.all():
+            if hasattr(self.window, '_event_marker_viewmodel') and self._event_marker_vm:
+                for marker in self._event_marker_vm.store.all():
                     sweep = marker.sweep_idx
                     if sweep not in kept_sweeps:
                         continue
@@ -3280,18 +3341,18 @@ class ExportManager:
 
                     # Collect app-level settings from main window
                     app_settings = {
-                        'filter_order': self.window.filter_order,
-                        'use_zscore_normalization': self.window.use_zscore_normalization,
-                        'notch_filter_lower': self.window.notch_filter_lower,
-                        'notch_filter_upper': self.window.notch_filter_upper,
-                        'apnea_threshold': self.window._parse_float(self.window.ApneaThresh) or 0.5,
+                        'filter_order': self._get_filter_order(),
+                        'use_zscore_normalization': self._get_use_zscore(),
+                        'notch_filter_lower': self._get_notch_lower(),
+                        'notch_filter_upper': self._get_notch_upper(),
+                        'apnea_threshold': self._get_apnea_threshold(),
                         'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
                     }
 
                     # Include MVVM event markers in session file
                     event_markers_data = None
-                    if hasattr(self.window, '_event_marker_viewmodel') and self.window._event_marker_viewmodel:
-                        event_markers_data = self.window._event_marker_viewmodel.save_to_npz()
+                    if hasattr(self.window, '_event_marker_viewmodel') and self._event_marker_vm:
+                        event_markers_data = self._event_marker_vm.save_to_npz()
 
                     save_state_to_npz(st, session_path, include_raw_data=False, gmm_cache=gmm_cache, app_settings=app_settings, event_markers=event_markers_data)
                     print(f"[session] [OK] Session state saved: {session_path.name}")
@@ -3389,12 +3450,12 @@ class ExportManager:
             msg = "Saved:\n" + "\n".join(f"- {name}" for name in file_list)
             print("[save]", msg)
             try:
-                self.window.statusbar.showMessage(msg, 6000)
+                self._status_fn(msg, 6000)
             except Exception:
                 pass
 
             # Show success dialog with "Open Folder" option
-            save_dir = self.window._save_dir
+            save_dir = self._save_dir
             msg_box = QMessageBox(self.window)
             msg_box.setIcon(QMessageBox.Icon.Information)
             msg_box.setWindowTitle("Save Successful")
@@ -5113,7 +5174,7 @@ class ExportManager:
         # Prepare EUPNEA-BASED normalized datasets
         y2_ds_by_key_norm_eupnea = {}
         eupnea_baselines_by_key = {}  # Store computed baselines for histogram building
-        eupnea_thresh = self.window.eupnea_freq_threshold  # Hz
+        eupnea_thresh = self._get_eupnea_freq_threshold()  # Hz
 
         # OPTIMIZATION: Compute eupnea masks once per sweep, reuse for all metrics
         eupnea_masks_by_sweep = {}
@@ -5142,13 +5203,13 @@ class ExportManager:
                     eupnea_mask = self._eupnea_masks_cache.get(s, None)
                     if eupnea_mask is None:
                         # Fallback: compute if not cached - use active classifier
-                        eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
+                        eupnea_mask = self._compute_eupnea_mask(s, len(y_proc))
                         # Fallback to traditional method if no classifier data available
                         if eupnea_mask.sum() == 0:
                             eupnea_mask = metrics.detect_eupnic_regions(
                                 st.t, y_proc, st.sr_hz, pks, on, off, expmins, expoffs,
                                 freq_threshold_hz=eupnea_thresh,
-                                min_duration_sec=self.window.eupnea_min_duration
+                                min_duration_sec=self._get_eupnea_min_duration()
                             )
                         self._eupnea_masks_cache[s] = eupnea_mask
 
