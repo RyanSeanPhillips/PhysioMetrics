@@ -355,6 +355,109 @@ def clear_sighs(all_peaks_by_sweep: Dict[int, Dict], sigh_by_sweep: Dict[int, An
     sigh_by_sweep.clear()
 
 
+# ── Peaks/Breath Update After Label Switch ─────────────────────
+
+
+def update_peaks_and_breaths_from_labels(
+    state,
+    get_processed_fn=None,
+) -> bool:
+    """Update peaks_by_sweep and breath_by_sweep from active labels.
+
+    After switching classifiers, the 'labels' array changes but peaks_by_sweep
+    and breath_by_sweep still reflect the old classifier. This function syncs them.
+
+    Args:
+        state: AppState with all_peaks_by_sweep, peaks_by_sweep, breath_by_sweep, etc.
+        get_processed_fn: Callable(channel, sweep_idx) -> ndarray for filtered signal.
+            Needed to recompute breath events. If None, breath events are not recomputed.
+
+    Returns:
+        True if fallback was used (requested labels missing, used threshold instead).
+    """
+    import core.peaks as peakdet
+
+    fallback_used = False
+
+    for s in state.all_peaks_by_sweep.keys():
+        data = state.all_peaks_by_sweep[s]
+        labels = data.get('labels')
+
+        if labels is None:
+            continue
+
+        # Update peaks_by_sweep with labeled peaks only
+        labeled_mask = labels == 1
+        labeled_indices = data['indices'][labeled_mask]
+        state.peaks_by_sweep[s] = labeled_indices
+
+        # Recompute breath events if we have a signal processing function
+        if get_processed_fn is not None and state.analyze_chan:
+            try:
+                y_proc = get_processed_fn(state.analyze_chan, s)
+                breaths = peakdet.compute_breath_events(
+                    y_proc, labeled_indices, sr_hz=state.sr_hz, exclude_sec=0.030
+                )
+                state.breath_by_sweep[s] = breaths
+            except Exception as e:
+                print(f"[classifier-service] Breath recompute failed sweep {s}: {e}")
+
+    return fallback_used
+
+
+# ── Precomputation ─────────────────────────────────────────────
+
+
+def precompute_remaining_classifiers(
+    all_peaks_by_sweep: Dict[int, Dict],
+    loaded_models: Dict[str, Any],
+    get_peak_metrics_fn=None,
+) -> List[str]:
+    """Precompute predictions for all available Model 1 classifiers.
+
+    Runs prediction for each loaded model1_* that doesn't already have
+    a labels_{algo}_ro array. This allows instant classifier switching.
+
+    Args:
+        all_peaks_by_sweep: Sweep→peaks data dict (modified in-place)
+        loaded_models: Loaded model dict from load_models()
+        get_peak_metrics_fn: Optional callback to compute peak metrics if missing
+
+    Returns:
+        List of classifier names that were computed.
+    """
+    computed = []
+
+    for model_key in sorted(loaded_models.keys()):
+        if not model_key.startswith('model1_'):
+            continue
+
+        # Extract algorithm name: 'model1_xgboost_95' → 'xgboost'
+        parts = model_key.split('_')
+        if len(parts) < 2:
+            continue
+        algorithm = parts[1]
+        ro_key = f'labels_{algorithm}_ro'
+
+        # Check if already computed (check first sweep)
+        first_sweep_key = next(iter(all_peaks_by_sweep.keys()), None)
+        if first_sweep_key is not None:
+            first_data = all_peaks_by_sweep[first_sweep_key]
+            if ro_key in first_data and first_data[ro_key] is not None:
+                continue
+
+        # Compute predictions
+        n = predict_breath_vs_noise(
+            all_peaks_by_sweep, loaded_models, algorithm,
+            get_peak_metrics_fn,
+        )
+        if n > 0:
+            computed.append(algorithm)
+            print(f"[Precompute] Computed {ro_key} for all sweeps")
+
+    return computed
+
+
 # ── GMM clustering ───────────────────────────────────────────────
 
 
