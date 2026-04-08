@@ -1,5 +1,14 @@
 # Unreleased Changes
 
+## Session: 2026-04-07 — GMM Clustering Test Suite (Commit 1 of MVVM Extraction)
+
+### Testing
+- **New test file**: `tests/test_gmm_clustering.py` — 16 tests (7 unit + 8 integration + 1 multi-channel)
+- **Unit tests (1-7)**: FakeMW mock with synthetic data — feature collection, NaN handling, cluster identification, region application, end-to-end pipeline, eupnea mask computation, empty state handling
+- **Integration tests (8-15)**: Real MainWindow + ABF files — peak detection → GMM pipeline, region creation, cache population, plot rendering, classifier switching, dialog opening, NPZ roundtrip, file switch state clearing
+- **Multi-channel test**: GMM clustering across multiple pleth channels on awake recording (25729001.abf)
+- **Purpose**: Behavioral baseline before extracting GMMManager → GMMService + GMMViewModel
+
 ## Session: 2026-04-07 — Minimap Navigation Rework + UI Polish
 
 ### Minimap Navigation Bar
@@ -16,6 +25,28 @@
 - **Always-visible controls**: Moved beta version label, "Report Bug / Request Feature" link, Claude Code button, and Help link from Analysis tab to tab bar top-right corner
 - **Visible on all tabs**: Controls persist regardless of which tab is selected
 - **Location**: `main.py:_setup_tab_corner_widget()`
+
+### Plot Axis Interactions
+- **Y-axis drag**: Already existed — drag to pan vertically
+- **Y-axis scroll wheel**: Zoom Y scale in/out (new)
+- **Y-axis double-click**: Autoscale Y to fit all visible data, preserves X range (new)
+- **X-axis double-click**: Toggle between full recording view and previous zoomed position (new)
+- Smart toggle: manually navigating after zoom-to-full clears the saved position, so next double-click goes to full view
+- **Location**: `plotting/pyqtgraph_backend.py:_setup_axis_drag()`
+
+### Sigh Marker Y-Axis Autoscaling
+- **Fix**: Sigh markers (gold stars with 7% offset above peaks) could appear above the Y-axis range, making them invisible
+- **Solution**: `_ensure_sigh_markers_visible()` extends Y range to include sigh stars after view range is set
+- **Location**: `plotting/plot_manager.py`
+
+### Bug Fix: Add/Del Peaks Broken After Move Point
+- **Root cause**: Switching from Move Point to Add/Del Peaks left pyqtgraph drag/key callbacks active, intercepting mouse events
+- **Fix**: Created `_deactivate_move_point()` helper that fully cleans up Move Point mode (button, state, drag/key callbacks, matplotlib events). Replaced 7 duplicated deactivation blocks across the file
+- **Location**: `editing/editing_modes.py`
+
+### Bug Fix: Tooltip Accuracy
+- **Fix**: Add Peaks tooltip said "RIGHT CLICK" to toggle sigh, but right-click opens context menu in pyqtgraph. Changed to "SHIFT+CLICK" which is the actual working shortcut
+- **Location**: `editing/editing_modes.py:on_add_peaks_toggled()`
 
 ### Bug Fix: Navigation Mode Button
 - **Fix**: `_on_nav_window_changed` crashed with `set_xlim` AttributeError — now checks for `_subplots` first instead of relying on `state.plotting_backend` string
