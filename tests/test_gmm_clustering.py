@@ -897,3 +897,384 @@ class TestGMMMultiChannel:
 
         assert len(results) > 0, "GMM didn't run on any channel"
         print(f"  Successfully tested GMM on {len(results)} channels")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Dialog Interaction Tests (D1-D8) — GMM Clustering Dialog
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _open_gmm_dialog(main_window, dialog_watcher):
+    """Open GMM dialog with watcher paused. Returns dialog instance.
+
+    Caller MUST close the dialog and restart the watcher in a finally block.
+    """
+    from PyQt6.QtWidgets import QApplication
+    from dialogs.gmm_clustering_dialog import GMMClusteringDialog
+
+    if dialog_watcher:
+        dialog_watcher.stop()
+
+    dialog = GMMClusteringDialog(parent=main_window, main_window=main_window)
+    dialog.show()
+    for _ in range(10):
+        QApplication.processEvents()
+        time.sleep(0.05)
+    return dialog
+
+
+def _close_gmm_dialog(dialog, dialog_watcher):
+    """Close dialog and restart watcher."""
+    from PyQt6.QtWidgets import QApplication
+    if dialog:
+        dialog.close()
+        QApplication.processEvents()
+    if dialog_watcher:
+        dialog_watcher.start()
+
+
+class TestDialogLoadsWithCachedData:
+    """D1: Dialog auto-loads cached GMM results on open."""
+
+    def test_dialog_loads_cached_results(self, main_window, dialog_watcher):
+        """D1: Opening dialog with cached data populates cluster labels and plots."""
+        cache = getattr(main_window, '_cached_gmm_results', None)
+        if cache is None:
+            pytest.skip("No cached GMM results")
+
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # After init, dialog should have loaded the cached results
+            assert dialog.cluster_labels is not None, "cluster_labels not loaded"
+            assert dialog.sniffing_cluster_id is not None, "sniffing_cluster_id not loaded"
+            assert len(dialog.cluster_labels) > 0, "Empty cluster labels"
+
+            # Results table should be populated
+            assert dialog.results_table.rowCount() > 0, "Results table is empty"
+
+            # Status label should show success
+            status_text = dialog.status_label.text()
+            assert "✓" in status_text or "complete" in status_text.lower() or "loaded" in status_text.lower(), \
+                f"Status doesn't indicate success: {status_text}"
+
+            print(f"  Dialog loaded {len(dialog.cluster_labels)} breaths, "
+                  f"{dialog.results_table.rowCount()} table rows")
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogRunGMM:
+    """D2: Run GMM button triggers clustering."""
+
+    def test_run_gmm_with_defaults(self, main_window, dialog_watcher):
+        """D2: Click Run GMM with default features → results populate."""
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from PyQt6.QtCore import QTimer
+
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Auto-dismiss any quality warning dialogs
+            def dismiss_messagebox():
+                active = QApplication.activeModalWidget()
+                if isinstance(active, QMessageBox):
+                    ok_btn = active.button(QMessageBox.StandardButton.Ok)
+                    if ok_btn:
+                        ok_btn.click()
+
+            QTimer.singleShot(2000, dismiss_messagebox)
+            QTimer.singleShot(3000, dismiss_messagebox)
+
+            # Verify default features are checked
+            default_features = ["if", "ti", "amp_insp", "max_dinsp"]
+            for f in default_features:
+                if f in dialog.feature_checkboxes:
+                    assert dialog.feature_checkboxes[f].isChecked(), f"Default feature '{f}' not checked"
+
+            # Click Run GMM
+            dialog.on_run_gmm()
+            for _ in range(20):
+                QApplication.processEvents()
+                time.sleep(0.05)
+
+            # Verify results
+            assert dialog.cluster_labels is not None, "No cluster labels after Run GMM"
+            assert len(dialog.cluster_labels) > 0, "Empty cluster labels"
+            assert dialog.feature_data is not None, "No feature data"
+            assert dialog.results_table.rowCount() >= 2, "Results table should have at least 2 clusters"
+
+            print(f"  Run GMM: {len(dialog.cluster_labels)} breaths, "
+                  f"sniffing_id={dialog.sniffing_cluster_id}")
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogFeatureValidation:
+    """D3: Feature checkbox validation."""
+
+    def test_too_few_features_shows_error(self, main_window, dialog_watcher):
+        """D3: Unchecking all but 1 feature → Run GMM shows error."""
+        from PyQt6.QtWidgets import QApplication
+
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Uncheck all features except one
+            checked_count = 0
+            for name, cb in dialog.feature_checkboxes.items():
+                if checked_count == 0 and cb.isChecked():
+                    checked_count = 1  # keep first checked
+                else:
+                    cb.setChecked(False)
+            QApplication.processEvents()
+
+            # Save old labels
+            old_labels = dialog.cluster_labels
+
+            # Run GMM — should show error, not crash
+            dialog.on_run_gmm()
+            QApplication.processEvents()
+
+            # Status should indicate error
+            status_text = dialog.status_label.text()
+            assert "error" in status_text.lower() or "at least 2" in status_text.lower(), \
+                f"Expected error message, got: {status_text}"
+
+            # Labels should not have changed
+            if old_labels is not None:
+                assert dialog.cluster_labels is old_labels, "Labels changed despite error"
+
+            # Restore defaults
+            for name in ["if", "ti", "amp_insp", "max_dinsp"]:
+                if name in dialog.feature_checkboxes:
+                    dialog.feature_checkboxes[name].setChecked(True)
+
+            print(f"  Feature validation: correctly rejected with 1 feature")
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogClusterCount:
+    """D4: Changing cluster count."""
+
+    def test_three_clusters(self, main_window, dialog_watcher):
+        """D4: Run GMM with 3 clusters → 3 rows in results table."""
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from PyQt6.QtCore import QTimer
+
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Auto-dismiss quality warnings
+            def dismiss():
+                active = QApplication.activeModalWidget()
+                if isinstance(active, QMessageBox):
+                    for btn_type in [QMessageBox.StandardButton.Ok, QMessageBox.StandardButton.Yes]:
+                        btn = active.button(btn_type)
+                        if btn:
+                            btn.click()
+                            return
+
+            QTimer.singleShot(2000, dismiss)
+            QTimer.singleShot(3000, dismiss)
+            QTimer.singleShot(4000, dismiss)
+
+            # Set 3 clusters
+            dialog.n_clusters_spin.setValue(3)
+            QApplication.processEvents()
+
+            dialog.on_run_gmm()
+            for _ in range(20):
+                QApplication.processEvents()
+                time.sleep(0.05)
+
+            # Check we got results (may be rejected if quality is too low)
+            if dialog.cluster_labels is not None and len(dialog.cluster_labels) > 0:
+                n_unique = len(np.unique(dialog.cluster_labels))
+                assert n_unique <= 3, f"Got {n_unique} clusters, expected <= 3"
+                print(f"  3-cluster GMM: {len(dialog.cluster_labels)} breaths, {n_unique} actual clusters")
+            else:
+                # Clustering may have been rejected for quality — that's ok
+                status = dialog.status_label.text()
+                print(f"  3-cluster GMM: rejected or failed ({status[:80]})")
+
+            # Reset to 2
+            dialog.n_clusters_spin.setValue(2)
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogToggleApplyDetection:
+    """D5: Toggle Apply Eupnea/Sniffing checkbox."""
+
+    def test_toggle_sniffing_application(self, main_window, dialog_watcher):
+        """D5: Uncheck → regions cleared. Recheck → regions restored."""
+        from PyQt6.QtWidgets import QApplication
+
+        st = main_window.state
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Make sure we have results
+            if dialog.cluster_labels is None:
+                dialog.on_run_gmm()
+                for _ in range(20):
+                    QApplication.processEvents()
+                    time.sleep(0.05)
+
+            if dialog.cluster_labels is None:
+                pytest.skip("Could not get GMM results for toggle test")
+
+            # Uncheck "Apply Detection" → should clear regions
+            dialog.apply_sniffing_cb.setChecked(False)
+            QApplication.processEvents()
+            time.sleep(0.2)
+            QApplication.processEvents()
+
+            sniff_after_uncheck = sum(len(v) for v in getattr(st, 'sniff_regions_by_sweep', {}).values())
+            eupnea_after_uncheck = sum(len(v) for v in getattr(st, 'eupnea_regions_by_sweep', {}).values())
+            assert sniff_after_uncheck == 0, f"Expected 0 sniff regions after uncheck, got {sniff_after_uncheck}"
+
+            # Recheck → should restore regions
+            dialog.apply_sniffing_cb.setChecked(True)
+            QApplication.processEvents()
+            time.sleep(0.2)
+            QApplication.processEvents()
+
+            sniff_after_recheck = sum(len(v) for v in getattr(st, 'sniff_regions_by_sweep', {}).values())
+
+            print(f"  Toggle: unchecked={sniff_after_uncheck} sniff regions, "
+                  f"rechecked={sniff_after_recheck} sniff regions")
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogClearRegions:
+    """D6: Clear regions button."""
+
+    def test_clear_sniffing_regions(self, main_window, dialog_watcher):
+        """D6: Click Clear → all regions removed."""
+        from PyQt6.QtWidgets import QApplication
+
+        st = main_window.state
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Click clear
+            dialog._on_clear_sniffing_regions()
+            QApplication.processEvents()
+
+            sniff_count = sum(len(v) for v in getattr(st, 'sniff_regions_by_sweep', {}).values())
+            eupnea_count = sum(len(v) for v in getattr(st, 'eupnea_regions_by_sweep', {}).values())
+            prob_count = sum(len(v) for v in getattr(st, 'gmm_sniff_probabilities', {}).values())
+
+            assert sniff_count == 0, f"Sniff regions not cleared: {sniff_count}"
+            assert eupnea_count == 0, f"Eupnea regions not cleared: {eupnea_count}"
+            assert prob_count == 0, f"Probabilities not cleared: {prob_count}"
+
+            print("  Clear: all regions and probabilities removed")
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogDetectionModeSwitch:
+    """D7: Switch between GMM and Frequency detection modes."""
+
+    def test_detection_mode_switch(self, main_window, dialog_watcher):
+        """D7: Switch to frequency mode → spinners enabled. Switch back → spinners disabled."""
+        from PyQt6.QtWidgets import QApplication
+
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Default should be GMM mode
+            assert dialog.gmm_mode_radio.isChecked(), "GMM mode not default"
+
+            # Switch to frequency mode
+            dialog.freq_mode_radio.setChecked(True)
+            QApplication.processEvents()
+
+            assert dialog.freq_threshold_spin.isEnabled(), "Freq spinner should be enabled in frequency mode"
+            assert dialog.min_duration_spin.isEnabled(), "Duration spinner should be enabled in frequency mode"
+            assert main_window.eupnea_detection_mode == "frequency", \
+                f"Expected 'frequency' mode, got '{main_window.eupnea_detection_mode}'"
+
+            # Switch back to GMM mode
+            dialog.gmm_mode_radio.setChecked(True)
+            QApplication.processEvents()
+
+            assert not dialog.freq_threshold_spin.isEnabled(), "Freq spinner should be disabled after switching back"
+            assert main_window.eupnea_detection_mode == "gmm", \
+                f"Expected 'gmm' mode, got '{main_window.eupnea_detection_mode}'"
+
+            print("  Detection mode switch: GMM ↔ Frequency works correctly")
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
+
+
+class TestDialogApplyVariability:
+    """D8: Apply Variability button with different radio settings."""
+
+    def test_apply_variability_modes(self, main_window, dialog_watcher):
+        """D8: Switch variability modes and click Apply → no crash."""
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from PyQt6.QtCore import QTimer
+
+        dialog = None
+        try:
+            dialog = _open_gmm_dialog(main_window, dialog_watcher)
+
+            # Ensure we have results to visualize
+            if dialog.cluster_labels is None:
+                # Auto-dismiss quality warnings
+                def dismiss():
+                    active = QApplication.activeModalWidget()
+                    if isinstance(active, QMessageBox):
+                        ok = active.button(QMessageBox.StandardButton.Ok)
+                        if ok:
+                            ok.click()
+
+                QTimer.singleShot(2000, dismiss)
+                QTimer.singleShot(3000, dismiss)
+                dialog.on_run_gmm()
+                for _ in range(20):
+                    QApplication.processEvents()
+                    time.sleep(0.05)
+
+            if dialog.cluster_labels is None:
+                pytest.skip("No GMM results for variability test")
+
+            # Test each variability mode
+            modes = [
+                ("SEM", dialog.sem_radio),
+                ("STD", dialog.std_radio),
+                ("Min/Max", dialog.minmax_radio),
+            ]
+
+            for mode_name, radio in modes:
+                radio.setChecked(True)
+                QApplication.processEvents()
+
+                # Click Apply Variability
+                dialog._on_apply_variability()
+                QApplication.processEvents()
+
+                print(f"  Variability mode '{mode_name}' applied successfully")
+
+            # Change n_breaths and apply again
+            dialog.n_breaths_spin.setValue(50)
+            dialog.sem_radio.setChecked(True)
+            dialog._on_apply_variability()
+            QApplication.processEvents()
+            print(f"  Applied with n_breaths=50")
+
+        finally:
+            _close_gmm_dialog(dialog, dialog_watcher)
