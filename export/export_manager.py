@@ -159,14 +159,19 @@ class ExportManager:
             main_window: Reference to MainWindow instance
         """
         self.window = main_window
+        # Injected dependencies (fallback to self.window.X for backward compat)
+        self.state = main_window.state
+        self.settings = main_window.settings
+        self._get_processed_fn = main_window._get_processed_for
+        self._status_fn = main_window._log_status_message
 
     def _is_breath_sniffing(self, sweep_idx, breath_idx, onsets):
         """Check if a breath is in a sniffing region. Delegates to export_service."""
-        return export_svc.is_breath_sniffing(self.window.state, sweep_idx, breath_idx, onsets)
+        return export_svc.is_breath_sniffing(self.state, sweep_idx, breath_idx, onsets)
 
     def validate_breath_data(self):
         """Validate breath data before export. Delegates to export_service."""
-        return export_svc.validate_breath_data(self.window.state)
+        return export_svc.validate_breath_data(self.state)
 
     def _show_message_box(self, icon, title, text, parent=None):
         """
@@ -230,7 +235,7 @@ class ExportManager:
         Returns:
             True if this is a pulse experiment (single brief pulse per sweep)
         """
-        st = self.window.state
+        st = self.state
 
         # Debug logging
         print(f"[Pulse Detection] Checking {len(kept_sweeps)} sweeps...")
@@ -278,7 +283,7 @@ class ExportManager:
         }
 
         for key in history.keys():
-            saved_list = self.window.settings.value(f"save_history/{key}", [])
+            saved_list = self.settings.value(f"save_history/{key}", [])
             if isinstance(saved_list, str):
                 # Single value, convert to list
                 saved_list = [saved_list] if saved_list else []
@@ -300,7 +305,7 @@ class ExportManager:
             'keywords': ''
         }
 
-        st = self.window.state
+        st = self.state
 
         # Get protocol from state.file_info (populated during file load)
         if hasattr(st, 'file_info') and st.file_info:
@@ -340,7 +345,7 @@ class ExportManager:
                 continue
 
             # Get current history
-            current = self.window.settings.value(f"save_history/{key}", [])
+            current = self.settings.value(f"save_history/{key}", [])
             if isinstance(current, str):
                 current = [current] if current else []
             elif not isinstance(current, list):
@@ -357,25 +362,25 @@ class ExportManager:
             current = current[:max_history]
 
             # Save back
-            self.window.settings.setValue(f"save_history/{key}", current)
+            self.settings.setValue(f"save_history/{key}", current)
 
     def _load_last_save_values(self) -> dict:
         """Load the last used values for the Save Data dialog to auto-populate fields."""
         return {
-            'strain': self.window.settings.value("last_save/strain", ""),
-            'virus': self.window.settings.value("last_save/virus", ""),
-            'location': self.window.settings.value("last_save/location", ""),
-            'stim': self.window.settings.value("last_save/stim", ""),
-            'power': self.window.settings.value("last_save/power", ""),
-            'animal': self.window.settings.value("last_save/animal", ""),
-            'sex': self.window.settings.value("last_save/sex", "")
+            'strain': self.settings.value("last_save/strain", ""),
+            'virus': self.settings.value("last_save/virus", ""),
+            'location': self.settings.value("last_save/location", ""),
+            'stim': self.settings.value("last_save/stim", ""),
+            'power': self.settings.value("last_save/power", ""),
+            'animal': self.settings.value("last_save/animal", ""),
+            'sex': self.settings.value("last_save/sex", "")
         }
 
     def _save_last_save_values(self, vals: dict):
         """Save the last used values from the Save Data dialog for auto-population."""
         for key in ['strain', 'virus', 'location', 'stim', 'power', 'animal', 'sex']:
             value = vals.get(key, '').strip()
-            self.window.settings.setValue(f"last_save/{key}", value)
+            self.settings.setValue(f"last_save/{key}", value)
 
     def _sanitize_token(self, s: str) -> str:
         return export_svc.sanitize_token(s)
@@ -391,7 +396,7 @@ class ExportManager:
         - duration_s -> nearest second
         - pulse_width_s -> nearest millisecond (or nearest second if >1s)
         """
-        st = self.window.state
+        st = self.state
         if not getattr(st, "stim_chan", None):
             return ""
 
@@ -461,12 +466,12 @@ class ExportManager:
         from PyQt6.QtCore import Qt
 
         t_start = time.time()
-        self.window._log_status_message("Preparing data export...")
+        self._status_fn("Preparing data export...")
 
         # If eupnea/sniffing detection is out of date, auto-update first
         if getattr(self.window, 'eupnea_sniffing_out_of_date', False):
             print("[Save Data] Eupnea/sniffing detection out of date - auto-updating...")
-            self.window._log_status_message("Updating eupnea/sniffing detection...")
+            self._status_fn("Updating eupnea/sniffing detection...")
             QApplication.processEvents()
             self.window._run_automatic_gmm_clustering()
             self.window.eupnea_sniffing_out_of_date = False
@@ -474,7 +479,7 @@ class ExportManager:
             # Clear the persistent warning
             self.window.statusBar().clearMessage()
             print("[Save Data] Eupnea/sniffing detection updated")
-            self.window._log_status_message("Preparing data export...")
+            self._status_fn("Preparing data export...")
 
         # Create progress dialog
         progress = QProgressDialog("Preparing data export...", None, 0, 100, self.window)
@@ -488,10 +493,10 @@ class ExportManager:
             self._export_all_analyzed_data(preview_only=False, progress_dialog=progress)
             # Show completion message with elapsed time
             t_elapsed = time.time() - t_start
-            self.window._log_status_message(f"[OK] Data export complete ({t_elapsed:.1f}s)", 3000)
+            self._status_fn(f"[OK] Data export complete ({t_elapsed:.1f}s)", 3000)
 
             # Count eupnea and sniffing breaths for telemetry
-            st = self.window.state
+            st = self.state
             eupnea_count = 0
             sniff_count = 0
             for s in st.sweeps.keys():
@@ -509,7 +514,7 @@ class ExportManager:
                 save_type='csv_bundle',
                 eupnea_count=eupnea_count,
                 sniff_count=sniff_count,
-                num_sweeps=len(self.window.state.sweeps)
+                num_sweeps=len(self.state.sweeps)
             )
 
             # Update Project Builder table by re-scanning saved data
@@ -532,7 +537,7 @@ class ExportManager:
                         print("[Export] No save directory found, skipping rescan")
         except Exception as e:
             t_elapsed = time.time() - t_start
-            self.window._log_status_message(f"[FAIL] Data export failed ({t_elapsed:.1f}s)", 3000)
+            self._status_fn(f"[FAIL] Data export failed ({t_elapsed:.1f}s)", 3000)
             raise
         finally:
             progress.close()
@@ -545,22 +550,22 @@ class ExportManager:
 
         t_start = time.time()
         self._preview_start_time = t_start  # Store for use in preview dialog methods
-        self.window._log_status_message("Generating summary...")
+        self._status_fn("Generating summary...")
 
         # Auto-detect stims on all sweeps if stim channel exists
-        st = self.window.state
+        st = self.state
         if st.stim_chan:
             print("[View Summary] Detecting stims on all sweeps...")
-            self.window._log_status_message("Detecting stimulations...")
+            self._status_fn("Detecting stimulations...")
             QApplication.processEvents()
             self.window._detect_stims_all_sweeps()
             print("[View Summary] Stim detection complete")
-            self.window._log_status_message("Generating summary...")
+            self._status_fn("Generating summary...")
 
         # If eupnea/sniffing detection is out of date, auto-update first
         if getattr(self.window, 'eupnea_sniffing_out_of_date', False):
             print("[View Summary] Eupnea/sniffing detection out of date - auto-updating...")
-            self.window._log_status_message("Updating eupnea/sniffing detection...")
+            self._status_fn("Updating eupnea/sniffing detection...")
             QApplication.processEvents()
             self.window._run_automatic_gmm_clustering()
             self.window.eupnea_sniffing_out_of_date = False
@@ -568,7 +573,7 @@ class ExportManager:
             # Clear the persistent warning
             self.window.statusBar().clearMessage()
             print("[View Summary] Eupnea/sniffing detection updated")
-            self.window._log_status_message("Generating summary...")
+            self._status_fn("Generating summary...")
 
         # Create progress dialog
         progress = QProgressDialog("Generating summary preview...", None, 0, 100, self.window)
@@ -583,7 +588,7 @@ class ExportManager:
             # Timing message is shown when dialog appears, not when user closes it
         except Exception as e:
             t_elapsed = time.time() - t_start
-            self.window._log_status_message(f"[FAIL] Summary failed ({t_elapsed:.1f}s)", 3000)
+            self._status_fn(f"[FAIL] Summary failed ({t_elapsed:.1f}s)", 3000)
             raise
         finally:
             progress.close()
@@ -626,7 +631,7 @@ class ExportManager:
     def _compute_metric_trace(self, key, t, y, sr_hz, peaks, breaths, sweep=None):
         """Compute a metric trace. Delegates to export_service."""
         return export_svc.compute_metric_trace(
-            self.window.state, key, t, y, sr_hz, peaks, breaths, sweep
+            self.state, key, t, y, sr_hz, peaks, breaths, sweep
         )
 
     def _compute_all_metrics_for_sweep(self, sweep_idx: int, keys_to_compute: list,
@@ -649,10 +654,10 @@ class ExportManager:
                 - 'sighs': Sigh indices
                 - 'omit_mask': Omitted region mask (or None)
         """
-        st = self.window.state
+        st = self.state
 
         # Get processed signal
-        y_proc = self.window._get_processed_for(st.analyze_chan, sweep_idx)
+        y_proc = self._get_processed_fn(st.analyze_chan, sweep_idx)
 
         # Get peaks and breath events
         pks = np.asarray(st.peaks_by_sweep.get(sweep_idx, np.array([], dtype=int)), dtype=int)
@@ -719,7 +724,7 @@ class ExportManager:
 
     def _get_stim_masks(self, s: int):
         """Build (baseline_mask, stim_mask, post_mask) boolean arrays. Delegates to export_service."""
-        return export_svc.get_stim_masks(self.window.state, s)
+        return export_svc.get_stim_masks(self.state, s)
 
     #     """Return (nanmean, nansem) along axis; SEM uses ddof=1 where n>=2 else NaN."""
     #     with np.errstate(invalid="ignore"):
@@ -752,13 +757,13 @@ class ExportManager:
         from pathlib import Path
 
         # 1. Check for saved ML training folder location
-        saved_ml_folder = self.window.settings.value("ml_training_folder", None)
+        saved_ml_folder = self.settings.value("ml_training_folder", None)
         if saved_ml_folder:
             path = Path(saved_ml_folder)
             if path.exists():
                 return path
             # Path no longer exists - clear it and fall through to detection
-            self.window.settings.remove("ml_training_folder")
+            self.settings.remove("ml_training_folder")
             print(f"[ML training] Saved folder no longer exists, re-detecting: {saved_ml_folder}")
 
         # 2. Try lab default path (check multiple potential drive letters)
@@ -769,7 +774,7 @@ class ExportManager:
             if parent_path.exists():
                 try:
                     candidate.mkdir(exist_ok=True)
-                    self.window.settings.setValue("ml_training_folder", str(candidate))
+                    self.settings.setValue("ml_training_folder", str(candidate))
                     print(f"[ML training] Auto-detected lab drive: {candidate}")
                     return candidate
                 except Exception as e:
@@ -795,7 +800,7 @@ class ExportManager:
         )
 
         # Let user choose directory
-        default_root = self.window.settings.value("save_root", str(self.window.state.in_path.parent))
+        default_root = self.settings.value("save_root", str(self.state.in_path.parent))
         folder = QFileDialog.getExistingDirectory(
             self.window,
             "Select ML Training Data Folder",
@@ -804,7 +809,7 @@ class ExportManager:
 
         if folder:
             path = Path(folder)
-            self.window.settings.setValue("ml_training_folder", str(path))
+            self.settings.setValue("ml_training_folder", str(path))
             print(f"[ML training] User selected folder: {path}")
             return path
 
@@ -837,7 +842,7 @@ class ExportManager:
             include_waveforms: If True, include raw waveform segments for neural net training
             metadata: Dict with 'system_username', 'computer_name', 'user_name', 'quality_score'
         """
-        st = self.window.state
+        st = self.state
 
         print(f"[ML training] Exporting training data to {npz_path.name}...")
         if include_waveforms:
@@ -1028,7 +1033,7 @@ class ExportManager:
                 import core.metrics as metrics_mod
 
                 # Get processed signal for this sweep
-                y_proc = self.window._get_processed_for(st.analyze_chan, sweep_idx)
+                y_proc = self._get_processed_fn(st.analyze_chan, sweep_idx)
 
                 # Get breath events for filtered peaks
                 breath_events = st.breath_by_sweep.get(sweep_idx, {})
@@ -1173,7 +1178,7 @@ class ExportManager:
 
                 # Get processed trace from cache or compute once per sweep
                 if sweep_idx not in trace_cache:
-                    trace_cache[sweep_idx] = self.window._get_processed_for(st.analyze_chan, sweep_idx)
+                    trace_cache[sweep_idx] = self._get_processed_fn(st.analyze_chan, sweep_idx)
                 y_proc = trace_cache[sweep_idx]
 
                 # Extract window around peak
@@ -1405,7 +1410,7 @@ class ExportManager:
         # Defaults for file flags (overridden by dialog when not in preview mode)
         save_hr_csv = False
 
-        st = self.window.state
+        st = self.state
         if not getattr(st, "in_path", None):
             self._show_message_box(QMessageBox.Icon.Information, "View Summary" if preview_only else "Save analyzed data", "Open an ABF first.")
             return
@@ -1566,7 +1571,7 @@ class ExportManager:
 
             if want_picker:
                 # User chooses a folder; we keep your previous smart logic here.
-                default_root = Path(self.window.settings.value("save_root", str(st.in_path.parent)))
+                default_root = Path(self.settings.value("save_root", str(st.in_path.parent)))
                 chosen = QFileDialog.getExistingDirectory(
                     self.window,  # Use window (QWidget) as parent, not self (ExportManager)
                     "Choose a folder (files may go into an existing 'Pleth_App_analysis' here)",
@@ -1598,7 +1603,7 @@ class ExportManager:
                             return
 
                 # Remember the last *picker* root only when the picker is used
-                self.window.settings.setValue("save_root", str(chosen_path))
+                self.settings.setValue("save_root", str(chosen_path))
 
             else:
                 # UNCHECKED: Always use the CURRENT ABF DIRECTORY (not a remembered one)
@@ -1800,7 +1805,7 @@ class ExportManager:
                         y2_ds_by_key[k][:, col] = trace
             else:
                 # Sequential computation for this sweep
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                y_proc = self._get_processed_fn(st.analyze_chan, s)
                 Y_proc_ds[:, col] = y_proc[ds_idx]
 
                 pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
@@ -1875,7 +1880,7 @@ class ExportManager:
                 cached = {}
 
                 for s in kept_sweeps:
-                    y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                    y_proc = self._get_processed_fn(st.analyze_chan, s)
                     pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                     br = st.breath_by_sweep.get(s, None)
                     if br is None and pks.size:
@@ -2083,7 +2088,7 @@ class ExportManager:
             print(f"[CSV-time] Pre-computing eupnea masks for {len(kept_sweeps)} sweeps using {active_classifier} classifier...")
             for s in kept_sweeps:
                 if s not in self._eupnea_masks_cache:
-                    y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                    y_proc = self._get_processed_fn(st.analyze_chan, s)
                     # Use active classifier for eupnea detection (works with GMM, XGBoost, RF, MLP)
                     eupnea_mask = self.window._compute_eupnea_from_active_classifier(s, len(y_proc))
                     # Fallback to traditional method if no classifier data available
@@ -2306,7 +2311,7 @@ class ExportManager:
             t_start = time.time()
             print(f"[CSV] Pre-computing eupnea masks for {len(kept_sweeps)} sweeps...")
             for s in kept_sweeps:
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                y_proc = self._get_processed_fn(st.analyze_chan, s)
                 pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                 br = st.breath_by_sweep.get(s, None)
                 if br is None and pks.size:
@@ -2341,7 +2346,7 @@ class ExportManager:
                 if progress_dialog:
                     QApplication.processEvents()
 
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                y_proc = self._get_processed_fn(st.analyze_chan, s)
                 pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                 br = st.breath_by_sweep.get(s, None)
                 if br is None or pks.size < 2:
@@ -2423,7 +2428,7 @@ class ExportManager:
                 traces = cached_traces_by_sweep.get(s, None)
                 if traces is None:
                     # Compute if not cached (shouldn't happen, but safety fallback)
-                    y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                    y_proc = self._get_processed_fn(st.analyze_chan, s)
                     pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                     br = st.breath_by_sweep.get(s, None)
                     if br is None and pks.size:
@@ -2745,7 +2750,7 @@ class ExportManager:
             apnea_thresh = self.window._parse_float(self.window.ApneaThresh) or 0.5    # seconds
 
             for s in kept_sweeps:
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                y_proc = self._get_processed_fn(st.analyze_chan, s)
                 pks    = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                 br     = st.breath_by_sweep.get(s, None)
                 if br is None and pks.size:
@@ -3280,7 +3285,7 @@ class ExportManager:
                         'notch_filter_lower': self.window.notch_filter_lower,
                         'notch_filter_upper': self.window.notch_filter_upper,
                         'apnea_threshold': self.window._parse_float(self.window.ApneaThresh) or 0.5,
-                        'active_eupnea_sniff_classifier': self.window.state.active_eupnea_sniff_classifier
+                        'active_eupnea_sniff_classifier': self.state.active_eupnea_sniff_classifier
                     }
 
                     # Include MVVM event markers in session file
@@ -3423,7 +3428,7 @@ class ExportManager:
         """
         import numpy as np
 
-        st = self.window.state
+        st = self.state
 
         # Get per-sweep data
         if st.analyze_chan not in st.sweeps:
@@ -3692,7 +3697,7 @@ class ExportManager:
         import numpy as np
         from matplotlib import cm
 
-        st = self.window.state
+        st = self.state
 
         # Get per-sweep data
         if st.analyze_chan not in st.sweeps:
@@ -3864,7 +3869,7 @@ class ExportManager:
         import numpy as np
         from matplotlib import cm
 
-        st = self.window.state
+        st = self.state
 
         # Get per-sweep data
         if st.analyze_chan not in st.sweeps:
@@ -4057,7 +4062,7 @@ class ExportManager:
         import numpy as np
         from matplotlib import cm
 
-        st = self.window.state
+        st = self.state
 
         # Get per-sweep data
         if st.analyze_chan not in st.sweeps:
@@ -4240,7 +4245,7 @@ class ExportManager:
         """
         import numpy as np
 
-        st = self.window.state
+        st = self.state
 
         # Collect inter-breath intervals separated by breath type (excluding stim-affected breaths)
         intervals_all = []
@@ -4731,7 +4736,7 @@ class ExportManager:
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_pdf import PdfPages
 
-        st = self.window.state
+        st = self.state
         n_sweeps_total = next(iter(y2_ds_by_key.values())).shape[1] if y2_ds_by_key else 0
         M = len(t_ds_csv)
         have_stim = (stim_zero is not None and stim_dur is not None)
@@ -4816,15 +4821,15 @@ class ExportManager:
             t0 = float(stim_zero) if stim_zero is not None else 0.0
 
             for s in kept:
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
-                pks    = np.asarray(self.window.state.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
-                br     = self.window.state.breath_by_sweep.get(s, None)
+                y_proc = self._get_processed_fn(st.analyze_chan, s)
+                pks    = np.asarray(self.state.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+                br     = self.state.breath_by_sweep.get(s, None)
                 if br is None and pks.size:
                     try:
                         br = peakdet.compute_breath_events(y_proc, pks, st.sr_hz)
                     except TypeError:
                         br = peakdet.compute_breath_events(y_proc, pks)
-                    self.window.state.breath_by_sweep[s] = br
+                    self.state.breath_by_sweep[s] = br
                 if br is None:
                     br = {"onsets": np.array([], dtype=int)}
 
@@ -4836,7 +4841,7 @@ class ExportManager:
                 t_rel_all = (st.t[mids] - t0).astype(float)
 
                 # Whether each breath interval [on[j], on[j+1]) contains a sigh peak
-                sigh_idx = np.asarray(self.window.state.sigh_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
+                sigh_idx = np.asarray(self.state.sigh_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                 is_sigh_breath = np.zeros(len(mids), dtype=bool)
                 if sigh_idx.size:
                     for j in range(len(mids)):
@@ -5117,7 +5122,7 @@ class ExportManager:
 
         print(f"[PDF] Computing eupnea masks for {len(kept)} sweeps...")
         for s in kept:
-            y_proc = self.window._get_processed_for(st.analyze_chan, s)
+            y_proc = self._get_processed_fn(st.analyze_chan, s)
             pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
             br = st.breath_by_sweep.get(s, None)
             if br is None and pks.size:
@@ -5184,7 +5189,7 @@ class ExportManager:
             t0 = float(stim_zero) if stim_zero is not None else 0.0
 
             for s in kept:
-                y_proc = self.window._get_processed_for(st.analyze_chan, s)
+                y_proc = self._get_processed_fn(st.analyze_chan, s)
                 pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
                 br = st.breath_by_sweep.get(s, None)
                 if br is None or pks.size < 2:
@@ -5352,7 +5357,7 @@ class ExportManager:
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_pdf import PdfPages
 
-        st = self.window.state
+        st = self.state
 
         # Check if event channel exists and has annotations
         if not st.event_channel or not st.bout_annotations:
@@ -5378,7 +5383,7 @@ class ExportManager:
         from PyQt6.QtCore import Qt, QObject, QEvent
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-        st = self.window.state
+        st = self.state
 
         # Generate the CTA figure using similar logic to _save_event_aligned_cta_pdf
         # (but return the figure instead of saving)
@@ -5444,7 +5449,7 @@ class ExportManager:
         # Show timing message before dialog appears
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
 
         # Show dialog modally
         dialog.exec()
@@ -5461,7 +5466,7 @@ class ExportManager:
         import matplotlib.pyplot as plt
         from scipy import stats
 
-        st = self.window.state
+        st = self.state
 
         # Parameters
         WINDOW_BEFORE = 2.0  # seconds before event
@@ -5793,7 +5798,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
 
         # Clean up figures when dialog closes
         def cleanup():
@@ -5923,7 +5928,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Pulse analysis preview generated ({t_elapsed:.1f}s)", 5000)
 
         # Show dialog modally
         dialog.exec()
@@ -6045,7 +6050,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Pulse analysis generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Pulse analysis generated ({t_elapsed:.1f}s)", 5000)
 
         dialog.exec()
 
@@ -6175,7 +6180,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
 
         dialog.exec()
 
@@ -6228,7 +6233,7 @@ class ExportManager:
         # Show timing message
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Preview generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Preview generated ({t_elapsed:.1f}s)", 5000)
 
         dialog.exec()
 
@@ -6381,7 +6386,7 @@ class ExportManager:
         # Show timing message before dialog appears
         if hasattr(self, '_preview_start_time'):
             t_elapsed = time.time() - self._preview_start_time
-            self.window._log_status_message(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
+            self._status_fn(f"[OK] Summary generated ({t_elapsed:.1f}s)", 5000)
 
         # Clean up figures when dialog closes
         def cleanup():
@@ -6423,7 +6428,7 @@ class ExportManager:
         from core.services.cta_service import CTAService
         from core.domain.cta import CTAConfig
 
-        st = self.window.state
+        st = self.state
         cta_service = CTAService()
 
         # Use markers from state if not provided
@@ -6526,7 +6531,7 @@ class ExportManager:
 
     def _sigh_sample_indices(self, s: int, pks: np.ndarray | None) -> set[int]:
         """Return sample indices of sigh-marked peaks. Delegates to export_service."""
-        return export_svc.sigh_sample_indices(self.window.state, s, pks)
+        return export_svc.sigh_sample_indices(self.state, s, pks)
 
 
 

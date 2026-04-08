@@ -34,17 +34,16 @@ class TestSanitizeToken:
         from export.export_manager import ExportManager
 
         # Need a minimal instance — sanitize_token only uses self for method lookup
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
+        # Use export_service directly (pure function, no ExportManager needed)
+        from core.services import export_service as export_svc
 
-        assert em._sanitize_token("hello world") == "hello_world"
-        assert em._sanitize_token("  spaces  ") == "spaces"
-        assert em._sanitize_token("a/b\\c:d") == "abcd"
-        assert em._sanitize_token("under__score") == "under_score"
-        assert em._sanitize_token("") == ""
-        assert em._sanitize_token("normal-name.txt") == "normal-name.txt"
-        assert em._sanitize_token("30Hz_10mW") == "30Hz_10mW"
+        assert export_svc.sanitize_token("hello world") == "hello_world"
+        assert export_svc.sanitize_token("  spaces  ") == "spaces"
+        assert export_svc.sanitize_token("a/b\\c:d") == "abcd"
+        assert export_svc.sanitize_token("under__score") == "under_score"
+        assert export_svc.sanitize_token("") == ""
+        assert export_svc.sanitize_token("normal-name.txt") == "normal-name.txt"
+        assert export_svc.sanitize_token("30Hz_10mW") == "30Hz_10mW"
         print("  Sanitization: special chars, spaces, repeats all handled")
 
 
@@ -52,13 +51,9 @@ class TestMetricKeysInOrder:
     """Test 2: _metric_keys_in_order returns ordered keys."""
 
     def test_returns_keys(self):
-        from export.export_manager import ExportManager
+        from core.services import export_service as export_svc
 
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
-
-        keys = em._metric_keys_in_order()
+        keys = export_svc.metric_keys_in_order()
         assert isinstance(keys, list)
         assert len(keys) > 0
         # Should include common metrics
@@ -72,18 +67,14 @@ class TestNanmeanSem:
     """Test 3: _nanmean_sem robust statistics."""
 
     def test_basic_mean_sem(self):
-        from export.export_manager import ExportManager
-
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
+        from core.services import export_service as export_svc
 
         # 2D array: 3 rows, 4 columns
         X = np.array([[1.0, 2.0, 3.0, 4.0],
                        [2.0, 4.0, 6.0, 8.0],
                        [3.0, 6.0, 9.0, 12.0]])
 
-        mean, sem = em._nanmean_sem(X, axis=0)
+        mean, sem = export_svc.nanmean_sem(X, axis=0)
 
         np.testing.assert_allclose(mean, [2.0, 4.0, 6.0, 8.0])
         assert sem.shape == (4,)
@@ -91,27 +82,19 @@ class TestNanmeanSem:
         print(f"  Mean={mean}, SEM finite and correct shape")
 
     def test_with_nans(self):
-        from export.export_manager import ExportManager
-
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
+        from core.services import export_service as export_svc
 
         X = np.array([[1.0, np.nan], [3.0, 5.0], [np.nan, 7.0]])
-        mean, sem = em._nanmean_sem(X, axis=0)
+        mean, sem = export_svc.nanmean_sem(X, axis=0)
 
         assert np.isfinite(mean[0])  # 2 finite values → valid mean
         assert np.isfinite(mean[1])  # 2 finite values → valid mean
         print(f"  NaN handling: mean={mean}")
 
     def test_empty_array(self):
-        from export.export_manager import ExportManager
+        from core.services import export_service as export_svc
 
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
-
-        mean, sem = em._nanmean_sem(np.array([]))
+        mean, sem = export_svc.nanmean_sem(np.array([]))
         assert np.isnan(mean)
         assert np.isnan(sem)
         print("  Empty array → (nan, nan)")
@@ -121,37 +104,25 @@ class TestMeanSem1D:
     """Test 4: _mean_sem_1d for 1D arrays."""
 
     def test_basic(self):
-        from export.export_manager import ExportManager
+        from core.services import export_service as export_svc
 
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
-
-        m, s = em._mean_sem_1d(np.array([2.0, 4.0, 6.0]))
+        m, s = export_svc.mean_sem_1d(np.array([2.0, 4.0, 6.0]))
         assert m == pytest.approx(4.0)
         assert s > 0
         print(f"  mean={m:.2f}, sem={s:.4f}")
 
     def test_single_value(self):
-        from export.export_manager import ExportManager
+        from core.services import export_service as export_svc
 
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
-
-        m, s = em._mean_sem_1d(np.array([5.0]))
+        m, s = export_svc.mean_sem_1d(np.array([5.0]))
         assert m == pytest.approx(5.0)
         assert np.isnan(s)  # SEM undefined for n=1
         print(f"  Single value: mean={m}, sem=nan")
 
     def test_all_nan(self):
-        from export.export_manager import ExportManager
+        from core.services import export_service as export_svc
 
-        class FakeWindow:
-            state = None
-        em = ExportManager(FakeWindow())
-
-        m, s = em._mean_sem_1d(np.array([np.nan, np.nan]))
+        m, s = export_svc.mean_sem_1d(np.array([np.nan, np.nan]))
         assert np.isnan(m)
         assert np.isnan(s)
 
