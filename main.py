@@ -73,7 +73,6 @@ from core.channel_manager import ChannelManagerWidget
 from core.project_builder_manager import ProjectBuilderManager
 from core.scan_manager import ScanManager
 from core.recovery_manager import RecoveryManager
-from core.classifier_manager import ClassifierManager  # legacy — kept for tests
 from viewmodels.classifier_viewmodel import ClassifierViewModel
 from viewmodels.gmm_viewmodel import GMMViewModel
 # Import new event marker system
