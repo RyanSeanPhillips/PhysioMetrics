@@ -173,6 +173,44 @@ class ExportManager:
         # Accessors that still fallback to self.window (will be fully decoupled later)
         self._event_marker_vm = getattr(main_window, '_event_marker_viewmodel', None)
         self._nav_vm = getattr(main_window, '_nav_vm', None)
+        # Late-bound accessors (avoid triggering lazy properties at init time)
+        self._mw = main_window
+
+    # ── Late-bound MainWindow accessors (avoid init-time property triggers) ──
+
+    @property
+    def _project_builder(self):
+        return getattr(self._mw, 'project_builder', None) if self._mw else None
+
+    @property
+    def _master_file_list(self):
+        return getattr(self._mw, '_master_file_list', None) if self._mw else None
+
+    def _run_gmm_fn(self):
+        fn = getattr(self._mw, '_run_automatic_gmm_clustering', None)
+        if fn: fn()
+
+    def _detect_stims_fn(self):
+        fn = getattr(self._mw, '_detect_stims_all_sweeps', None)
+        if fn: fn()
+
+    def _compute_stim_fn(self):
+        fn = getattr(self._mw, '_compute_stim_for_current_sweep', None)
+        if fn: fn()
+
+    def _redraw_fn(self):
+        fn = getattr(self._mw, 'redraw_main_plot', None)
+        if fn: fn()
+
+    def _scan_saved_data_fn(self, **kwargs):
+        fn = getattr(self._mw, 'on_project_scan_saved_data', None)
+        if fn: fn(**kwargs)
+
+    def _set_cursor(self, cursor):
+        if self._mw: self._mw.setCursor(cursor)
+
+    def _unset_cursor(self):
+        if self._mw: self._mw.unsetCursor()
 
     # ── Config accessors (read from AnalysisConfig or fallback to window) ──
 
@@ -377,8 +415,8 @@ class ExportManager:
                     break  # Use first file's protocol
 
         # Try to get keywords from Project Builder table model
-        if hasattr(self.window, 'project_builder') and self.window.project_builder:
-            pb = self.window.project_builder
+        if self._project_builder:
+            pb = self._project_builder
             # Check if file table model exists and has the file
             if hasattr(pb, 'file_table_model') and pb.file_table_model:
                 model = pb.file_table_model
@@ -463,7 +501,7 @@ class ExportManager:
 
         # Make sure current sweep has metrics if possible
         try:
-            self.window._compute_stim_for_current_sweep()
+            self._compute_stim_fn()
         except Exception:
             pass
 
@@ -534,9 +572,9 @@ class ExportManager:
             print("[Save Data] Eupnea/sniffing detection out of date - auto-updating...")
             self._status_fn("Updating eupnea/sniffing detection...")
             QApplication.processEvents()
-            self.window._run_automatic_gmm_clustering()
-            self.window.eupnea_sniffing_out_of_date = False
-            self.window.redraw_main_plot()
+            self._run_gmm_fn()
+            if self.window: self.window.eupnea_sniffing_out_of_date = False
+            self._redraw_fn()
             # Clear the persistent warning
             self._status_fn("", 0)
             print("[Save Data] Eupnea/sniffing detection updated")
@@ -582,7 +620,7 @@ class ExportManager:
             # This is more reliable than direct table manipulation - the scan finds
             # what's actually on disk and updates/creates rows accordingly
             if hasattr(self.window, 'on_project_scan_saved_data') and hasattr(self.window, '_master_file_list'):
-                if self.window._master_file_list:  # Only scan if project is open
+                if self._master_file_list:  # Only scan if project is open
                     # Get the save directory for a focused scan
                     save_dir = getattr(self.window, '_save_dir', None)
                     if save_dir:
@@ -591,7 +629,7 @@ class ExportManager:
                         print(f"[Export] Triggering focused rescan of: {save_dir}")
                         # Use QTimer to defer the scan slightly so the UI can update first
                         from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(100, lambda: self.window.on_project_scan_saved_data(
+                        QTimer.singleShot(100, lambda: self._scan_saved_data_fn(
                             scan_folder=save_dir, silent=True
                         ))
                     else:
@@ -619,7 +657,7 @@ class ExportManager:
             print("[View Summary] Detecting stims on all sweeps...")
             self._status_fn("Detecting stimulations...")
             QApplication.processEvents()
-            self.window._detect_stims_all_sweeps()
+            self._detect_stims_fn()
             print("[View Summary] Stim detection complete")
             self._status_fn("Generating summary...")
 
@@ -628,9 +666,9 @@ class ExportManager:
             print("[View Summary] Eupnea/sniffing detection out of date - auto-updating...")
             self._status_fn("Updating eupnea/sniffing detection...")
             QApplication.processEvents()
-            self.window._run_automatic_gmm_clustering()
-            self.window.eupnea_sniffing_out_of_date = False
-            self.window.redraw_main_plot()
+            self._run_gmm_fn()
+            if self.window: self.window.eupnea_sniffing_out_of_date = False
+            self._redraw_fn()
             # Clear the persistent warning
             self._status_fn("", 0)
             print("[View Summary] Eupnea/sniffing detection updated")
@@ -2261,7 +2299,7 @@ class ExportManager:
                 QApplication.processEvents()
 
             t_start = time.time()
-            if self.window: self.window.setCursor(Qt.CursorShape.WaitCursor)
+            self._set_cursor(Qt.CursorShape.WaitCursor)
             try:
                 # Build DataFrame from existing numpy arrays (2-3× faster than row-by-row)
                 import pandas as pd
@@ -2304,7 +2342,7 @@ class ExportManager:
                     df.to_csv(csv_time_path, index=False, float_format='%.9g', na_rep='')
 
             finally:
-                if self.window: self.window.unsetCursor()
+                self._unset_cursor()
 
             t_elapsed = time.time() - t_start
             if save_timeseries_csv:
