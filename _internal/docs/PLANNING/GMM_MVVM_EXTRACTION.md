@@ -42,10 +42,13 @@ This is the first manager extraction (Step 4A of the MVVM refactoring plan).
   - File switch clears GMM state
 - **Multi-channel test**: GMM across 3 pleth channels on awake recording
 
-### Commit 2: Create GMMService (planned)
-- Move all logic from `gmm_manager.py` into pure functions
-- Replace `self.mw` references with parameters
-- Key change: `self.mw.state` -> `state` parameter, filter settings -> `FilterConfig`
+### Commit 2: Create GMMService (done)
+- **File**: `core/services/gmm_service.py` (~380 lines)
+- Pure Python, no Qt dependencies. All methods take `state` + `FilterConfig` as params.
+- `GMMResult` dataclass with `to_cache_dict()`/`from_cache_dict()` for legacy compat
+- Key functions: `run_automatic_clustering()`, `collect_breath_features()`, `identify_sniffing_cluster()`, `apply_sniffing_regions()`, `compute_eupnea_from_gmm()`, `compute_eupnea_from_active_classifier()`
+- 5 service tests (S1-S5) verify identical output to GMMManager
+- `self.mw` replacements: state param, FilterConfig, zscore_stats_fn callback, direct filters.notch_filter_1d()
 
 ### Commit 3: Create GMMViewModel + wire main.py (planned)
 - QObject with signals for clustering lifecycle

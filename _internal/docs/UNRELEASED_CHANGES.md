@@ -1,6 +1,6 @@
 # Unreleased Changes
 
-## Session: 2026-04-07 — GMM Clustering Test Suite (Commit 1 of MVVM Extraction)
+## Session: 2026-04-07 — GMM MVVM Extraction (Commits 1-2)
 
 ### Testing
 - **New test file**: `tests/test_gmm_clustering.py` — 16 tests (7 unit + 8 integration + 1 multi-channel)
@@ -8,6 +8,13 @@
 - **Integration tests (8-15)**: Real MainWindow + ABF files — peak detection → GMM pipeline, region creation, cache population, plot rendering, classifier switching, dialog opening, NPZ roundtrip, file switch state clearing
 - **Multi-channel test**: GMM clustering across multiple pleth channels on awake recording (25729001.abf)
 - **Purpose**: Behavioral baseline before extracting GMMManager → GMMService + GMMViewModel
+
+### GMMService (Commit 2)
+- **New file**: `core/services/gmm_service.py` — pure Python GMM service, no Qt dependencies
+- **GMMResult dataclass**: immutable result with `to_cache_dict()`/`from_cache_dict()` for legacy compat
+- **Functions**: `run_automatic_clustering()`, `collect_breath_features()`, `identify_sniffing_cluster()`, `apply_sniffing_regions()`, `compute_eupnea_from_gmm()`, `compute_eupnea_from_active_classifier()`
+- **5 service tests** (S1-S5): verify identical output to GMMManager for all key functions
+- **Location**: `core/services/gmm_service.py`, planning doc at `_internal/docs/PLANNING/GMM_MVVM_EXTRACTION.md`
 
 ## Session: 2026-04-07 — Minimap Navigation Rework + UI Polish
 

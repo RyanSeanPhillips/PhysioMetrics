@@ -1,7 +1,8 @@
 """
-GMM clustering tests — behavioral baseline before GMMService extraction.
+GMM clustering tests — behavioral baseline for GMMManager + GMMService.
 
 Unit tests (1-7): Use FakeMW mock with synthetic data to test GMMManager logic.
+Service tests (S1-S5): Test GMMService (pure Python) directly.
 Integration tests (8-15): Use session-scoped MainWindow with real ABF files.
 
 Run:  python -m pytest tests/test_gmm_clustering.py -v
@@ -406,6 +407,159 @@ class TestNoPeaksNoop:
         assert np.all(mask2 == 0)
 
         print("  Empty state handled gracefully")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Service Tests (S1-S5) — GMMService (pure Python, no Qt)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestServiceCollectFeatures:
+    """S1: GMMService.collect_breath_features matches GMMManager output."""
+
+    def test_service_collect_features_shape(self):
+        """S1: Service produces same shape as manager."""
+        from core.gmm_manager import GMMManager
+        from core.services.gmm_service import collect_breath_features
+
+        st = _make_synthetic_state(n_breaths=60)
+        mw = FakeMW(st)
+        mgr = GMMManager(mw)
+
+        feature_keys = ["if", "ti", "amp_insp", "max_dinsp"]
+
+        # Manager path
+        mgr_matrix, mgr_cycles = mgr.collect_gmm_breath_features(feature_keys)
+
+        # Service path (no FilterConfig — uses state defaults, same as FakeMW with no filters)
+        svc_matrix, svc_cycles = collect_breath_features(st, feature_keys)
+
+        assert mgr_matrix.shape == svc_matrix.shape, (
+            f"Shape mismatch: manager={mgr_matrix.shape}, service={svc_matrix.shape}"
+        )
+        assert len(mgr_cycles) == len(svc_cycles)
+        np.testing.assert_allclose(mgr_matrix, svc_matrix, rtol=1e-10,
+                                   err_msg="Feature values differ between manager and service")
+        print(f"  Service matches manager: {svc_matrix.shape[0]} breaths, {svc_matrix.shape[1]} features")
+
+
+class TestServiceIdentifyCluster:
+    """S2: GMMService.identify_sniffing_cluster matches GMMManager."""
+
+    def test_service_identify_matches_manager(self):
+        """S2: Same input → same sniffing cluster ID."""
+        from core.gmm_manager import GMMManager
+        from core.services.gmm_service import identify_sniffing_cluster
+
+        st = _make_synthetic_state()
+        mw = FakeMW(st)
+        mgr = GMMManager(mw)
+
+        feature_keys = ["if", "ti"]
+        eupnea = np.column_stack([
+            np.random.default_rng(1).normal(3.0, 0.3, 60),
+            np.random.default_rng(2).normal(0.15, 0.02, 60),
+        ])
+        sniffing = np.column_stack([
+            np.random.default_rng(3).normal(7.0, 0.5, 40),
+            np.random.default_rng(4).normal(0.06, 0.01, 40),
+        ])
+        feature_matrix = np.vstack([eupnea, sniffing])
+        cluster_labels = np.array([0] * 60 + [1] * 40)
+
+        mgr_id = mgr.identify_gmm_sniffing_cluster(feature_matrix, cluster_labels, feature_keys, 0.8)
+        svc_id = identify_sniffing_cluster(feature_matrix, cluster_labels, feature_keys, 0.8)
+
+        assert mgr_id == svc_id, f"Manager={mgr_id}, Service={svc_id}"
+        print(f"  Both identify cluster {svc_id} as sniffing")
+
+
+class TestServiceApplyRegions:
+    """S3: GMMService.apply_sniffing_regions stores same state as GMMManager."""
+
+    def test_service_apply_regions(self):
+        """S3: Service creates regions in state."""
+        from core.services.gmm_service import apply_sniffing_regions
+
+        st = _make_synthetic_state(n_breaths=50)
+        n_actual = len(st.peaks_by_sweep[0])
+        breath_cycles = [(0, i) for i in range(n_actual)]
+
+        n_eupnea = int(n_actual * 0.6)
+        cluster_labels = np.array([0] * n_eupnea + [1] * (n_actual - n_eupnea))
+        cluster_probs = np.zeros((n_actual, 2))
+        for i in range(n_actual):
+            if cluster_labels[i] == 0:
+                cluster_probs[i] = [0.85, 0.15]
+            else:
+                cluster_probs[i] = [0.1, 0.9]
+
+        n_sniffing = apply_sniffing_regions(st, breath_cycles, cluster_labels, cluster_probs, 1)
+
+        assert n_sniffing > 0
+        assert hasattr(st, 'sniff_regions_by_sweep')
+        assert hasattr(st, 'eupnea_regions_by_sweep')
+        assert len(st.sniff_regions_by_sweep) > 0
+        assert len(st.eupnea_regions_by_sweep) > 0
+        print(f"  Service created regions: {n_sniffing} sniffing breaths")
+
+
+class TestServiceEndToEnd:
+    """S4: GMMService.run_automatic_clustering full pipeline."""
+
+    def test_service_end_to_end(self):
+        """S4: Full service pipeline returns GMMResult with expected fields."""
+        from core.services.gmm_service import run_automatic_clustering, GMMResult
+
+        st = _make_synthetic_state(n_breaths=80)
+        result = run_automatic_clustering(st)
+
+        assert result is not None, "Service returned None"
+        assert isinstance(result, GMMResult)
+        assert len(result.cluster_labels) > 0
+        assert result.sniffing_cluster_id is not None
+        assert result.feature_matrix.shape[1] == 4
+        assert result.silhouette_score > -1
+
+        # Verify state was updated
+        assert hasattr(st, 'gmm_sniff_probabilities')
+        assert len(st.gmm_sniff_probabilities) > 0
+
+        # Verify cache dict round-trip
+        cache = result.to_cache_dict()
+        restored = GMMResult.from_cache_dict(cache)
+        assert restored.sniffing_cluster_id == result.sniffing_cluster_id
+        assert len(restored.cluster_labels) == len(result.cluster_labels)
+
+        print(f"  Pipeline: {len(result.cluster_labels)} breaths, "
+              f"sniffing_id={result.sniffing_cluster_id}, sil={result.silhouette_score:.3f}")
+
+
+class TestServiceEupneaMask:
+    """S5: GMMService eupnea mask functions."""
+
+    def test_service_eupnea_from_active_classifier(self):
+        """S5: Service eupnea mask matches manager output."""
+        from core.gmm_manager import GMMManager
+        from core.services.gmm_service import compute_eupnea_from_active_classifier
+
+        st = _make_synthetic_state(n_breaths=30)
+        mw = FakeMW(st)
+        mgr = GMMManager(mw)
+
+        n_actual = len(st.peaks_by_sweep[0])
+        signal_length = len(st.t)
+
+        # Set known breath_type_class
+        breath_type_class = np.array([i % 2 for i in range(n_actual)], dtype=np.int8)
+        st.all_peaks_by_sweep[0]['breath_type_class'] = breath_type_class
+
+        mgr_mask = mgr.compute_eupnea_from_active_classifier(0, signal_length)
+        svc_mask = compute_eupnea_from_active_classifier(st, 0, signal_length)
+
+        np.testing.assert_array_equal(mgr_mask, svc_mask,
+                                      err_msg="Eupnea masks differ between manager and service")
+        print(f"  Service mask matches manager for {n_actual} breaths")
 
 
 # ═══════════════════════════════════════════════════════════════════
