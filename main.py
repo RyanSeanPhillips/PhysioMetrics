@@ -74,7 +74,6 @@ from core.project_builder_manager import ProjectBuilderManager
 from core.scan_manager import ScanManager
 from core.recovery_manager import RecoveryManager
 from core.classifier_manager import ClassifierManager
-from core.gmm_manager import GMMManager  # legacy — kept for dialog backward compat
 from viewmodels.gmm_viewmodel import GMMViewModel
 # Import new event marker system
 from viewmodels.event_marker_viewmodel import EventMarkerViewModel

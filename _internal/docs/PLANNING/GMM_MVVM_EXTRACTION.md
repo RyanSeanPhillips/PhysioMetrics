@@ -1,6 +1,6 @@
 # GMM MVVM Extraction Plan
 
-> **Status**: In progress (Commit 1 done)
+> **Status**: Complete (all 4 commits done)
 > **Date started**: 2026-04-07
 > **Full plan**: `.claude/plans/snoopy-hatching-crayon.md`
 
@@ -59,9 +59,11 @@ This is the first manager extraction (Step 4A of the MVVM refactoring plan).
 - Added `_get_filter_config()` helper on MainWindow
 - Zero regressions: 21 GMM tests + 28 existing tests all pass
 
-### Commit 4: Remove old GMMManager (planned)
-- Delete `core/gmm_manager.py`
-- Remove import and field from `main.py`
+### Commit 4: Remove GMMManager from main.py (done)
+- Removed `from core.gmm_manager import GMMManager` from main.py
+- `core/gmm_manager.py` kept on disk (tests use it as baseline reference)
+- No production code imports GMMManager anymore
+- 49 tests passing (21 GMM + 28 existing)
 
 ## Callers (from codeindex impact analysis)
 
