@@ -15,6 +15,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QMessageBox, QFileDialog, QDialog, QProgressDialog, QApplication
 from PyQt6.QtCore import Qt, Qt as QtCore_Qt
 from core import metrics, telemetry, peaks as peakdet
+from core.services import export_service as export_svc
 from dialogs import SaveMetaDialog
 
 # Enable line profiling when running with kernprof -l
@@ -160,101 +161,12 @@ class ExportManager:
         self.window = main_window
 
     def _is_breath_sniffing(self, sweep_idx, breath_idx, onsets):
-        """
-        Check if a breath is marked as sniffing based on GMM results.
-        Simple approach: Check if breath midpoint falls in any sniffing region.
-
-        Args:
-            sweep_idx: Sweep index
-            breath_idx: Breath index (0-based)
-            onsets: Array of onset indices
-
-        Returns:
-            True if breath is in a sniffing region, False otherwise
-        """
-        st = self.window.state
-        sniff_regions = st.sniff_regions_by_sweep.get(sweep_idx, [])
-        if not sniff_regions or breath_idx >= len(onsets) - 1:
-            return False
-
-        # Get breath time range (onset to next onset)
-        t_start = st.t[onsets[breath_idx]]
-        t_end = st.t[onsets[breath_idx + 1]]
-        t_mid = (t_start + t_end) / 2.0
-
-        # Check if midpoint falls in any sniffing region
-        for (region_start, region_end) in sniff_regions:
-            if region_start <= t_mid <= region_end:
-                return True
-        return False
+        """Check if a breath is in a sniffing region. Delegates to export_service."""
+        return export_svc.is_breath_sniffing(self.window.state, sweep_idx, breath_idx, onsets)
 
     def validate_breath_data(self):
-        """
-        Validate breath data before export to catch potential issues.
-
-        Checks for:
-        - Missing breath events
-        - Onset/offset array length mismatches
-        - Out-of-bounds indices
-        - Overlapping breaths
-
-        Returns:
-            tuple: (is_valid, issues_list) where is_valid is True if no critical issues
-        """
-        st = self.window.state
-        issues = []
-        warnings = []
-
-        if st.t is None or len(st.t) == 0:
-            issues.append("No time array available")
-            return False, issues
-
-        max_idx = len(st.t) - 1
-
-        for sweep_idx in st.peaks_by_sweep.keys():
-            breath_data = st.breath_by_sweep.get(sweep_idx, {})
-            if not breath_data:
-                continue
-
-            onsets = breath_data.get('onsets', np.array([]))
-            offsets = breath_data.get('offsets', np.array([]))
-            expmins = breath_data.get('expmins', np.array([]))
-            expoffs = breath_data.get('expoffs', np.array([]))
-
-            # Convert to numpy arrays if needed
-            onsets = np.asarray(onsets, dtype=int) if len(onsets) > 0 else np.array([], dtype=int)
-            offsets = np.asarray(offsets, dtype=int) if len(offsets) > 0 else np.array([], dtype=int)
-
-            # Check array length mismatches (warning, not critical)
-            if len(onsets) > 0 and len(offsets) > 0:
-                if len(onsets) != len(offsets):
-                    warnings.append(f"Sweep {sweep_idx}: onset/offset count mismatch ({len(onsets)} vs {len(offsets)})")
-
-            # Check for out-of-bounds indices
-            if len(onsets) > 0:
-                bad_onsets = np.sum((onsets < 0) | (onsets > max_idx))
-                if bad_onsets > 0:
-                    issues.append(f"Sweep {sweep_idx}: {bad_onsets} onset indices out of bounds")
-
-            if len(offsets) > 0:
-                bad_offsets = np.sum((offsets < 0) | (offsets > max_idx))
-                if bad_offsets > 0:
-                    issues.append(f"Sweep {sweep_idx}: {bad_offsets} offset indices out of bounds")
-
-            # Check for overlapping breaths (onset[i+1] <= offset[i])
-            if len(onsets) > 1 and len(offsets) > 0:
-                for i in range(min(len(onsets) - 1, len(offsets))):
-                    if onsets[i + 1] <= offsets[i]:
-                        warnings.append(f"Sweep {sweep_idx}, breath {i}: possible overlap with next breath")
-                        break  # Only report first overlap per sweep
-
-        # Critical issues prevent export
-        is_valid = len(issues) == 0
-
-        # Combine issues and warnings for display
-        all_issues = issues + warnings
-
-        return is_valid, all_issues
+        """Validate breath data before export. Delegates to export_service."""
+        return export_svc.validate_breath_data(self.window.state)
 
     def _show_message_box(self, icon, title, text, parent=None):
         """
@@ -466,16 +378,7 @@ class ExportManager:
             self.window.settings.setValue(f"last_save/{key}", value)
 
     def _sanitize_token(self, s: str) -> str:
-        if not s:
-            return ""
-        s = s.strip()
-        s = s.replace(" ", "_")
-        # allow alnum, underscore, hyphen, dot
-        s = re.sub(r"[^A-Za-z0-9._-]+", "", s)
-        # squeeze repeats of underscores/hyphens
-        s = re.sub(r"_+", "_", s)
-        s = re.sub(r"-+", "-", s)
-        return s
+        return export_svc.sanitize_token(s)
 
 
 
@@ -717,49 +620,14 @@ class ExportManager:
 
     def _metric_keys_in_order(self):
         """Return metric keys in the UI order (from metrics.METRIC_SPECS)."""
-        return [key for (_, key) in metrics.METRIC_SPECS]
+        return export_svc.metric_keys_in_order()
 
 
     def _compute_metric_trace(self, key, t, y, sr_hz, peaks, breaths, sweep=None):
-        """
-        Call the metric function, passing expoffs if it exists.
-        Falls back to legacy signature when needed.
-
-        Args:
-            sweep: Optional sweep index for setting GMM probabilities (needed for sniff_conf/eupnea_conf)
-        """
-        st = self.window.state
-        fn = metrics.METRICS[key]
-        on  = breaths.get("onsets")   if breaths else None
-        off = breaths.get("offsets")  if breaths else None
-        exm = breaths.get("expmins")  if breaths else None
-        exo = breaths.get("expoffs")  if breaths else None
-
-        # Set GMM probabilities if computing sniff_conf or eupnea_conf
-        gmm_probs = None
-        if sweep is not None and hasattr(st, 'gmm_sniff_probabilities') and sweep in st.gmm_sniff_probabilities:
-            gmm_probs = st.gmm_sniff_probabilities[sweep]
-            metrics.set_gmm_probabilities(gmm_probs)
-
-        # Set ECG result if computing hr or rr_interval
-        ecg_result = None
-        if key in ('hr', 'rr_interval') and sweep is not None:
-            ecg_results = getattr(st, 'ecg_results_by_sweep', {})
-            ecg_result = ecg_results.get(sweep)
-            metrics.set_ecg_result(ecg_result)
-
-        try:
-            result = fn(t, y, sr_hz, peaks, on, off, exm, exo)  # new signature
-        except TypeError:
-            result = fn(t, y, sr_hz, peaks, on, off, exm)       # legacy signature
-        finally:
-            # Clear GMM probabilities after computation
-            if gmm_probs is not None:
-                metrics.set_gmm_probabilities(None)
-            if ecg_result is not None:
-                metrics.set_ecg_result(None)
-
-        return result
+        """Compute a metric trace. Delegates to export_service."""
+        return export_svc.compute_metric_trace(
+            self.window.state, key, t, y, sr_hz, peaks, breaths, sweep
+        )
 
     def _compute_all_metrics_for_sweep(self, sweep_idx: int, keys_to_compute: list,
                                         ds_idx: np.ndarray, N: int) -> dict:
@@ -850,31 +718,8 @@ class ExportManager:
 
 
     def _get_stim_masks(self, s: int):
-        """
-        Build (baseline_mask, stim_mask, post_mask) boolean arrays over st.t for sweep s.
-        Uses union of all stim spans for 'stim'.
-        """
-        st = self.window.state
-        t = st.t
-        spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
-        if not spans:
-            # no stim: whole trace is baseline; stim/post empty
-            B = np.ones_like(t, dtype=bool)
-            Z = np.zeros_like(t, dtype=bool)
-            return B, Z, Z
-
-        starts = np.array([a for (a, _) in spans], dtype=float)
-        ends   = np.array([b for (_, b) in spans], dtype=float)
-        t0 = np.min(starts)
-        t1 = np.max(ends)
-
-        stim_mask = np.zeros_like(t, dtype=bool)
-        for (a, b) in spans:
-            stim_mask |= (t >= a) & (t <= b)
-
-        baseline_mask = t < t0
-        post_mask     = t > t1
-        return baseline_mask, stim_mask, post_mask
+        """Build (baseline_mask, stim_mask, post_mask) boolean arrays. Delegates to export_service."""
+        return export_svc.get_stim_masks(self.window.state, s)
 
     #     """Return (nanmean, nansem) along axis; SEM uses ddof=1 where n>=2 else NaN."""
     #     with np.errstate(invalid="ignore"):
@@ -882,50 +727,8 @@ class ExportManager:
 
 
     def _nanmean_sem(self, X, axis=0):
-        """
-        Robust mean/SEM that avoids NumPy RuntimeWarnings when there are
-        0 or 1 finite values along the chosen axis.
-        """
-        import numpy as np
-
-        A = np.asarray(X, dtype=float)
-        if A.size == 0:
-            return np.nan, np.nan
-
-        # Move the target axis to 0 so we can index rows easily
-        A0 = np.moveaxis(A, axis, 0)      # shape: (N, ...rest...)
-        # Collapse the rest to a single trailing dimension for simplicity
-        tail = int(np.prod(A0.shape[1:])) or 1
-        A2 = A0.reshape(A0.shape[0], tail)  # (N, T)
-
-        finite = np.isfinite(A2)
-        n = finite.sum(axis=0)              # (T,)
-
-        mean = np.full((tail,), np.nan, dtype=float)
-        sem  = np.full((tail,), np.nan, dtype=float)
-
-        # rows/columns (along axis) with at least one finite value
-        msk_mean = n > 0
-        if np.any(msk_mean):
-            mean[msk_mean] = np.nanmean(A2[:, msk_mean], axis=0)
-
-        # rows/columns with at least two finite values (only here compute SEM)
-        msk_sem = n >= 2
-        if np.any(msk_sem):
-            std = np.nanstd(A2[:, msk_sem], axis=0, ddof=1)
-            sem[msk_sem] = std / np.sqrt(n[msk_sem])
-
-        # reshape back to the original tail and move axis back
-        mean = mean.reshape(A0.shape[1:])
-        sem  = sem.reshape(A0.shape[1:])
-        # move axis back to original position (only if result has enough dimensions)
-        # After reduction along one axis, result has (A.ndim - 1) dimensions
-        # We can only moveaxis if result is multi-dimensional
-        if mean.ndim > 1:
-            mean = np.moveaxis(mean, 0, axis)
-            sem  = np.moveaxis(sem, 0, axis)
-
-        return mean, sem
+        """Robust mean/SEM. Delegates to export_service."""
+        return export_svc.nanmean_sem(X, axis)
 
 
 
@@ -3602,21 +3405,8 @@ class ExportManager:
 
 
     def _mean_sem_1d(self, arr: np.ndarray):
-        """Finite-only mean and SEM (ddof=1) for a 1D array. Returns (mean, sem).
-        If no finite values -> (nan, nan). If only 1 finite value -> (mean, nan)."""
-        arr = np.asarray(arr, dtype=float)
-        finite = np.isfinite(arr)
-        n = int(finite.sum())
-        if n == 0:
-            return (np.nan, np.nan)
-        vals = arr[finite]
-        m = float(np.mean(vals))
-        if n >= 2:
-            s = float(np.std(vals, ddof=1))
-            sem = s / np.sqrt(n)
-        else:
-            sem = np.nan
-        return (m, sem)
+        """Finite-only mean and SEM. Delegates to export_service."""
+        return export_svc.mean_sem_1d(arr)
 
     def _plot_pulse_cta_overlay(self, ax_all, ax_eupnea, ax_sniff, kept_sweeps: list, global_s0: float = None):
         """
@@ -6735,74 +6525,8 @@ class ExportManager:
         return exported_files
 
     def _sigh_sample_indices(self, s: int, pks: np.ndarray | None) -> set[int]:
-        """
-        Return a set of SAMPLE indices (into st.t / y) for sigh-marked peaks on sweep s,
-        regardless of how they were originally stored.
-
-        Accepts any of these storage patterns per sweep:
-        • sample indices (ints 0..N-1)
-        • indices INTO the peaks list (ints 0..len(pks)-1), which we map via pks[idx]
-        • times in seconds (floats), which we map to nearest sample via searchsorted
-        • numpy array / list / set in any of the above forms
-        """
-        st = self.window.state
-        N = len(st.t)
-
-        # Prefer the name you've been using; try some alternates if needed.
-        candidates = None
-        for name in ("sighs_by_sweep", "sigh_indices_by_sweep", "sigh_peaks_by_sweep", "sigh_mask_by_sweep"):
-            if hasattr(st, name):
-                candidates = getattr(st, name).get(s, None)
-                if candidates is not None:
-                    break
-
-        if candidates is None:
-            return set()
-
-        arr = np.asarray(list(candidates))
-        out: set[int] = set()
-
-        # If integer-like
-        if arr.dtype.kind in "iu":
-            arr = arr.astype(int)
-            if pks is not None and arr.size and arr.max(initial=-1) < len(pks):
-                # Looks like indexes INTO peaks -> map to sample indexes
-                for idx in arr:
-                    if 0 <= idx < len(pks):
-                        i = int(pks[idx])
-                        if 0 <= i < N:
-                            out.add(i)
-            else:
-                # Already sample indexes
-                for i in arr:
-                    if 0 <= i < N:
-                        out.add(int(i))
-            return out
-
-        # If float-like -> assume times (seconds)
-        if arr.dtype.kind in "f":
-            t = st.t
-            for val in arr:
-                try:
-                    i = int(np.clip(np.searchsorted(t, float(val)), 0, N - 1))
-                    out.add(i)
-                except Exception:
-                    pass
-            return out
-
-        # Fallback: try to coerce each element
-        for v in arr:
-            try:
-                i = int(v)
-                if 0 <= i < N:
-                    out.add(i)
-            except Exception:
-                try:
-                    i = int(np.clip(np.searchsorted(st.t, float(v)), 0, N - 1))
-                    out.add(i)
-                except Exception:
-                    pass
-        return out
+        """Return sample indices of sigh-marked peaks. Delegates to export_service."""
+        return export_svc.sigh_sample_indices(self.window.state, s, pks)
 
 
 
