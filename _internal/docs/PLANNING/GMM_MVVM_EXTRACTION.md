@@ -50,10 +50,14 @@ This is the first manager extraction (Step 4A of the MVVM refactoring plan).
 - 5 service tests (S1-S5) verify identical output to GMMManager
 - `self.mw` replacements: state param, FilterConfig, zscore_stats_fn callback, direct filters.notch_filter_1d()
 
-### Commit 3: Create GMMViewModel + wire main.py (planned)
-- QObject with signals for clustering lifecycle
-- Provider pattern for state/config/zscore
-- Backward-compat properties on MainWindow for `_cached_gmm_results`
+### Commit 3: Create GMMViewModel + wire main.py (done)
+- **File**: `viewmodels/gmm_viewmodel.py` (~140 lines)
+- QObject with signals: `clustering_started`, `clustering_completed`, `clustering_failed`, `status_message`
+- Provider pattern: `set_state_provider()`, `set_filter_config_provider()`, `set_zscore_stats_provider()`
+- Cache property on MainWindow: `_cached_gmm_results` → delegates to `_gmm_vm.cached_results`
+- All 7 delegate methods updated: `_gmm_manager.xxx()` → `_gmm_vm.xxx()`
+- Added `_get_filter_config()` helper on MainWindow
+- Zero regressions: 21 GMM tests + 28 existing tests all pass
 
 ### Commit 4: Remove old GMMManager (planned)
 - Delete `core/gmm_manager.py`

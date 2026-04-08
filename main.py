@@ -74,7 +74,8 @@ from core.project_builder_manager import ProjectBuilderManager
 from core.scan_manager import ScanManager
 from core.recovery_manager import RecoveryManager
 from core.classifier_manager import ClassifierManager
-from core.gmm_manager import GMMManager
+from core.gmm_manager import GMMManager  # legacy — kept for dialog backward compat
+from viewmodels.gmm_viewmodel import GMMViewModel
 # Import new event marker system
 from viewmodels.event_marker_viewmodel import EventMarkerViewModel
 from views.events.plot_integration import EventMarkerPlotIntegration
@@ -273,8 +274,9 @@ class MainWindow(QMainWindow):
         self.zscore_global_mean = None  # Global mean across all sweeps (cached)
         self.zscore_global_std = None   # Global std across all sweeps (cached)
 
-        # GMM clustering cache (for fast dialog loading)
-        self._cached_gmm_results = None
+        # GMM ViewModel (replaces GMMManager + cache)
+        # _cached_gmm_results is now a property delegating to _gmm_vm
+        self._gmm_vm = GMMViewModel(parent=self)
 
         # Eupnea detection parameters
         self.eupnea_freq_threshold = 5.0  # Hz - frequency threshold for eupnea (used in frequency mode)
@@ -386,8 +388,11 @@ class MainWindow(QMainWindow):
         # === Initialize Classifier Manager (early - needed for auto-load) ===
         self._classifier_manager = ClassifierManager(self)
 
-        # === Initialize GMM Manager ===
-        self._gmm_manager = GMMManager(self)
+        # === Initialize GMM ViewModel (providers wired after state is available) ===
+        self._gmm_vm.set_state_provider(lambda: self.state)
+        self._gmm_vm.set_filter_config_provider(self._get_filter_config)
+        self._gmm_vm.set_zscore_stats_provider(self._compute_global_zscore_stats)
+        self._gmm_vm.status_message.connect(self._log_status_message)
 
         # Connect classifier signals and set safe defaults (no ML models needed)
         self.peak_detec_combo.currentTextChanged.connect(self._classifier_manager.on_classifier_changed)
@@ -7124,33 +7129,47 @@ class MainWindow(QMainWindow):
         if 'prominence' in stats:
             print(f"[normalization]   prominence: mean={stats['prominence']['mean']:.4f}, std={stats['prominence']['std']:.4f}")
 
+    def _get_filter_config(self):
+        """Build FilterConfig from current state + MainWindow settings."""
+        from core.domain.analysis.models import FilterConfig
+        return FilterConfig.from_app_state(self.state, self)
+
+    @property
+    def _cached_gmm_results(self):
+        """Backward-compat property: delegates to GMMViewModel cache."""
+        return self._gmm_vm.cached_results
+
+    @_cached_gmm_results.setter
+    def _cached_gmm_results(self, value):
+        self._gmm_vm.set_cached_results(value)
+
     def _compute_eupnea_from_gmm(self, sweep_idx: int, signal_length: int) -> np.ndarray:
-        """Compute eupnea mask from GMM results. Delegates to GMMManager."""
-        return self._gmm_manager.compute_eupnea_from_gmm(sweep_idx, signal_length)
+        """Compute eupnea mask from GMM results. Delegates to GMMViewModel."""
+        return self._gmm_vm.compute_eupnea_from_gmm(sweep_idx, signal_length)
 
     def _compute_eupnea_from_active_classifier(self, sweep_idx: int, signal_length: int) -> np.ndarray:
-        """Compute eupnea mask from active classifier. Delegates to GMMManager."""
-        return self._gmm_manager.compute_eupnea_from_active_classifier(sweep_idx, signal_length)
+        """Compute eupnea mask from active classifier. Delegates to GMMViewModel."""
+        return self._gmm_vm.compute_eupnea_from_active_classifier(sweep_idx, signal_length)
 
     def _run_automatic_gmm_clustering(self):
-        """Run automatic GMM clustering. Delegates to GMMManager."""
-        self._gmm_manager.run_automatic_gmm_clustering()
+        """Run automatic GMM clustering. Delegates to GMMViewModel."""
+        self._gmm_vm.run_automatic_gmm_clustering()
 
     def _collect_gmm_breath_features(self, feature_keys):
-        """Collect per-breath features for GMM clustering. Delegates to GMMManager."""
-        return self._gmm_manager.collect_gmm_breath_features(feature_keys)
+        """Collect per-breath features for GMM clustering. Delegates to GMMViewModel."""
+        return self._gmm_vm.collect_gmm_breath_features(feature_keys)
 
     def _identify_gmm_sniffing_cluster(self, feature_matrix, cluster_labels, feature_keys, silhouette):
-        """Identify sniffing cluster. Delegates to GMMManager."""
-        return self._gmm_manager.identify_gmm_sniffing_cluster(feature_matrix, cluster_labels, feature_keys, silhouette)
+        """Identify sniffing cluster. Delegates to GMMViewModel."""
+        return self._gmm_vm.identify_gmm_sniffing_cluster(feature_matrix, cluster_labels, feature_keys, silhouette)
 
     def _apply_gmm_sniffing_regions(self, breath_cycles, cluster_labels, cluster_probabilities, sniffing_cluster_id):
-        """Apply GMM sniffing regions. Delegates to GMMManager."""
-        return self._gmm_manager.apply_gmm_sniffing_regions(breath_cycles, cluster_labels, cluster_probabilities, sniffing_cluster_id)
+        """Apply GMM sniffing regions. Delegates to GMMViewModel."""
+        return self._gmm_vm.apply_gmm_sniffing_regions(breath_cycles, cluster_labels, cluster_probabilities, sniffing_cluster_id)
 
     def _store_gmm_probabilities_only(self, breath_cycles, cluster_probabilities, sniffing_cluster_id):
-        """Store GMM probabilities. Delegates to GMMManager."""
-        self._gmm_manager.store_gmm_probabilities_only(breath_cycles, cluster_probabilities, sniffing_cluster_id)
+        """Store GMM probabilities. Delegates to GMMViewModel."""
+        self._gmm_vm.store_gmm_probabilities_only(breath_cycles, cluster_probabilities, sniffing_cluster_id)
 
     ##################################################
     ##y2 plotting                                   ##
