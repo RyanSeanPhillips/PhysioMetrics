@@ -406,6 +406,33 @@ class EditingModes:
 
     # ========== Turn Off All Edit Modes ==========
 
+    def _deactivate_move_point(self):
+        """Fully deactivate Move Point mode, including drag/key callbacks."""
+        if not getattr(self, "_move_point_mode", False):
+            return
+        self._move_point_mode = False
+        self._btn_move_point.blockSignals(True)
+        self._btn_move_point.setChecked(False)
+        self._btn_move_point.blockSignals(False)
+        self._btn_move_point.setText("Move Point")
+        self._selected_point = None
+        if self._move_point_artist:
+            self._move_point_artist.remove()
+            self._move_point_artist = None
+        # Clear pyqtgraph drag/key callbacks
+        if self._is_pyqtgraph_backend():
+            if hasattr(self.plot_host, 'clear_drag_callback'):
+                self.plot_host.clear_drag_callback()
+            if hasattr(self.plot_host, 'clear_key_callback'):
+                self.plot_host.clear_key_callback()
+        # Clear matplotlib event connections
+        elif self._has_matplotlib_canvas():
+            for attr in ('_key_press_cid', '_motion_cid', '_release_cid'):
+                cid = getattr(self, attr, None)
+                if cid is not None:
+                    self.plot_host.canvas.mpl_disconnect(cid)
+                    setattr(self, attr, None)
+
     def turn_off_all_edit_modes(self):
         """Turn off all edit modes (add peaks, move point, mark sniff)."""
         # Turn off Add Peaks mode
@@ -424,17 +451,7 @@ class EditingModes:
             self._add_sigh_mode = False
 
         # Turn off Move Point mode
-        if getattr(self, "_move_point_mode", False):
-            self._move_point_mode = False
-            self._btn_move_point.blockSignals(True)
-            self._btn_move_point.setChecked(False)
-            self._btn_move_point.blockSignals(False)
-            self._btn_move_point.setText("Move Point")
-            # Clean up any selected point visualization
-            if self._move_point_artist:
-                self._move_point_artist.remove()
-                self._move_point_artist = None
-            self._selected_point = None
+        self._deactivate_move_point()
 
         # Turn off Mark Sniff mode
         if getattr(self, "_mark_sniff_mode", False):
@@ -514,13 +531,8 @@ class EditingModes:
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
 
-            # turn OFF move point mode
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            # turn OFF move point mode (must also clear drag/key callbacks)
+            self._deactivate_move_point()
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -546,7 +558,7 @@ class EditingModes:
                     '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
                     'Breath <span style="color:#F44336">●</span>'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>RIGHT CLICK:</b> '
+                    '<b>SHIFT+CLICK:</b> '
                     '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
                     'Sigh <span style="color:#FFD700">★</span>')
             self._show_instructions(html)
@@ -785,12 +797,7 @@ class EditingModes:
                 self._add_sigh_mode = False
 
             # turn OFF move point mode
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -980,12 +987,7 @@ class EditingModes:
                 self._delete_peaks_mode = False
 
             # turn OFF move point mode
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -1722,12 +1724,7 @@ class EditingModes:
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
 
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
@@ -2112,12 +2109,7 @@ class EditingModes:
         if getattr(self, "_add_sigh_mode", False):
             self._add_sigh_mode = False
 
-        if getattr(self, "_move_point_mode", False):
-            self._move_point_mode = False
-            self._btn_move_point.blockSignals(True)
-            self._btn_move_point.setChecked(False)
-            self._btn_move_point.blockSignals(False)
-            self._btn_move_point.setText("Move Point")
+        self._deactivate_move_point()
 
         if getattr(self, "_mark_sniff_mode", False):
             self._mark_sniff_mode = False
@@ -2921,12 +2913,7 @@ class EditingModes:
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
 
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False

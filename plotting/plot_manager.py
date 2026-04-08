@@ -921,6 +921,10 @@ class PlotManager:
             except:
                 pass
 
+        # Ensure Y range includes sigh markers (they have a 7% offset above peaks)
+        if plots and ax_main is not None and primary_y_data is not None:
+            self._ensure_sigh_markers_visible(plots[0], s, primary_y_data)
+
         # Disable auto-range after view is set to prevent jumpiness during edits
         # Only disable if we successfully restored a view OR if force_autorange completed
         if plots and (view_was_restored or force_autorange):
@@ -1085,6 +1089,30 @@ class PlotManager:
         add_markers(breath.get('expmins'), (31, 120, 180), 's')
         # Exp offs (purple diamonds)
         add_markers(breath.get('expoffs'), (155, 89, 182), 'd')
+
+    def _ensure_sigh_markers_visible(self, plot, sweep_idx, y_data):
+        """Extend Y range if sigh markers would be clipped above the view."""
+        st = self.state
+        sigh_idx = getattr(st, "sigh_by_sweep", {}).get(sweep_idx, None)
+        if sigh_idx is None or len(sigh_idx) == 0:
+            return
+
+        valid_idx = [i for i in sigh_idx if i < len(y_data)]
+        if not valid_idx:
+            return
+
+        # Calculate where sigh stars actually sit (same offset as _draw_sigh_markers_pyqtgraph)
+        offset_frac = float(getattr(self.window, "_sigh_offset_frac", 0.07))
+        y_span = float(np.nanmax(y_data) - np.nanmin(y_data))
+        y_off = offset_frac * (y_span if np.isfinite(y_span) and y_span > 0 else 1.0)
+        sigh_y_max = float(np.max(y_data[valid_idx])) + y_off
+
+        # Check if current Y range clips the sigh markers
+        y_range = plot.viewRange()[1]
+        if sigh_y_max > y_range[1]:
+            # Extend upper Y limit with a small margin above the sigh star
+            margin = 0.03 * (y_range[1] - y_range[0])
+            plot.setYRange(y_range[0], sigh_y_max + margin, padding=0)
 
     def _draw_sigh_markers_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw sigh markers (gold stars) on PyQtGraph plot."""

@@ -222,6 +222,11 @@ class PyQtGraphPlotHost(QWidget):
         # Flag to force auto-range on next draw (set by clear_saved_view)
         self._force_autorange = False
 
+        # X-axis double-click toggle state: full data range and last zoomed view
+        self._x_data_range = None   # (t_min, t_max) — set by update_nav_bars
+        self._x_prev_view = None    # (x_min, x_max) — saved before zoom-to-full
+        self._x_dblclick_guard = False  # Prevent clearing prev view during dblclick zoom
+
         # Connect mouse click
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
 
@@ -1504,9 +1509,65 @@ class PyQtGraphPlotHost(QWidget):
                         _vb.setYRange(new_min, new_max, padding=0)
                     ev.accept()
 
+        def y_axis_wheel(ev, _vb=vb):
+            """Scroll wheel on Y-axis zooms Y scale."""
+            delta = ev.delta()
+            if delta == 0:
+                ev.accept()
+                return
+            factor = 0.8 if delta > 0 else 1.25  # scroll up = zoom in
+            y_min, y_max = _vb.viewRange()[1]
+            y_center = (y_min + y_max) / 2.0
+            y_span = y_max - y_min
+            new_span = y_span * factor
+            _vb.setYRange(y_center - new_span / 2, y_center + new_span / 2, padding=0)
+            ev.accept()
+
+        def x_axis_dblclick(ev, _self=self):
+            """Double-click on X-axis toggles between full view and previous zoom."""
+            if _self._x_data_range is None:
+                ev.accept()
+                return
+
+            t_min, t_max = _self._x_data_range
+            current_range = _self._subplots[0].viewRange()[0]
+            current_span = current_range[1] - current_range[0]
+            full_span = t_max - t_min
+
+            # Check if we're already at full view (~within 5% tolerance)
+            at_full = current_span >= full_span * 0.95
+
+            if at_full and _self._x_prev_view is not None:
+                # Restore previous zoomed view
+                x_min, x_max = _self._x_prev_view
+                _self._x_prev_view = None
+            else:
+                # Save current view and zoom to full
+                if not at_full:
+                    _self._x_prev_view = (current_range[0], current_range[1])
+                x_min, x_max = t_min, t_max
+
+            # Apply to all panels (they're x-linked, but set on primary to be safe)
+            _self._x_dblclick_guard = True
+            _self._subplots[0].setXRange(x_min, x_max, padding=0.02)
+            _self._x_dblclick_guard = False
+            ev.accept()
+
+        def y_axis_dblclick(ev, _plot=plot):
+            """Double-click on Y-axis triggers Y autoscale (preserves X range)."""
+            x_range = _plot.viewRange()[0]
+            _plot.enableAutoRange(axis='y')
+            _plot.autoRange()
+            _plot.disableAutoRange(axis='y')
+            _plot.setXRange(x_range[0], x_range[1], padding=0)
+            ev.accept()
+
         # Set custom drag handlers
         x_axis.mouseDragEvent = x_axis_drag
         y_axis.mouseDragEvent = y_axis_drag
+        y_axis.wheelEvent = y_axis_wheel
+        x_axis.mouseDoubleClickEvent = x_axis_dblclick
+        y_axis.mouseDoubleClickEvent = y_axis_dblclick
 
         # Set initial cursors to indicate draggability
         x_axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeHorCursor))
@@ -1930,6 +1991,9 @@ class PyQtGraphPlotHost(QWidget):
         """Called when the primary plot's X range changes — syncs to active nav bar."""
         if self._nav_sync_guard:
             return
+        # Clear saved zoom view if user manually changed X range (not from dblclick)
+        if not self._x_dblclick_guard:
+            self._x_prev_view = None
         x_min, x_max = ranges[0], ranges[1]
         self._nav_sync_guard = True
         try:
@@ -1964,6 +2028,7 @@ class PyQtGraphPlotHost(QWidget):
             minimap_channels: List of (y_array, color_hex) for multi-channel minimap
             markers: List of dicts {start_time, end_time, color} for event markers
         """
+        self._x_data_range = (t_min, t_max)
         self._scrollbar_nav.set_data_range(t_min, t_max)
         self._minimap_nav.set_data_range(t_min, t_max)
         if minimap_channels and t_array is not None:
