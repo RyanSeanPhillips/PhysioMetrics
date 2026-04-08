@@ -361,6 +361,12 @@ class MainWindow(QMainWindow):
         ctrl_d_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         ctrl_d_shortcut.activated.connect(lambda: self.plot_manager.toggle_auto_downsample())
 
+        # Ctrl+Shift+L: Open log viewer dialog (debugging)
+        log_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        log_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        log_shortcut.activated.connect(self._open_log_viewer)
+        self._log_viewer_dialog = None
+
         # --- Wire channel selection (immediate application) ---
         self.AnalyzeChanSelect.currentIndexChanged.connect(self.on_analyze_channel_changed)
         self.StimChanSelect.currentIndexChanged.connect(self.on_stim_channel_changed)
@@ -3215,6 +3221,20 @@ class MainWindow(QMainWindow):
         self.plot_host.clear_saved_view("single" if self.single_panel_mode else "grid")
         self._refresh_omit_button_label()
         self.redraw_main_plot()
+
+    def _open_log_viewer(self):
+        """Open the log viewer dialog (Ctrl+Shift+L)."""
+        if self._log_viewer_dialog is not None:
+            try:
+                if self._log_viewer_dialog.isVisible():
+                    self._log_viewer_dialog.raise_()
+                    self._log_viewer_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                pass
+        from dialogs.log_viewer_dialog import LogViewerDialog
+        self._log_viewer_dialog = LogViewerDialog(self)
+        self._log_viewer_dialog.show()
 
     def _on_hot_reload(self):
         """Hot reload development modules (Ctrl+R).
