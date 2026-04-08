@@ -73,7 +73,8 @@ from core.channel_manager import ChannelManagerWidget
 from core.project_builder_manager import ProjectBuilderManager
 from core.scan_manager import ScanManager
 from core.recovery_manager import RecoveryManager
-from core.classifier_manager import ClassifierManager
+from core.classifier_manager import ClassifierManager  # legacy — kept for tests
+from viewmodels.classifier_viewmodel import ClassifierViewModel
 from viewmodels.gmm_viewmodel import GMMViewModel
 # Import new event marker system
 from viewmodels.event_marker_viewmodel import EventMarkerViewModel
@@ -384,8 +385,15 @@ class MainWindow(QMainWindow):
         self.digh_combo.clear()
         self.digh_combo.addItems(["None (Clear)", "Manual", "XGBoost", "Random Forest", "MLP"])
 
-        # === Initialize Classifier Manager (early - needed for auto-load) ===
-        self._classifier_manager = ClassifierManager(self)
+        # === Initialize Classifier ViewModel ===
+        self._classifier_vm = ClassifierViewModel(parent=self)
+        self._classifier_vm.set_state_provider(lambda: self.state)
+        self._classifier_vm.set_get_processed_fn(self._get_processed_for)
+        self._classifier_vm.status_message.connect(self._log_status_message)
+        self._classifier_vm.predictions_changed.connect(self.redraw_main_plot)
+        self._classifier_vm.classifier_fallback.connect(self._handle_classifier_fallback)
+        self._classifier_vm.gmm_requested.connect(self._run_automatic_gmm_clustering)
+        self._classifier_vm.dropdown_availability_changed.connect(self._update_dropdown_availability)
 
         # === Initialize GMM ViewModel (providers wired after state is available) ===
         self._gmm_vm.set_state_provider(lambda: self.state)
@@ -394,9 +402,9 @@ class MainWindow(QMainWindow):
         self._gmm_vm.status_message.connect(self._log_status_message)
 
         # Connect classifier signals and set safe defaults (no ML models needed)
-        self.peak_detec_combo.currentTextChanged.connect(self._classifier_manager.on_classifier_changed)
-        self.eup_sniff_combo.currentTextChanged.connect(self._classifier_manager.on_eupnea_sniff_classifier_changed)
-        self.digh_combo.currentTextChanged.connect(self._classifier_manager.on_sigh_classifier_changed)
+        self.peak_detec_combo.currentTextChanged.connect(self._classifier_vm.on_classifier_changed)
+        self.eup_sniff_combo.currentTextChanged.connect(self._classifier_vm.on_eupnea_sniff_classifier_changed)
+        self.digh_combo.currentTextChanged.connect(self._classifier_vm.on_sigh_classifier_changed)
         self.peak_detec_combo.setCurrentText("Threshold")
         self.eup_sniff_combo.setCurrentText("GMM")
         self.digh_combo.setCurrentText("Manual")
@@ -404,8 +412,8 @@ class MainWindow(QMainWindow):
         # Defer ML model loading — runs after window is visible, then updates dropdowns
         def _deferred_ml_load():
             _startup.info("ML model loading (deferred)...")
-            self._classifier_manager.auto_load_ml_models_on_startup()
-            self._classifier_manager.update_classifier_dropdowns()
+            last_models_dir = self.settings.value("ml_models_path", None)
+            self._classifier_vm.auto_load_ml_models(last_models_dir)
             _startup.info("ML model loading done")
             # Switch to ML defaults if models were loaded successfully
             if getattr(self.state, 'loaded_ml_models', None):
@@ -5327,12 +5335,13 @@ class MainWindow(QMainWindow):
             self.redraw_main_plot()
 
     def _update_classifier_dropdowns(self):
-        """Update dropdown options based on loaded models. Delegates to ClassifierManager."""
-        self._classifier_manager.update_classifier_dropdowns()
+        """Update dropdown options based on loaded models. Delegates to ClassifierViewModel."""
+        self._classifier_vm._emit_dropdown_availability()
 
     def _fallback_disabled_classifiers(self):
-        """Check if current classifier selections are disabled. Delegates to ClassifierManager."""
-        self._classifier_manager.fallback_disabled_classifiers()
+        """Check if current classifier selections are disabled."""
+        # Now handled by dropdown_availability_changed signal + _update_dropdown_availability
+        self._classifier_vm._emit_dropdown_availability()
 
     def _auto_rerun_peak_detection_if_needed(self):
         """
@@ -5365,44 +5374,84 @@ class MainWindow(QMainWindow):
         self._apply_peak_detection()
 
     def _auto_load_ml_models_on_startup(self):
-        """Silently load ML models on startup. Delegates to ClassifierManager."""
-        self._classifier_manager.auto_load_ml_models_on_startup()
+        """Silently load ML models on startup. Delegates to ClassifierViewModel."""
+        last_models_dir = self.settings.value("ml_models_path", None)
+        self._classifier_vm.auto_load_ml_models(last_models_dir)
 
     def on_classifier_changed(self, text: str):
-        """Handle classifier selection change. Delegates to ClassifierManager."""
-        self._classifier_manager.on_classifier_changed(text)
+        """Handle classifier selection change. Delegates to ClassifierViewModel."""
+        self._classifier_vm.on_classifier_changed(text)
 
     def _update_displayed_peaks_from_classifier(self):
-        """Update peaks_by_sweep based on active classifier. Delegates to ClassifierManager."""
-        self._classifier_manager.update_displayed_peaks_from_classifier()
+        """Update peaks_by_sweep based on active classifier. Delegates to ClassifierViewModel."""
+        self._classifier_vm.update_displayed_peaks_from_classifier()
 
     def on_eupnea_sniff_classifier_changed(self, text: str):
-        """Handle eupnea/sniff classifier selection. Delegates to ClassifierManager."""
-        self._classifier_manager.on_eupnea_sniff_classifier_changed(text)
+        """Handle eupnea/sniff classifier selection. Delegates to ClassifierViewModel."""
+        self._classifier_vm.on_eupnea_sniff_classifier_changed(text)
 
     def _update_eupnea_sniff_from_classifier(self):
-        """Copy eupnea/sniff predictions to breath_type_class. Delegates to ClassifierManager."""
-        self._classifier_manager.update_eupnea_sniff_from_classifier()
+        """Copy eupnea/sniff predictions to breath_type_class. Delegates to ClassifierViewModel."""
+        self._classifier_vm.update_eupnea_sniff_from_classifier()
 
     def _set_all_breaths_eupnea_sniff_class(self, class_value: int):
-        """Set all breaths to a specific eupnea/sniff class. Delegates to ClassifierManager."""
-        self._classifier_manager.set_all_breaths_eupnea_sniff_class(class_value)
+        """Set all breaths to a specific eupnea/sniff class. Delegates to ClassifierViewModel."""
+        self._classifier_vm.set_all_breaths_eupnea_sniff_class(class_value)
 
     def _clear_all_eupnea_sniff_labels(self):
-        """Clear all eupnea/sniff labels. Delegates to ClassifierManager."""
-        self._classifier_manager.clear_all_eupnea_sniff_labels()
+        """Clear all eupnea/sniff labels. Delegates to ClassifierViewModel."""
+        self._classifier_vm.clear_all_eupnea_sniff_labels()
 
     def _clear_all_sigh_labels(self):
-        """Clear all sigh labels. Delegates to ClassifierManager."""
-        self._classifier_manager.clear_all_sigh_labels()
+        """Clear all sigh labels. Delegates to ClassifierViewModel."""
+        self._classifier_vm.clear_all_sigh_labels()
 
     def on_sigh_classifier_changed(self, text: str):
-        """Handle sigh classifier selection. Delegates to ClassifierManager."""
-        self._classifier_manager.on_sigh_classifier_changed(text)
+        """Handle sigh classifier selection. Delegates to ClassifierViewModel."""
+        self._classifier_vm.on_sigh_classifier_changed(text)
 
     def _update_sigh_from_classifier(self):
-        """Copy sigh predictions to sigh_class. Delegates to ClassifierManager."""
-        self._classifier_manager.update_sigh_from_classifier()
+        """Copy sigh predictions to sigh_class. Delegates to ClassifierViewModel."""
+        self._classifier_vm.update_sigh_from_classifier()
+
+    def _handle_classifier_fallback(self, tier: str, default_text: str):
+        """View-layer: reset combo box when classifier falls back to default."""
+        combo_map = {
+            'model1': self.peak_detec_combo,
+            'model3': self.eup_sniff_combo,
+            'model2': self.digh_combo,
+        }
+        combo = combo_map.get(tier)
+        if combo:
+            combo.blockSignals(True)
+            combo.setCurrentText(default_text)
+            combo.blockSignals(False)
+
+    def _update_dropdown_availability(self, avail: dict):
+        """View-layer: enable/disable dropdown items based on loaded models."""
+        # Model 1 (Breath Detection)
+        if 'model1' in avail:
+            model = self.peak_detec_combo.model()
+            items = ['threshold', 'xgboost', 'rf', 'mlp']
+            for i, algo in enumerate(items):
+                if i < model.rowCount():
+                    model.item(i).setEnabled(avail['model1'].get(algo, False))
+
+        # Model 3 (Eupnea/Sniff)
+        if 'model3' in avail:
+            model = self.eup_sniff_combo.model()
+            items = ['none', 'all_eupnea', 'gmm', 'xgboost', 'rf', 'mlp']
+            for i, algo in enumerate(items):
+                if i < model.rowCount():
+                    model.item(i).setEnabled(avail['model3'].get(algo, False))
+
+        # Model 2 (Sigh)
+        if 'model2' in avail:
+            model = self.digh_combo.model()
+            items = ['manual', 'xgboost', 'rf', 'mlp']
+            for i, algo in enumerate(items):
+                if i < model.rowCount():
+                    model.item(i).setEnabled(avail['model2'].get(algo, False))
 
     def on_mark_events_clicked(self):
         """Open Event Detection Settings dialog."""
@@ -5852,6 +5901,8 @@ class MainWindow(QMainWindow):
 
     def redraw_main_plot(self):
         """Delegate to PlotManager."""
+        if not hasattr(self, 'plot_manager'):
+            return
         # Lazy EKG detection: ensure current sweep has R-peaks
         self._ensure_ekg_current_sweep()
         self.plot_manager.redraw_main_plot()
@@ -6429,8 +6480,8 @@ class MainWindow(QMainWindow):
             metrics.set_threshold_model_params(None)
 
     def _precompute_remaining_classifiers_async(self):
-        """Pre-compute ML classifiers in background. Delegates to ClassifierManager."""
-        self._classifier_manager.precompute_remaining_classifiers_async()
+        """Pre-compute ML classifiers in background. Delegates to ClassifierViewModel."""
+        self._classifier_vm.precompute_remaining_classifiers()
 
     def _detect_single_sweep_core(self, sweep_idx: int, y_proc: np.ndarray,
                                    thresh: float, min_dist_samples: int,

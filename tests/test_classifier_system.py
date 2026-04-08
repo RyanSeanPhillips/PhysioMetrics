@@ -356,7 +356,7 @@ class TestClassifierSwitchThresholdToXGBoost:
         threshold_peaks = sum(len(p) for p in st.peaks_by_sweep.values())
 
         # Switch to XGBoost
-        main_window._classifier_manager.on_classifier_changed("XGBoost")
+        main_window.on_classifier_changed("XGBoost")
         QApplication.processEvents()
 
         xgboost_peaks = sum(len(p) for p in st.peaks_by_sweep.values())
@@ -368,7 +368,7 @@ class TestClassifierSwitchThresholdToXGBoost:
         print(f"  Threshold: {threshold_peaks} peaks → XGBoost: {xgboost_peaks} peaks")
 
         # Switch back to threshold
-        main_window._classifier_manager.on_classifier_changed("Threshold")
+        main_window.on_classifier_changed("Threshold")
         QApplication.processEvents()
 
         restored_peaks = sum(len(p) for p in st.peaks_by_sweep.values())
@@ -399,7 +399,7 @@ class TestClassifierFallbackNoModels:
             return
 
         # MLP not loaded — switching to it should fallback
-        main_window._classifier_manager.on_classifier_changed("MLP")
+        main_window.on_classifier_changed("MLP")
         QApplication.processEvents()
 
         # Should have fallen back to threshold (or at least not crashed)
@@ -431,7 +431,7 @@ class TestEupneaSniffSwitchGMMToXGBoost:
         old_classifier = st.active_eupnea_sniff_classifier
 
         # Switch to XGBoost
-        main_window._classifier_manager.on_eupnea_sniff_classifier_changed("XGBoost")
+        main_window.on_eupnea_sniff_classifier_changed("XGBoost")
         QApplication.processEvents()
 
         assert st.active_eupnea_sniff_classifier == 'xgboost'
@@ -444,7 +444,7 @@ class TestEupneaSniffSwitchGMMToXGBoost:
         print(f"  Switched to xgboost: eupnea={np.sum(btc == 0)}, sniff={np.sum(btc == 1)}")
 
         # Restore
-        main_window._classifier_manager.on_eupnea_sniff_classifier_changed(
+        main_window.on_eupnea_sniff_classifier_changed(
             {"gmm": "GMM", "all_eupnea": "All Eupnea"}.get(old_classifier, "GMM")
         )
         QApplication.processEvents()
@@ -466,7 +466,7 @@ class TestSighSwitchManualToXGBoost:
             pytest.skip("No peaks detected")
 
         # Switch to XGBoost sigh detection
-        main_window._classifier_manager.on_sigh_classifier_changed("XGBoost")
+        main_window.on_sigh_classifier_changed("XGBoost")
         QApplication.processEvents()
 
         assert st.active_sigh_classifier == 'xgboost'
@@ -479,7 +479,7 @@ class TestSighSwitchManualToXGBoost:
         print(f"  XGBoost sigh: {n_sighs} sighs detected in sweep 0")
 
         # Restore
-        main_window._classifier_manager.on_sigh_classifier_changed("Manual")
+        main_window.on_sigh_classifier_changed("Manual")
         QApplication.processEvents()
 
 
