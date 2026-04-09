@@ -90,46 +90,51 @@ See `_internal/docs/CORE/DEVELOPMENT_WORKFLOW.md` for full documentation.
 
 ## Current Development Priorities
 
-1. **MVVM Refactoring + Batch Analysis** (Active)
-   - Decomposing monolithic `main.py` into MVVM architecture (services, viewmodels, domain models)
-   - Projects tab rework (Phases 1-2 complete: file tree, filtering, batch dry run)
-   - Batch analysis review workflow with parallel execution and per-row progress
-   - **Refactor plan**: `.claude/plans/refactor-plan-v2.md` (6 steps)
-     - Step 1 (Startup logging): DONE
-     - Step 2 (UI Cleanup Phase 1 — controls to right-click menu): DONE
-     - Step 3 (UI Cleanup Phase 2 — minimap nav, compact editing): DONE
-     - Step 4A (GMMManager → GMMService + GMMViewModel): DONE
-     - Step 4B (ClassifierManager → ClassifierService + ClassifierViewModel): DONE
-     - Step 4E (ExportManager → ExportService, refs 126→15): PARTIALLY DONE
-     - Step 4C (ScanManager, 95 self.mw refs): TODO
-     - Step 4D (RecoveryManager, 37 self.mw refs): TODO
-     - Step 4F (ProjectBuilderManager, 168 self.mw refs): TODO
-     - Step 4G (Remaining MainWindow methods): TODO
-     - Step 5 (HDF5 Migration): TODO
-     - Step 6 (SessionManager): TODO
+1. **Layered Architecture Refactor** (Active — replaces old MVVM step-by-step plan)
+   - Goal: 4 clean layers acting as APIs — I/O → Analysis → Orchestration → UI
+   - Each layer only calls down. Only Layer 4 (UI) imports PyQt6.
+   - Detailed plan: `_internal/docs/PLANNING/LAYERED_ARCHITECTURE_PLAN.md`
+   - **Current state** (as of 2026-04-08):
+     - `main.py` is 11,067 lines / 340 methods — 87% business logic, 13% UI shell
+     - `AppState` is a 146-field god object — biggest architectural bottleneck
+     - Layer 2 (per-modality analysis services) is ~80% done — 7 headless services exist
+     - Layer 3 (orchestration) has clean services but legacy managers block access
+     - 11 ViewModels working, event marker system is reference MVVM implementation
+   - **Completed work**: startup logging, UI cleanup (Steps 2-3), GMM/Classifier/ExportManager extraction
+   - **Next phases**:
+     - Phase 0: Delete ~4,000 lines confirmed dead code (recovery_manager, ai_client, project_store_sqlite, project_manager)
+     - Phase A: Define `Recording` + `AnalysisSession` types (split AppState)
+     - Phase B: Wire HDF5 load + SessionManager
+     - Phase C: Per-modality API contracts + pleth gear icon
+     - Phase D: Dissolve legacy managers into services + ViewModels
+     - Phase E: Thin MainWindow to ~2,000 lines
+   - **Key reframes**: Stop counting self.mw refs → ask "can this run headlessly?" Stop extracting managers → go straight to service + viewmodel. Managers are dead weight to dissolve, not targets to improve.
    - Track changes in `_internal/docs/UNRELEASED_CHANGES.md`
 
-2. **Photometry Integration** (Mostly Implemented)
+2. **Dead Code to Delete** (Phase 0 — do first on new branch)
+   - `core/recovery_manager.py` (1,058 lines) — JSON recovery, never called
+   - `core/ai_client.py` (~870 lines) — Ollama chatbot, only caller was RecoveryManager
+   - `core/adapters/project_store_sqlite.py` (~1,000 lines) — v1 schema, zero imports
+   - `core/project_manager.py` (~500 lines) — old JSON save/load, needs recent-projects migration
+   - Autosave no-op stubs in ProjectBuilderManager (~6 call sites)
+
+3. **Photometry Integration** (Mostly Implemented)
    - Multi-channel fiber photometry import, processing, and visualization
    - Primary dialog: `dialogs/photometry_import_dialog_v3.py` + `dialogs/photometry/` submodule
-   - See: `_internal/docs/PLANNING/PHOTOMETRY_*.md`
 
-3. **Next Release** (v1.0.15)
-   - After batch analysis workflow is stable
+4. **Next Release** (v1.0.15)
+   - After dead code cleanup + architecture Phase A are stable
    - Track changes in `_internal/docs/UNRELEASED_CHANGES.md`
 
-4. **Claude Code Lab Assistant — MCP Integration** (Future)
-   - Replace current chatbot with Claude Code terminal (popup or embedded)
+5. **Claude Code Lab Assistant — MCP Integration** (Future)
    - MCP server bridges Claude Code ↔ running app (load files, inspect channels, trigger processing)
-   - Two-phase workflow: (1) Interactive data organization with user, (2) Autonomous batch processing with flagging
    - Claude uses built-in tools for file discovery/notes reading; MCP tools for app control
-   - See: `_internal/docs/PLANNING/CLAUDE_CODE_NOTEBOOK_INTEGRATION_PLAN.md`
 
 ## Project Structure
 
 ```
 physiometrics/
-├── main.py                    # Main application (~10K lines)
+├── main.py                    # Main application (~11K lines, target ~2K)
 ├── core/                      # Signal processing, state, ML, I/O
 │   ├── state.py              # AppState dataclass
 │   ├── peaks.py              # Peak detection algorithms
@@ -272,13 +277,17 @@ views/events/marker_renderer.py        ← Rendering logic
 views/events/context_menu.py           ← Context menu handling
 ```
 
-### Legacy Architecture (Being Migrated)
+### Legacy Architecture (Being Dissolved)
 
-- **`main.py`** (~9K lines) — monolithic MainWindow, being gradually decomposed
-- **`core/state.py`** — `AppState` god-object with 100+ fields. `plotting_backend` now defaults to `'pyqtgraph'` (matplotlib backend is disabled). New features should extract relevant state into smaller dataclasses (e.g., `FilterState`, `NavigationState`)
-- **Extracted managers** (`core/*_manager.py`) — use `self.mw` pattern. When touching these, prefer decoupling toward MVVM over adding more `self.mw` references
-- **Already extracted**: GMMService, ClassifierService, StimService, AnalysisService, NavigationService + ViewModels. EditingModes decoupled via dependency injection (callbacks, no self.mw)
-- **Remaining**: ScanManager (95 refs), RecoveryManager (37 refs), ExportManager (15 refs remaining), ProjectBuilderManager (168 refs)
+- **`main.py`** (~11K lines, 340 methods) — 87% business logic, 13% UI shell. Target: ~2K lines.
+- **`core/state.py`** — `AppState` god-object with 146+ fields mixing raw data, analysis results, UI state, caches. Next step: split into `Recording` + per-modality `Result` types + `UIState`. `plotting_backend` defaults to `'pyqtgraph'` (matplotlib disabled).
+- **Dead code to delete**: `recovery_manager.py` (never called), `ai_client.py` (only caller is recovery_manager), `project_manager.py` (old JSON save/load), `project_store_sqlite.py` (v1 schema, zero imports)
+- **Managers to dissolve** (don't add more self.mw refs — dissolve into services + viewmodels):
+  - ScanManager (701 lines) — file discovery, metadata loading
+  - ExportManager (6,733 lines) — has a 2,036-line method that needs decomposition
+  - ProjectBuilderManager (1,959 lines) — most UI-entangled (168 self.mw refs, reads/writes 15+ widgets)
+  - ConsolidationManager (2,407 lines) — real logic, just needs service boundary
+- **Already extracted to services**: GMMService, ClassifierService, StimService, AnalysisService, ECGService, NavigationService, EventMarkerService, CTAService + ViewModels. EditingModes decoupled via dependency injection.
 - **Dual peak arrays**: `all_peaks_by_sweep` (master) + `peaks_by_sweep` (filtered)
 - **ML pipeline**: Model 1 (breath vs noise) → Model 2 (breath type)
 - **Editing undo**: `EditingModes._undo_stack` — Ctrl+Z for peak edits, sigh, omit, merge, move point
