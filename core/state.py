@@ -60,8 +60,8 @@ class AppState:
     apnea_use_shade: bool = False           # Apnea display: True = background shade, False = line at bottom
     outliers_use_shade: bool = False        # Outliers display: True = background shade, False = line
 
-    # Plotting backend: 'matplotlib' (default, feature-complete) or 'pyqtgraph' (faster, experimental)
-    plotting_backend: str = 'matplotlib'
+    # Plotting backend: 'pyqtgraph' is now the only supported backend
+    plotting_backend: str = 'pyqtgraph'
 
     # Peaks & edits
     peaks_by_sweep: Dict[int, np.ndarray] = field(default_factory=dict)

@@ -9,7 +9,10 @@ Both emit view_range_requested(x_min, x_max) for the plot host to consume.
 """
 
 import numpy as np
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QScrollBar, QSizePolicy
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollBar, QSizePolicy,
+    QPushButton, QLabel,
+)
 from PyQt6.QtGui import QColor
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QPropertyAnimation, QEasingCurve, pyqtProperty, QTimer
 
@@ -139,6 +142,7 @@ class MinimapNavigation(NavigationBarBase):
 
     COLLAPSED_HEIGHT = 6
     EXPANDED_HEIGHT = 36
+    NAV_BAR_HEIGHT = 34  # Height for the navigation bar below minimap
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -224,13 +228,144 @@ class MinimapNavigation(NavigationBarBase):
         self._traces = None  # List of PlotDataItem references
         self._marker_items = []  # Event marker visual items
 
+        # Saved view state for home button toggle
+        self._saved_view = None  # (x_min, x_max) before home was pressed
+        self._is_home = False    # True when showing full-sweep autoscale view
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
         layout.addWidget(self._plot)
 
+        # Toolbar below minimap:
+        # [edit icons] | ... [sweep] [Prev] [Home] [Next] [mode] ... | [save] [preview] [export] [...]
+        self._nav_bar = QWidget(self)
+        nav_layout = QHBoxLayout(self._nav_bar)
+        nav_layout.setContentsMargins(70, 0, 4, 0)  # Left margin matches axis width
+        nav_layout.setSpacing(5)
+
+        sz = 30  # Button size
+
+        nav_btn = (
+            f"QPushButton {{ background: rgba(30,30,30,200); color: #ccc; "
+            f"border: 1px solid #555; border-radius: 4px; padding: 2px 6px; font-size: 13px; }}"
+            f"QPushButton:hover {{ background: rgba(0,122,204,220); color: white; }}"
+        )
+        lbl_style = "color: #999; font-size: 11px; background: transparent;"
+        sep_style = "color: #444; background: transparent; font-size: 14px;"
+
+        def _edit_btn(text, tip, bg, fg="white", border=None, checkable=False):
+            b = QPushButton(text)
+            b.setFixedSize(sz, sz)
+            b._icon_text = text  # Preserve icon text from setText overrides
+            border_css = f"border: 1px solid {border}; " if border else ""
+            b.setStyleSheet(
+                f"QPushButton {{ background: {bg}; color: {fg}; {border_css}"
+                f"border-radius: 4px; font-size: 15px; font-weight: bold; }}"
+                f"QPushButton:hover {{ opacity: 0.8; }}"
+                f"QPushButton:checked {{ "
+                f"background: #00bcd4; color: #000; "
+                f"border: 2px solid #00e5ff; }}"
+            )
+            b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            if checkable:
+                b.setCheckable(True)
+            # Override setText to preserve icon — EditingModes calls setText("Merge (ON)")
+            _orig_setText = b.setText
+            def _guard_setText(txt, _orig=_orig_setText, _btn=b):
+                _orig(_btn._icon_text)  # Always keep the icon character
+            b.setText = _guard_setText
+            return b
+
+        def _sep():
+            s = QLabel("\u2502")
+            s.setStyleSheet(sep_style)
+            s.setFixedWidth(10)
+            s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            return s
+
+        # === Left: Editing buttons ===
+        self.btn_add_peaks = _edit_btn("\u00B1", "Add/Delete Peaks \u2014 click trace to add, near peak to delete", "#4CAF50")
+        self.btn_merge = _edit_btn("M", "Merge Breaths \u2014 click near peaks to merge", "#FFEBEE", fg="#C62828", border="#E53935")
+        self.btn_sniff = _edit_btn("S", "Mark Sniff \u2014 click and drag to highlight sniffing", "#9B59B6", border="#8E44AD", checkable=True)
+        self.btn_move = _edit_btn("\u21c6", "Move Point \u2014 click marker, arrows to move, Enter to save", "#FFA500", fg="#1F2937", border="#FF8C00")
+        self.btn_omit = _edit_btn("\u2298", "Omit Sweep \u2014 exclude from analysis", "#ECEFF4", fg="#1F2937", border="#C7D0DD")
+        self.btn_editor = _edit_btn("\u270e", "Advanced Peak Editor", "transparent", fg="#4A9EFF", border="#4A9EFF")
+
+        for btn in [self.btn_add_peaks, self.btn_merge, self.btn_sniff,
+                    self.btn_move, self.btn_omit, self.btn_editor]:
+            nav_layout.addWidget(btn)
+
+        nav_layout.addWidget(_sep())
+        nav_layout.addStretch(1)
+
+        # === Center: Navigation (sweep counter + prev/home/next + mode) ===
+        self._sweep_label = QLabel("")
+        self._sweep_label.setStyleSheet(lbl_style)
+        self._sweep_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sweep_label.setFixedHeight(sz)
+        nav_layout.addWidget(self._sweep_label)
+
+        nav_color_btn = (
+            f"QPushButton {{ background: rgba(44,62,80,220); color: #ddd; "
+            f"border: 1px solid #5a7a9a; border-radius: 4px; padding: 2px 6px; font-size: 13px; }}"
+            f"QPushButton:hover {{ background: rgba(52,152,219,220); color: white; border-color: #3498db; }}"
+        )
+        home_btn = (
+            f"QPushButton {{ background: rgba(44,62,80,220); color: #f0c040; "
+            f"border: 1px solid #5a7a9a; border-radius: 4px; padding: 2px 6px; font-size: 15px; }}"
+            f"QPushButton:hover {{ background: rgba(52,152,219,220); color: #ffe066; border-color: #3498db; }}"
+        )
+
+        self._btn_prev = QPushButton("\u25C0")
+        self._btn_prev.setFixedSize(sz, sz)
+        self._btn_prev.setStyleSheet(nav_color_btn)
+        self._btn_prev.setToolTip("Previous sweep/window")
+        self._btn_prev.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._btn_home = QPushButton("\U0001F3E0")
+        self._btn_home.setFixedSize(sz, sz)
+        self._btn_home.setStyleSheet(home_btn)
+        self._btn_home.setToolTip("Reset view (click again to restore previous zoom)")
+        self._btn_home.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_home.clicked.connect(self._on_home_clicked)
+
+        self._btn_next = QPushButton("\u25B6")
+        self._btn_next.setFixedSize(sz, sz)
+        self._btn_next.setStyleSheet(nav_color_btn)
+        self._btn_next.setToolTip("Next sweep/window")
+        self._btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        nav_layout.addWidget(self._btn_prev)
+        nav_layout.addWidget(self._btn_home)
+        nav_layout.addWidget(self._btn_next)
+
+        self._btn_mode = QPushButton("Sweep")
+        self._btn_mode.setFixedHeight(sz)
+        self._btn_mode.setStyleSheet(nav_color_btn)
+        self._btn_mode.setToolTip("Toggle Sweep/Window mode")
+        self._btn_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        nav_layout.addWidget(self._btn_mode)
+
+        nav_layout.addStretch(1)
+
+        # Balance spacer — same width as left editing section so nav stays centered
+        _right_balance = QWidget()
+        _right_balance.setFixedWidth(6 * (sz + 5) + 10)
+        _right_balance.setStyleSheet("background: transparent;")
+        nav_layout.addWidget(_right_balance)
+
+        # Signals for external wiring
+        self.navigate_prev = self._btn_prev.clicked
+        self.navigate_next = self._btn_next.clicked
+        self.toggle_mode = self._btn_mode.clicked
+
+        layout.addWidget(self._nav_bar)
+
         # Start expanded (always visible)
-        self._apply_height(self.EXPANDED_HEIGHT)
+        self._apply_height(self.EXPANDED_HEIGHT + self.NAV_BAR_HEIGHT)
         self._set_expanded_visuals(True)
 
         self._region.sigRegionChanged.connect(self._on_region_changed)
@@ -258,8 +393,10 @@ class MinimapNavigation(NavigationBarBase):
     animHeight = pyqtProperty(int, _get_anim_height, _set_anim_height)
 
     def _apply_height(self, h):
-        self._plot.setFixedHeight(h)
+        plot_h = max(self.COLLAPSED_HEIGHT, h - self.NAV_BAR_HEIGHT)
+        self._plot.setFixedHeight(plot_h)
         self.setFixedHeight(h)
+        self._nav_bar.setVisible(h > self.COLLAPSED_HEIGHT + 5)
 
     def _set_expanded_visuals(self, expanded):
         """Toggle trace/marker visibility for expanded vs collapsed state."""
@@ -288,10 +425,11 @@ class MinimapNavigation(NavigationBarBase):
 
     def _do_expand(self):
         self._leave_timer.stop()
-        if self._expanded and self.height() == self.EXPANDED_HEIGHT:
+        target = self.EXPANDED_HEIGHT + self.NAV_BAR_HEIGHT
+        if self._expanded and self.height() == target:
             return
         self._set_expanded_visuals(True)
-        self._animate_to(self.EXPANDED_HEIGHT)
+        self._animate_to(target)
 
     def _do_collapse(self):
         if not self._expanded:
@@ -359,6 +497,59 @@ class MinimapNavigation(NavigationBarBase):
 
     def _hide_duration_label(self):
         self._duration_label.setVisible(False)
+
+    def set_sweep_info(self, current: int, total: int):
+        """Update the sweep counter label (1-indexed for display)."""
+        if total <= 1:
+            self._sweep_label.setText("")
+        else:
+            self._sweep_label.setText(f"{current + 1}/{total}")
+
+    def set_mode_label(self, mode: str):
+        """Update the mode toggle button text."""
+        self._btn_mode.setText("Sweep" if mode == "sweep" else "Window")
+
+    def _on_home_clicked(self):
+        """Home button: toggle between full-view autoscale and saved zoom.
+
+        First click: save current view, zoom out to show full data range.
+        Second click: restore saved view.
+        If user scrolls/zooms after going home, the saved view is forgotten.
+        """
+        if self._is_home and self._saved_view is not None:
+            # Restore previous zoom
+            x_min, x_max = self._saved_view
+            self._saved_view = None
+            self._is_home = False
+            self._guard = True
+            try:
+                self._region.setRegion([x_min, x_max])
+                self.view_range_requested.emit(float(x_min), float(x_max))
+            finally:
+                self._guard = False
+        else:
+            # Save current view, go to full range
+            current = self._region.getRegion()
+            data_span = self._data_max - self._data_min
+            current_span = current[1] - current[0]
+            # Only save if we're actually zoomed in (not already at full range)
+            if data_span > 0 and current_span < data_span * 0.95:
+                self._saved_view = (current[0], current[1])
+            else:
+                self._saved_view = None
+            self._is_home = True
+            self._guard = True
+            try:
+                self._region.setRegion([self._data_min, self._data_max])
+                self.view_range_requested.emit(float(self._data_min), float(self._data_max))
+            finally:
+                self._guard = False
+
+    def _invalidate_saved_view(self):
+        """Called when user manually scrolls/zooms while in home view."""
+        if self._is_home:
+            self._saved_view = None
+            self._is_home = False
 
     def set_data_range(self, t_min: float, t_max: float):
         super().set_data_range(t_min, t_max)
@@ -517,6 +708,7 @@ class MinimapNavigation(NavigationBarBase):
 
     def wheelEvent(self, event):
         """Scroll wheel zooms the viewport in/out on the minimap."""
+        self._invalidate_saved_view()
         delta = event.angleDelta().y()
         if delta == 0:
             return
@@ -598,6 +790,8 @@ class MinimapNavigation(NavigationBarBase):
     def _on_region_changed(self):
         if self._guard:
             return
+        # User manually dragged the region — forget saved home view
+        self._invalidate_saved_view()
         x_min, x_max = self._region.getRegion()
         self._guard = True
         try:

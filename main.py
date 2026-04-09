@@ -468,8 +468,9 @@ class MainWindow(QMainWindow):
         # GMM Clustering button - REMOVED (moved to Analysis Options dialog)
         # self.GMMClusteringButton.clicked.connect(self.on_gmm_clustering_clicked)
 
-        # Peak Navigator/Editor button
-        self.editor_pushButton.clicked.connect(self.on_peak_navigator_clicked)
+        # Peak Navigator/Editor button (may be wired later from minimap)
+        if hasattr(self, 'editor_pushButton'):
+            self.editor_pushButton.clicked.connect(self.on_peak_navigator_clicked)
 
         # Auto-Update GMM checkbox
         # Auto-Update GMM checkbox moved to GMM dialog
@@ -492,11 +493,22 @@ class MainWindow(QMainWindow):
         self._nav_vm.mode_changed.connect(self._on_nav_mode_changed)
 
         # Connect navigation buttons to ViewModel
-        self.PrevButton.clicked.connect(self._nav_vm.navigate_prev)
-        self.NextButton.clicked.connect(self._nav_vm.navigate_next)
-        self.ViewModeToggleButton.clicked.connect(self._nav_vm.toggle_mode)
+        if hasattr(self, 'PrevButton'):
+            self.PrevButton.clicked.connect(self._nav_vm.navigate_prev)
+        if hasattr(self, 'NextButton'):
+            self.NextButton.clicked.connect(self._nav_vm.navigate_next)
+        if hasattr(self, 'ViewModeToggleButton'):
+            self.ViewModeToggleButton.clicked.connect(self._nav_vm.toggle_mode)
 
-        self.WindowRangeValue.setText("10")  # Default window length
+        if hasattr(self, 'WindowRangeValue'):
+            self.WindowRangeValue.setText("10")  # Default window length
+
+        # Wire minimap overlay navigation buttons (duplicates toolbar nav)
+        minimap = getattr(self.plot_host, '_minimap_nav', None)
+        if minimap and hasattr(minimap, 'navigate_prev'):
+            minimap.navigate_prev.connect(self._nav_vm.navigate_prev)
+            minimap.navigate_next.connect(self._nav_vm.navigate_next)
+            minimap.toggle_mode.connect(self._nav_vm.toggle_mode)
 
         # --- Initialize File List Manager (curation tab) ---
         self.file_list_manager = FileListManager(self)
@@ -559,7 +571,27 @@ class MainWindow(QMainWindow):
         self.peak_min_dist = 0.05  # Default minimum peak distance in seconds
 
         # Default values for eupnea and apnea thresholds
-        self.ApneaThresh.setText("0.5")   # seconds - gaps longer than this are apnea
+        # ApneaThresh may not exist in .ui (moved to channel settings); create holder
+        if not hasattr(self, 'ApneaThresh'):
+            class _NullSignal:
+                """Dummy signal that accepts connect() calls silently."""
+                def connect(self, _): pass
+                def disconnect(self, *a): pass
+
+            class _TextHolder:
+                textChanged = _NullSignal()
+                def __init__(self, v="0.5"):
+                    self._v = v
+                def text(self):
+                    return self._v
+                def setText(self, v):
+                    self._v = str(v)
+                def blockSignals(self, _):
+                    pass
+
+            self.ApneaThresh = _TextHolder("0.5")
+        else:
+            self.ApneaThresh.setText("0.5")   # seconds - gaps longer than this are apnea
 
         # OutlierSD moved to Analysis Options dialog (Outlier Detection tab)
         # Create a simple object to store the value (mimics QLineEdit.text() interface)
@@ -580,88 +612,35 @@ class MainWindow(QMainWindow):
         self.ApneaThresh.textChanged.connect(self._on_region_threshold_changed)
         # OutlierSD changes are handled in the Analysis Options dialog
 
-        # --- y2 metric dropdown (choices only; plotting later) ---
-        self.y2plot_dropdown.clear()
+        # --- y2 metric (now in right-click context menu) ---
         self.state.y2_values_by_sweep.clear()
         self.plot_host.clear_y2()
-
-        self.y2plot_dropdown.addItem("None", userData=None)
-        for label, key in metrics.METRIC_SPECS:
-            self.y2plot_dropdown.addItem(label, userData=key)
-
-        # Make dropdown searchable by typing
-        self.y2plot_dropdown.setEditable(True)
-        self.y2plot_dropdown.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-
-        # Add completer for case-insensitive searching
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import QCompleter
-        completer = QCompleter([self.y2plot_dropdown.itemText(i) for i in range(self.y2plot_dropdown.count())])
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)  # Match anywhere in the string
-        self.y2plot_dropdown.setCompleter(completer)
-
-        # ADD/DELETE Peak Mode: track selection in state
         self.state.y2_metric_key = None
-        self.y2plot_dropdown.currentIndexChanged.connect(self.on_y2_metric_changed)
 
-        # --- Display Control Widgets ---
-        # Y-axis autoscale checkbox (percentile vs min/max)
-        if hasattr(self, 'yautoscale_checkBox'):
-            self.yautoscale_checkBox.setChecked(self.state.use_percentile_autoscale)
-            self.yautoscale_checkBox.toggled.connect(self.on_yautoscale_toggled)
+        # Legacy dropdown support (if still present in .ui)
+        if hasattr(self, 'y2plot_dropdown'):
+            self.y2plot_dropdown.clear()
+            self.y2plot_dropdown.addItem("None", userData=None)
+            for label, key in metrics.METRIC_SPECS:
+                self.y2plot_dropdown.addItem(label, userData=key)
+            self.y2plot_dropdown.setEditable(True)
+            self.y2plot_dropdown.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            from PyQt6.QtCore import Qt
+            from PyQt6.QtWidgets import QCompleter
+            completer = QCompleter([self.y2plot_dropdown.itemText(i) for i in range(self.y2plot_dropdown.count())])
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self.y2plot_dropdown.setCompleter(completer)
+            self.y2plot_dropdown.currentIndexChanged.connect(self.on_y2_metric_changed)
 
-        # Y-axis padding spinbox (for percentile mode) — debounced to avoid
-        # redundant redraws when holding arrow keys or scrolling quickly
-        if hasattr(self, 'ypadding_SpinBox'):
-            self.ypadding_SpinBox.setMinimum(0.0)
-            self.ypadding_SpinBox.setMaximum(1.0)
-            self.ypadding_SpinBox.setSingleStep(0.05)
-            self.ypadding_SpinBox.setDecimals(2)
-            self.ypadding_SpinBox.setValue(self.state.autoscale_padding)
-            self._ypadding_debounce = QTimer()
-            self._ypadding_debounce.setSingleShot(True)
-            self._ypadding_debounce.setInterval(150)
-            self._ypadding_debounce.timeout.connect(
-                lambda: self.on_ypadding_changed(self.ypadding_SpinBox.value()))
-            self.ypadding_SpinBox.valueChanged.connect(
-                lambda _: self._ypadding_debounce.start())
-
-        # Region display toggle checkboxes (line vs shade)
-        if hasattr(self, 'eupnea_checkBox'):
-            self.eupnea_checkBox.setChecked(self.state.eupnea_use_shade)
-            self.eupnea_checkBox.toggled.connect(self.on_eupnea_display_toggled)
-
-        if hasattr(self, 'sniffing_checkBox'):
-            self.sniffing_checkBox.setChecked(self.state.sniffing_use_shade)
-            self.sniffing_checkBox.toggled.connect(self.on_sniffing_display_toggled)
-
-        if hasattr(self, 'Apnea_checkBox'):
-            self.Apnea_checkBox.setChecked(self.state.apnea_use_shade)
-            self.Apnea_checkBox.toggled.connect(self.on_apnea_display_toggled)
-
-        if hasattr(self, 'Outliers_checkBox'):
-            self.Outliers_checkBox.setChecked(self.state.outliers_use_shade)
-            self.Outliers_checkBox.toggled.connect(self.on_outliers_display_toggled)
-
-        # Dark mode toggle (for plot background)
-        if hasattr(self, 'checkBox'):  # Generic name from UI - should be renamed to DarkModeCheckBox
-            # Load saved dark mode preference (default to True = dark mode)
-            dark_mode_enabled = self.settings.value("plot_dark_mode", True, type=bool)
-
-            # Apply the theme to plot_host
-            theme = "dark" if dark_mode_enabled else "light"
-            self.plot_host.set_plot_theme(theme)
-
-            # Set checkbox state to match loaded preference
-            self.checkBox.setChecked(dark_mode_enabled)
-            self.checkBox.toggled.connect(self.on_dark_mode_toggled)
+        # --- Display Controls (now in right-click context menu) ---
+        # Initialize dark mode from saved preference
+        dark_mode_enabled = self.settings.value("plot_dark_mode", True, type=bool)
+        theme = "dark" if dark_mode_enabled else "light"
+        self.plot_host.set_plot_theme(theme)
 
         # PyQtGraph backend toggle (experimental high-performance plotting)
         self._setup_pyqtgraph_toggle()
-
-        # Initialize editing modes manager
-        self.editing_modes = EditingModes(self)
 
         # --- Mark Events button (event detection settings) ---
         self.MarkEventsButton.clicked.connect(self.on_mark_events_clicked)
@@ -669,6 +648,30 @@ class MainWindow(QMainWindow):
 
         # --- Sigh overlay artists ---
         self._sigh_artists = []         # matplotlib artists for sigh overlay
+
+        # --- Wire editing/export buttons from minimap nav bar ---
+        minimap = getattr(self.plot_host, '_minimap_nav', None)
+        if minimap:
+            # Alias minimap buttons so existing code (editing_modes etc.) can find them
+            if not hasattr(self, 'addPeaksButton'):
+                self.addPeaksButton = minimap.btn_add_peaks
+            if not hasattr(self, 'MergeBreathsButton'):
+                self.MergeBreathsButton = minimap.btn_merge
+            if not hasattr(self, 'markSniffButton'):
+                self.markSniffButton = minimap.btn_sniff
+            if not hasattr(self, 'movePointButton'):
+                self.movePointButton = minimap.btn_move
+            if not hasattr(self, 'OmitSweepButton'):
+                self.OmitSweepButton = minimap.btn_omit
+            if not hasattr(self, 'editor_pushButton'):
+                self.editor_pushButton = minimap.btn_editor
+
+        # Initialize editing modes manager (AFTER button aliasing so it finds them)
+        self.editing_modes = EditingModes(self)
+
+        # Wire editor button
+        if hasattr(self, 'editor_pushButton'):
+            self.editor_pushButton.clicked.connect(self.on_peak_navigator_clicked)
 
         # --- Wire omit button ---
         self.OmitSweepButton.setCheckable(True)
@@ -679,16 +682,14 @@ class MainWindow(QMainWindow):
 
         self.movePointButton.setCheckable(True)
 
-        # Mark Sniff button
-
-        #wire save analyzed data button
-        self.SaveAnalyzedDataButton.clicked.connect(self.on_save_analyzed_clicked)
-
-        # Wire save options button to configure export metrics
-        self.saveoptions_pushButton.clicked.connect(self.on_save_options_clicked)
-
-        # Wire view summary button to show PDF preview
-        self.ViewSummary_pushButton.clicked.connect(self.on_view_summary_clicked)
+        # Export buttons wired in status bar (_setup_tab_corner_widget area)
+        # Legacy: wire .ui buttons if still present
+        if hasattr(self, 'SaveAnalyzedDataButton'):
+            self.SaveAnalyzedDataButton.clicked.connect(self.on_save_analyzed_clicked)
+        if hasattr(self, 'saveoptions_pushButton'):
+            self.saveoptions_pushButton.clicked.connect(self.on_save_options_clicked)
+        if hasattr(self, 'ViewSummary_pushButton'):
+            self.ViewSummary_pushButton.clicked.connect(self.on_view_summary_clicked)
 
         # Wire Help button (from UI file)
         self.helpbutton.clicked.connect(self.on_help_clicked)
@@ -1645,6 +1646,35 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._save_status_btn)
         # Keep a reference with the old name for compatibility
         self._save_status_label = self._save_status_btn
+
+        # Export icons next to save button in status bar
+        _sb_btn_style = (
+            "QToolButton { color: #aaa; padding: 2px 6px; border: none; font-size: 13px; }"
+            "QToolButton:hover { background-color: #333; border-radius: 3px; color: white; }"
+        )
+        self._btn_preview = QToolButton(self)
+        self._btn_preview.setText("\U0001F4CA")
+        self._btn_preview.setToolTip("View Summary \u2014 preview analyzed metrics")
+        self._btn_preview.setAutoRaise(True)
+        self._btn_preview.setStyleSheet(_sb_btn_style)
+        self._btn_preview.clicked.connect(self.on_view_summary_clicked)
+        self.statusBar().addPermanentWidget(self._btn_preview)
+
+        self._btn_export = QToolButton(self)
+        self._btn_export.setText("\u2B07")
+        self._btn_export.setToolTip("Export Data \u2014 CSV, metrics, and PDF summary")
+        self._btn_export.setAutoRaise(True)
+        self._btn_export.setStyleSheet(_sb_btn_style)
+        self._btn_export.clicked.connect(self.on_save_analyzed_clicked)
+        self.statusBar().addPermanentWidget(self._btn_export)
+
+        self._btn_export_more = QToolButton(self)
+        self._btn_export_more.setText("\u22EF")
+        self._btn_export_more.setToolTip("More export options")
+        self._btn_export_more.setAutoRaise(True)
+        self._btn_export_more.setStyleSheet(_sb_btn_style)
+        self._btn_export_more.clicked.connect(self.on_save_options_clicked)
+        self.statusBar().addPermanentWidget(self._btn_export_more)
 
         # Create label for filename display
         self.filename_label = QLabel("No file loaded", self)
@@ -2757,9 +2787,10 @@ class MainWindow(QMainWindow):
                 st.y2_values_by_sweep.clear()
                 self.plot_host.clear_y2()
                 # Reset Y2 dropdown to "None"
-                self.y2plot_dropdown.blockSignals(True)
-                self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
-                self.y2plot_dropdown.blockSignals(False)
+                if hasattr(self, 'y2plot_dropdown'):
+                    self.y2plot_dropdown.blockSignals(True)
+                    self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
+                    self.y2plot_dropdown.blockSignals(False)
 
             st.analyze_chan = pleth_channel
 
@@ -2877,7 +2908,9 @@ class MainWindow(QMainWindow):
 
     def _show_editing_instructions(self, html: str):
         """Show rich text editing instructions in the status bar."""
+        self.statusBar().clearMessage()  # Clear transient message so label is visible
         self.editing_instructions_label.setText(html)
+        self.editing_instructions_label.setVisible(True)
         self._editing_instructions_html = html  # Track for restoration (separate from plain text messages)
 
     def _clear_editing_instructions(self):
@@ -3202,6 +3235,10 @@ class MainWindow(QMainWindow):
         """Handle sweep index change from navigation ViewModel."""
         self.state.sweep_idx = new_idx
         self._refresh_omit_button_label()
+        # Update minimap sweep counter
+        minimap = getattr(self.plot_host, '_minimap_nav', None)
+        if minimap and hasattr(minimap, 'set_sweep_info'):
+            minimap.set_sweep_info(new_idx, self._nav_vm.sweep_count())
 
     def _on_nav_window_changed(self, left: float, right: float):
         """Apply window bounds to the plot axes."""
@@ -3218,14 +3255,21 @@ class MainWindow(QMainWindow):
 
     def _on_nav_mode_changed(self, mode: str):
         """Update UI labels when navigation mode changes."""
-        if mode == "window":
-            self.ViewModeToggleButton.setText("Mode: Window View")
-            self.PrevButton.setToolTip("Move to the previous time window")
-            self.NextButton.setToolTip("Move to the next time window")
-        else:
-            self.ViewModeToggleButton.setText("Mode: Sweep View")
-            self.PrevButton.setToolTip("Navigate to the previous sweep")
-            self.NextButton.setToolTip("Navigate to the next sweep")
+        if hasattr(self, 'ViewModeToggleButton'):
+            if mode == "window":
+                self.ViewModeToggleButton.setText("Mode: Window View")
+            else:
+                self.ViewModeToggleButton.setText("Mode: Sweep View")
+        if hasattr(self, 'PrevButton'):
+            tip = "Move to the previous time window" if mode == "window" else "Navigate to the previous sweep"
+            self.PrevButton.setToolTip(tip)
+        if hasattr(self, 'NextButton'):
+            tip = "Move to the next time window" if mode == "window" else "Navigate to the next sweep"
+            self.NextButton.setToolTip(tip)
+        # Update minimap mode label
+        minimap = getattr(self.plot_host, '_minimap_nav', None)
+        if minimap and hasattr(minimap, 'set_mode_label'):
+            minimap.set_mode_label(mode)
 
     def _on_snap_to_sweep(self):
         """Handle snap-to-sweep: clear saved view and redraw."""
@@ -5110,9 +5154,10 @@ class MainWindow(QMainWindow):
                 st.y2_values_by_sweep.clear()
                 self.plot_host.clear_y2()
                 # Reset Y2 dropdown to "None"
-                self.y2plot_dropdown.blockSignals(True)
-                self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
-                self.y2plot_dropdown.blockSignals(False)
+                if hasattr(self, 'y2plot_dropdown'):
+                    self.y2plot_dropdown.blockSignals(True)
+                    self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
+                    self.y2plot_dropdown.blockSignals(False)
 
                 # Clear saved view to force fresh autoscale for grid mode
                 self.plot_host.clear_saved_view("grid")
@@ -5157,18 +5202,22 @@ class MainWindow(QMainWindow):
                         metadata = get_npz_metadata(npz_path)
 
                         # Prompt user to load existing analysis
-                        reply = QMessageBox.question(
-                            self,
-                            "Load Existing Analysis?",
-                            f"Found saved analysis for channel '{new_chan}':\n\n"
-                            f"{npz_path.name}\n"
-                            f"Last modified: {metadata.get('modified_time', 'unknown')}\n"
-                            f"Contains: {metadata.get('n_peaks', 0)} peaks\n"
-                            f"GMM clustering: {'Yes' if metadata.get('has_gmm', False) else 'No'}\n\n"
-                            f"Load this analysis?",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                            QMessageBox.StandardButton.Yes  # Default to Yes
-                        )
+                        # Auto-accept in testing/debug mode
+                        if os.environ.get('PLETHAPP_TESTING') == '1':
+                            reply = QMessageBox.StandardButton.Yes
+                        else:
+                            reply = QMessageBox.question(
+                                self,
+                                "Load Existing Analysis?",
+                                f"Found saved analysis for channel '{new_chan}':\n\n"
+                                f"{npz_path.name}\n"
+                                f"Last modified: {metadata.get('modified_time', 'unknown')}\n"
+                                f"Contains: {metadata.get('n_peaks', 0)} peaks\n"
+                                f"GMM clustering: {'Yes' if metadata.get('has_gmm', False) else 'No'}\n\n"
+                                f"Load this analysis?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.Yes  # Default to Yes
+                            )
 
                         if reply == QMessageBox.StandardButton.Yes:
                             # User wants to load existing analysis
@@ -5264,9 +5313,10 @@ class MainWindow(QMainWindow):
                 st.y2_values_by_sweep.clear()
                 self.plot_host.clear_y2()
                 # Reset Y2 dropdown to "None"
-                self.y2plot_dropdown.blockSignals(True)
-                self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
-                self.y2plot_dropdown.blockSignals(False)
+                if hasattr(self, 'y2plot_dropdown'):
+                    self.y2plot_dropdown.blockSignals(True)
+                    self.y2plot_dropdown.setCurrentIndex(0)  # First item is "None"
+                    self.y2plot_dropdown.blockSignals(False)
 
                 # Reset navigation to first sweep
                 st.sweep_idx = 0
@@ -7286,7 +7336,25 @@ class MainWindow(QMainWindow):
         metrics.set_ecg_result(None)
 
     def on_y2_metric_changed(self, idx: int):
-        key = self.y2plot_dropdown.itemData(idx)
+        if hasattr(self, 'y2plot_dropdown'):
+            key = self.y2plot_dropdown.itemData(idx)
+        self._apply_y2_metric(key)
+
+    def _on_y2_metric_from_menu(self, key):
+        """Called from right-click context menu Y2 Metric submenu."""
+        # Sync the dropdown if it still exists (may be removed in UI cleanup)
+        if hasattr(self, 'y2plot_dropdown'):
+            for i in range(self.y2plot_dropdown.count()):
+                if hasattr(self, 'y2plot_dropdown'):
+                    if self.y2plot_dropdown.itemData(i) == key:
+                        self.y2plot_dropdown.blockSignals(True)
+                        self.y2plot_dropdown.setCurrentIndex(i)
+                        self.y2plot_dropdown.blockSignals(False)
+                    break
+        self._apply_y2_metric(key)
+
+    def _apply_y2_metric(self, key):
+        """Apply a Y2 metric change (shared by dropdown and context menu)."""
         self.state.y2_metric_key = key  # None or e.g. "if"
 
         # HR/RSA metrics need ECG results for all sweeps — detect if needed
@@ -10987,12 +11055,14 @@ if __name__ == "__main__":
 
     # Check for previous crash and show dialog (after window is visible)
     if pending_report and app_config.is_crash_reports_enabled():
-        from dialogs.crash_report_dialog import show_crash_report_dialog
+        # Skip crash dialog in testing/debug mode
+        if os.environ.get('PLETHAPP_TESTING') != '1':
+            from dialogs.crash_report_dialog import show_crash_report_dialog
 
-        def show_previous_crash_dialog():
-            show_crash_report_dialog(pending_report, on_startup=True, parent=w)
+            def show_previous_crash_dialog():
+                show_crash_report_dialog(pending_report, on_startup=True, parent=w)
 
-        # Delay to let the main window fully initialize
-        QTimer.singleShot(500, show_previous_crash_dialog)
+            # Delay to let the main window fully initialize
+            QTimer.singleShot(500, show_previous_crash_dialog)
 
     sys.exit(app.exec())

@@ -1153,89 +1153,25 @@ class PyQtGraphPlotHost(QWidget):
     def set_drag_callback(self, fn):
         """Set callback for drag events: fn(event_type, xdata, ydata, event).
         event_type is 'press', 'move', or 'release'.
-        Also disables pan/zoom to allow drag-based editing."""
+        """
         self._drag_callback = fn
         if fn is not None:
             self._set_mouse_mode_edit()
-            # Install event filter for mouse press/release detection
-            self.graphics_layout.scene().installEventFilter(self)
+            self.setFocus()  # Take focus for keyboard events (R, Escape, etc.)
         else:
-            # Only restore normal mode if no click callback either
             if self._external_click_cb is None:
                 self._set_mouse_mode_normal()
-            self.graphics_layout.scene().removeEventFilter(self)
             self._clear_drag_visual()
 
     def clear_drag_callback(self):
         """Remove drag callback."""
         self._drag_callback = None
-        try:
-            self.graphics_layout.scene().removeEventFilter(self)
-        except:
-            pass
         self._clear_drag_visual()
         # Only restore normal mode if no click callback either
         if self._external_click_cb is None:
             self._set_mouse_mode_normal()
 
-    def eventFilter(self, obj, event):
-        """Event filter for capturing mouse press/release for drag operations."""
-        from PyQt6.QtCore import QEvent
-        from PyQt6.QtGui import QMouseEvent
-
-        if self._drag_callback is None:
-            return False
-
-        main_plot = self._get_main_plot()
-        if main_plot is None:
-            return False
-
-        if event.type() == QEvent.Type.GraphicsSceneMousePress:
-            # Only handle left button for drag
-            if event.button() == Qt.MouseButton.LeftButton:
-                pos = event.scenePos()
-                if main_plot.sceneBoundingRect().contains(pos):
-                    # Convert to data coordinates
-                    mouse_point = main_plot.vb.mapSceneToView(pos)
-                    x_data = mouse_point.x()
-                    y_data = mouse_point.y()
-
-                    # Create wrapped event
-                    wrapped = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
-
-                    # Call drag callback FIRST to check if it wants to handle specially
-                    # (e.g., Ctrl+Shift+click for full sweep omit should NOT start a drag)
-                    result = self._drag_callback('press', x_data, y_data, wrapped)
-
-                    # If callback returns 'handled', don't start drag operation
-                    if result == 'handled':
-                        # Explicitly clear any drag state to prevent accidental drags
-                        self._dragging = False
-                        self._drag_start_pos = None
-                        self._clear_drag_visual()
-                        return True  # Consume the event but don't start drag
-
-                    # Normal case - start drag operation
-                    self._drag_start_pos = pos
-                    self._dragging = True
-                    return True  # Consume the event
-
-        elif event.type() == QEvent.Type.GraphicsSceneMouseRelease:
-            if event.button() == Qt.MouseButton.LeftButton and self._dragging:
-                self._dragging = False
-                pos = event.scenePos()
-                # Convert to data coordinates
-                mouse_point = main_plot.vb.mapSceneToView(pos)
-                x_data = mouse_point.x()
-                y_data = mouse_point.y()
-                # Create wrapped event
-                wrapped = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
-                self._drag_callback('release', x_data, y_data, wrapped)
-                self._drag_start_pos = None
-                self._clear_drag_visual()
-                return True  # Consume the event
-
-        return False  # Don't consume other events
+    # Drag detection is built into _configure_plot_mouse's shift_only_drag handler
 
     def _on_scene_mouse_moved(self, pos):
         """Handle scene mouse movement for drag operations."""
@@ -1315,6 +1251,15 @@ class PyQtGraphPlotHost(QWidget):
             event.accept()
             return
 
+        # Ctrl+Z: Undo editing action
+        if (event.modifiers() & QtCore_Qt.KeyboardModifier.ControlModifier and
+            event.key() == QtCore_Qt.Key.Key_Z):
+            mw = self._find_main_window()
+            if mw and hasattr(mw, 'editing_modes'):
+                mw.editing_modes.undo()
+                event.accept()
+                return
+
         if self._key_callback is not None:
             # Map Qt key to string
             key_map = {
@@ -1371,17 +1316,50 @@ class PyQtGraphPlotHost(QWidget):
         # Store original mouseDragEvent - need to bind to avoid closure issues
         original_drag = vb.mouseDragEvent.__func__ if hasattr(vb.mouseDragEvent, '__func__') else vb.mouseDragEvent
 
-        def shift_only_drag(ev, axis=None, _vb=vb, _orig=original_drag):
-            """Only allow drag if Shift is held."""
+        def shift_only_drag(ev, axis=None, _vb=vb, _orig=original_drag, _host=self, _plot=plot):
+            """Route drag to editing callback if active, otherwise shift-only pan."""
+            phase = "S" if ev.isStart() else ("F" if ev.isFinish() else "M")
+            # If an editing drag callback is active, route there instead
+            if _host._drag_callback is not None:
+                # Ensure plot host has focus for keyboard events
+                if phase == "S":
+                    _host.setFocus()
+                mouse_point = _plot.vb.mapSceneToView(ev.scenePos())
+                x_data = mouse_point.x()
+                y_data = mouse_point.y()
+                wrapped = _MatplotlibCompatEvent(ev, _plot, x_data, y_data)
+
+                if ev.isStart():
+                    result = _host._drag_callback('press', x_data, y_data, wrapped)
+                    if result == 'handled':
+                        _host._dragging = False
+                        ev.accept()
+                        return
+                    _host._dragging = True
+
+                if not ev.isStart() and not ev.isFinish():
+                    # Intermediate move
+                    if _host._dragging:
+                        _host._drag_callback('move', x_data, y_data, wrapped)
+
+                if ev.isFinish():
+                    # Release (also fires on degenerate click-without-drag)
+                    if _host._dragging:
+                        _host._drag_callback('release', x_data, y_data, wrapped)
+                        _host._dragging = False
+                        _host._clear_drag_visual()
+
+                ev.accept()
+                return
+
+            # Normal mode: only allow drag if Shift is held
             modifiers = ev.modifiers() if hasattr(ev, 'modifiers') else QtCore_Qt.KeyboardModifier.NoModifier
             if modifiers & QtCore_Qt.KeyboardModifier.ShiftModifier:
-                # Call original with proper binding
                 if hasattr(_orig, '__self__'):
                     _orig(ev, axis)
                 else:
                     _orig(_vb, ev, axis)
             else:
-                # Accept the event but don't do anything - this prevents pan
                 ev.accept()
 
         vb.mouseDragEvent = shift_only_drag
@@ -1574,23 +1552,13 @@ class PyQtGraphPlotHost(QWidget):
         y_axis.setCursor(QCursor(QtCore_Qt.CursorShape.SizeVerCursor))
 
     def _set_mouse_mode_edit(self):
-        """Disable drag-pan for click-based editing, but keep scroll-wheel X zoom."""
-        for plot in self._subplots:
-            try:
-                # Keep X mouse enabled so scroll wheel zoom works
-                plot.vb.setMouseEnabled(x=True, y=False)
-                # Disable left-button drag by switching to rect mode
-                plot.vb.setMouseMode(plot.vb.RectMode)
-            except Exception:
-                pass
+        """No-op — drag routing is built into _configure_plot_mouse's shift_only_drag.
+        The drag callback check happens automatically on every subplot."""
+        pass
 
     def _set_mouse_mode_normal(self):
-        """Re-enable normal pan/zoom behavior."""
-        for plot in self._subplots:
-            try:
-                plot.vb.setMouseEnabled(x=True, y=False)  # Keep Y disabled
-            except:
-                pass
+        """No-op — normal mode resumes when drag callback is cleared."""
+        pass
 
     def _on_mouse_clicked(self, event):
         """Handle mouse click events."""
@@ -1604,6 +1572,27 @@ class PyQtGraphPlotHost(QWidget):
             clicked_plot = self._find_plot_at_pos(pos)
             if clicked_plot is not None:
                 self._show_context_menu(event, clicked_plot)
+            return
+
+        # When drag callback is active and modifier keys are held,
+        # dispatch as a click-press to the drag callback (pure clicks without
+        # mouse movement don't trigger mouseDragEvent in pyqtgraph)
+        if self._drag_callback is not None:
+            from PyQt6.QtWidgets import QApplication
+            mods = QApplication.keyboardModifiers()
+            ctrl = bool(mods & QtCore_Qt.KeyboardModifier.ControlModifier)
+            if ctrl and event.button() == QtCore_Qt.MouseButton.LeftButton:
+                main_plot = self._get_main_plot()
+                if main_plot and main_plot.sceneBoundingRect().contains(pos):
+                    mouse_point = main_plot.vb.mapSceneToView(pos)
+                    x_data = mouse_point.x()
+                    y_data = mouse_point.y()
+                    wrapped = _MatplotlibCompatEvent(event, main_plot, x_data, y_data)
+                    # Force modifier detection from QApplication since sigMouseClicked
+                    # event doesn't carry modifiers the same way
+                    wrapped.ctrl_held = True
+                    wrapped.shift_held = bool(mods & QtCore_Qt.KeyboardModifier.ShiftModifier)
+                    self._drag_callback('press', x_data, y_data, wrapped)
             return
 
         # For left/middle clicks, need a click callback (ADD/DEL mode active)

@@ -1551,6 +1551,13 @@ class PlotManager:
         y2_viewbox = pg.ViewBox()
         y2_viewbox.setMouseEnabled(x=False, y=False)
         y2_viewbox.setMenuEnabled(False)
+        # Prevent Y2 viewbox from stealing drag events from the main ViewBox.
+        # pyqtgraph dispatches drags to the highest-Z item first; without this,
+        # the Y2 ViewBox (Z=100) accepts drags before the main ViewBox sees them,
+        # breaking all drag-based editing modes (omit, merge, move point).
+        from PyQt6.QtCore import Qt
+        y2_viewbox.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        y2_viewbox.mouseDragEvent = lambda ev, axis=None: None
         self.plot_host._y2_viewbox = y2_viewbox
 
         # Create Y2 axis on the right

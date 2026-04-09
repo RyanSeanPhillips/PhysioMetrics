@@ -321,8 +321,14 @@ class EventMarkerPlotIntegration(QObject):
             key = event.key()
             modifiers = event.modifiers()
 
-            # Ctrl+Z for undo
+            # Ctrl+Z for undo — editing modes take priority over marker undo
             if key == Qt.Key.Key_Z and modifiers & Qt.KeyboardModifier.ControlModifier:
+                # Check if an editing mode has undo history first
+                mw = self._plot_host._find_main_window() if hasattr(self._plot_host, '_find_main_window') else None
+                em = getattr(mw, 'editing_modes', None) if mw else None
+                if em and em._undo_stack:
+                    em.undo()
+                    return True
                 if self._viewmodel.can_undo:
                     self._viewmodel.undo()
                     self.refresh()
@@ -659,8 +665,35 @@ class EventMarkerPlotIntegration(QObject):
         menu.derivative_toggle_changed.connect(self._on_derivative_toggle_changed)
         menu.generate_cta_requested.connect(self._on_generate_cta_requested)
 
-        # Add Performance Mode submenu
+        # Add Display / Y2 Metric / View Settings submenus
         mw = self._plot_host._find_main_window() if hasattr(self._plot_host, '_find_main_window') else None
+        if mw and hasattr(mw, 'state'):
+            from views.plot_context_menu import PlotDisplayMenuBuilder
+            from core import metrics
+            state = mw.state
+            settings = getattr(mw, 'settings', None)
+            builder = PlotDisplayMenuBuilder(
+                get_eupnea_shade=lambda: state.eupnea_use_shade,
+                get_sniffing_shade=lambda: state.sniffing_use_shade,
+                get_apnea_shade=lambda: state.apnea_use_shade,
+                get_outliers_shade=lambda: state.outliers_use_shade,
+                get_dark_mode=lambda: settings.value("plot_dark_mode", True, type=bool) if settings else True,
+                get_percentile_autoscale=lambda: state.use_percentile_autoscale,
+                get_autoscale_padding=lambda: state.autoscale_padding,
+                get_y2_metric_key=lambda: state.y2_metric_key,
+                metric_specs=metrics.METRIC_SPECS,
+                on_eupnea_toggled=mw.on_eupnea_display_toggled,
+                on_sniffing_toggled=mw.on_sniffing_display_toggled,
+                on_apnea_toggled=mw.on_apnea_display_toggled,
+                on_outliers_toggled=mw.on_outliers_display_toggled,
+                on_dark_mode_toggled=mw.on_dark_mode_toggled,
+                on_autoscale_toggled=mw.on_yautoscale_toggled,
+                on_padding_changed=mw.on_ypadding_changed,
+                on_y2_metric_changed=mw._on_y2_metric_from_menu,
+            )
+            builder.add_to_menu(menu)
+
+        # Add Performance Mode submenu
         pm = getattr(mw, 'plot_manager', None) if mw else None
         if pm:
             menu.addSeparator()
