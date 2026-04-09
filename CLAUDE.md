@@ -94,6 +94,19 @@ See `_internal/docs/CORE/DEVELOPMENT_WORKFLOW.md` for full documentation.
    - Decomposing monolithic `main.py` into MVVM architecture (services, viewmodels, domain models)
    - Projects tab rework (Phases 1-2 complete: file tree, filtering, batch dry run)
    - Batch analysis review workflow with parallel execution and per-row progress
+   - **Refactor plan**: `.claude/plans/refactor-plan-v2.md` (6 steps)
+     - Step 1 (Startup logging): DONE
+     - Step 2 (UI Cleanup Phase 1 — controls to right-click menu): DONE
+     - Step 3 (UI Cleanup Phase 2 — minimap nav, compact editing): DONE
+     - Step 4A (GMMManager → GMMService + GMMViewModel): DONE
+     - Step 4B (ClassifierManager → ClassifierService + ClassifierViewModel): DONE
+     - Step 4E (ExportManager → ExportService, refs 126→15): PARTIALLY DONE
+     - Step 4C (ScanManager, 95 self.mw refs): TODO
+     - Step 4D (RecoveryManager, 37 self.mw refs): TODO
+     - Step 4F (ProjectBuilderManager, 168 self.mw refs): TODO
+     - Step 4G (Remaining MainWindow methods): TODO
+     - Step 5 (HDF5 Migration): TODO
+     - Step 6 (SessionManager): TODO
    - Track changes in `_internal/docs/UNRELEASED_CHANGES.md`
 
 2. **Photometry Integration** (Mostly Implemented)
@@ -262,10 +275,14 @@ views/events/context_menu.py           ← Context menu handling
 ### Legacy Architecture (Being Migrated)
 
 - **`main.py`** (~9K lines) — monolithic MainWindow, being gradually decomposed
-- **`core/state.py`** — `AppState` god-object with 100+ fields. New features should extract relevant state into smaller dataclasses (e.g., `FilterState`, `NavigationState`)
+- **`core/state.py`** — `AppState` god-object with 100+ fields. `plotting_backend` now defaults to `'pyqtgraph'` (matplotlib backend is disabled). New features should extract relevant state into smaller dataclasses (e.g., `FilterState`, `NavigationState`)
 - **Extracted managers** (`core/*_manager.py`) — use `self.mw` pattern. When touching these, prefer decoupling toward MVVM over adding more `self.mw` references
+- **Already extracted**: GMMService, ClassifierService, StimService, AnalysisService, NavigationService + ViewModels. EditingModes decoupled via dependency injection (callbacks, no self.mw)
+- **Remaining**: ScanManager (95 refs), RecoveryManager (37 refs), ExportManager (15 refs remaining), ProjectBuilderManager (168 refs)
 - **Dual peak arrays**: `all_peaks_by_sweep` (master) + `peaks_by_sweep` (filtered)
 - **ML pipeline**: Model 1 (breath vs noise) → Model 2 (breath type)
+- **Editing undo**: `EditingModes._undo_stack` — Ctrl+Z for peak edits, sigh, omit, merge, move point
+- **Bottom toolbar**: Editing icons + nav controls on minimap bar; display/Y2/view in right-click menu; exports in status bar
 
 ### Startup Performance
 
