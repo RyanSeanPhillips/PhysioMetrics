@@ -217,6 +217,7 @@ class EventMarkerViewModel(QObject):
         color_override: Optional[str] = None,
         line_width: Optional[int] = None,
         notes: Optional[str] = None,
+        visible: Optional[bool] = None,
     ) -> bool:
         """Update marker properties."""
         result = self._service.update_marker(
@@ -227,6 +228,7 @@ class EventMarkerViewModel(QObject):
             color_override=color_override,
             line_width=line_width,
             notes=notes,
+            visible=visible,
         )
         if result:
             self._emit_undo_state()

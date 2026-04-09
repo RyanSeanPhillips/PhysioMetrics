@@ -23,6 +23,10 @@ class AppState:
     stim_spans_by_sweep: dict[int, list[tuple[float, float]]] = field(default_factory=dict)
     stim_metrics_by_sweep: dict[int, dict] = field(default_factory=dict)
 
+    # EKG / Heart Rate
+    ekg_chan: Optional[str] = None
+    ecg_config: Optional[object] = None       # ECGConfig (lazy import)
+    ecg_results_by_sweep: Dict[int, object] = field(default_factory=dict)  # sweep -> ECGResult
 
     # Raw & processed
     sr_hz: Optional[float] = None
@@ -56,8 +60,8 @@ class AppState:
     apnea_use_shade: bool = False           # Apnea display: True = background shade, False = line at bottom
     outliers_use_shade: bool = False        # Outliers display: True = background shade, False = line
 
-    # Plotting backend: 'matplotlib' (default, feature-complete) or 'pyqtgraph' (faster, experimental)
-    plotting_backend: str = 'matplotlib'
+    # Plotting backend: 'pyqtgraph' is now the only supported backend
+    plotting_backend: str = 'pyqtgraph'
 
     # Peaks & edits
     peaks_by_sweep: Dict[int, np.ndarray] = field(default_factory=dict)

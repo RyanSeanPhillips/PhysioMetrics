@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Dict, Any, Optional
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QStyle
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QMainWindow
@@ -531,6 +531,43 @@ class ProjectBuilderManager:
             self.mw._file_table_model.refresh_verification_cache(all_links)
         except Exception as e:
             print(f"[project-builder] Error refreshing verification cache: {e}")
+
+    def _reanalyze_row(self, row: int):
+        """Force fresh analysis on a row, ignoring its cached .pmx."""
+        if row >= len(self.mw._master_file_list):
+            return
+        task = self.mw._master_file_list[row]
+        file_path = task.get('file_path', '')
+        if not file_path:
+            return
+
+        from pathlib import Path
+        fp = Path(file_path)
+        if not fp.exists():
+            return
+
+        # Temporarily clear results_path so _analyze_file_at_row loads fresh
+        original_rp = task.get('results_path', '')
+        self.mw._master_file_list[row]['results_path'] = ''
+        self.mw._analyze_file_at_row(row)
+        # Restore — it will be overwritten on next save anyway
+        self.mw._master_file_list[row]['results_path'] = original_rp
+
+    def _select_all_visible_rows(self):
+        """Select all currently visible rows in the table."""
+        from PyQt6.QtCore import QItemSelection, QItemSelectionModel
+        table = self.mw.discoveredFilesTable
+        model = self.mw._file_table_model
+        row_count = model.rowCount()
+        if row_count == 0:
+            return
+        selection = QItemSelection(
+            model.index(0, 0),
+            model.index(row_count - 1, model.columnCount() - 1),
+        )
+        table.selectionModel().select(
+            selection, QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
 
     def get_experiment_history(self) -> list:
         """Get list of previously used experiment names from QSettings."""
@@ -1169,23 +1206,49 @@ class ProjectBuilderManager:
         from PyQt6.QtGui import QAction
 
         table = self.mw.discoveredFilesTable
-        selected_rows = set(index.row() for index in table.selectedIndexes())
-
-        if not selected_rows:
-            return
+        # Filter out hidden (filtered) rows from selection
+        selected_rows = set(
+            index.row() for index in table.selectedIndexes()
+            if not table.isRowHidden(index.row())
+        )
 
         menu = QMenu(self.mw)
 
-        # Review Sources (single row only, requires animal_id)
+        # "Select All Visible" — always available
+        visible_count = sum(
+            1 for r in range(self.mw._file_table_model.rowCount())
+            if not table.isRowHidden(r)
+        )
+        select_all_action = QAction(f"Select All Visible ({visible_count})", self.mw)
+        select_all_action.triggered.connect(self._select_all_visible_rows)
+        menu.addAction(select_all_action)
+
+        if not selected_rows:
+            menu.exec(table.viewport().mapToGlobal(position))
+            return
+
+        menu.addSeparator()
+
+        # Single-row actions
         if len(selected_rows) == 1:
             row = next(iter(selected_rows))
             if row < len(self.mw._master_file_list):
                 task = self.mw._master_file_list[row]
                 animal_id = task.get('animal_id', '')
+
+                # Review Sources (requires animal_id)
                 review_action = QAction("Review Sources...", self.mw)
                 review_action.setEnabled(bool(animal_id))
                 review_action.triggered.connect(lambda: self.mw._open_source_review(row))
                 menu.addAction(review_action)
+
+                # Re-analyze (force fresh analysis, ignoring cached .pmx)
+                results_path = task.get('results_path', '') or ''
+                reanalyze_action = QAction("Re-analyze (ignore cached results)...", self.mw)
+                reanalyze_action.setEnabled(bool(results_path))
+                reanalyze_action.triggered.connect(lambda _, r=row: self._reanalyze_row(r))
+                menu.addAction(reanalyze_action)
+
                 menu.addSeparator()
 
         # Bulk edit options
@@ -1281,8 +1344,21 @@ class ProjectBuilderManager:
             clear_action.triggered.connect(lambda: self.clear_scan_warnings(rows_with_warnings))
             conflict_menu.addAction(clear_action)
 
-        # Export options
+        # --- Utilities ---
         menu.addSeparator()
+
+        # Copy file path
+        if len(selected_rows) == 1:
+            row = next(iter(selected_rows))
+            if row < len(self.mw._master_file_list):
+                fp = self.mw._master_file_list[row].get('file_path', '')
+                copy_path_action = QAction("Copy file path", self.mw)
+                copy_path_action.triggered.connect(
+                    lambda checked=False, p=fp: QApplication.clipboard().setText(p)
+                )
+                menu.addAction(copy_path_action)
+
+        # Export options
         export_menu = menu.addMenu("Export Table")
 
         export_selected_action = QAction(f"Export {len(selected_rows)} selected rows to CSV...", self.mw)
@@ -1293,7 +1369,62 @@ class ProjectBuilderManager:
         export_all_action.triggered.connect(lambda: self.export_table_to_csv(None))
         export_menu.addAction(export_all_action)
 
+        # --- Grouping / Comparison ---
+        if len(selected_rows) >= 2:
+            menu.addSeparator()
+            # Check how many have completed analysis (.pmx files)
+            completed_rows = []
+            for row in selected_rows:
+                if row < len(self.mw._master_file_list):
+                    task = self.mw._master_file_list[row]
+                    if task.get('status') == 'completed' or task.get('results_path'):
+                        completed_rows.append(row)
+
+            group_action = QAction(f"Group {len(completed_rows)} analyzed experiments...", self.mw)
+            group_action.setEnabled(len(completed_rows) >= 2)
+            group_action.triggered.connect(lambda: self._group_selected_experiments(completed_rows))
+            menu.addAction(group_action)
+
+        # Compare Groups (always available if groups exist)
+        compare_action = QAction("Compare Groups...", self.mw)
+        compare_action.triggered.connect(self._compare_groups_dialog)
+        menu.addAction(compare_action)
+
+        # --- Danger zone ---
+        menu.addSeparator()
+        remove_action = QAction(f"Remove {len(selected_rows)} from list", self.mw)
+        remove_action.triggered.connect(lambda: self._remove_selected_rows(selected_rows))
+        # Red-tinted text
+        remove_action.setIcon(self.mw.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        menu.addAction(remove_action)
+
         menu.exec(table.viewport().mapToGlobal(position))
+
+    def _remove_selected_rows(self, rows):
+        """Remove selected rows from the master file list and DB."""
+        from PyQt6.QtWidgets import QMessageBox
+        count = len(rows)
+        reply = QMessageBox.question(
+            self.mw, "Remove Experiments",
+            f"Remove {count} experiment(s) from the project?\n\n"
+            "This removes them from the database. The original files are not deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        # Remove from DB via viewmodel if available
+        for row in sorted(rows, reverse=True):
+            if row < len(self.mw._master_file_list):
+                task = self.mw._master_file_list[row]
+                exp_id = task.get('id')
+                if exp_id and hasattr(self.mw, '_project_viewmodel'):
+                    try:
+                        self.mw._project_viewmodel.service.store.delete_experiment(exp_id)
+                    except Exception as e:
+                        print(f"[context-menu] Error deleting experiment {exp_id}: {e}")
+        # Reload
+        self.mw._load_experiments_from_db(snapshot_id=getattr(self.mw, '_active_snapshot_id', None))
 
     def export_table_to_csv(self, selected_rows=None):
         """Export table data to CSV file.
@@ -1630,3 +1761,221 @@ class ProjectBuilderManager:
             # Switch to Analysis tab (Tab 0 = Project Builder, Tab 1 = Analysis)
             if hasattr(self.mw, 'Tabs'):
                 self.mw.Tabs.setCurrentIndex(1)
+
+    # ------------------------------------------------------------------
+    # Grouping & Comparison
+    # ------------------------------------------------------------------
+
+    def _group_selected_experiments(self, rows):
+        """Create a group from selected analyzed experiments."""
+        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        from pathlib import Path
+
+        # Collect .pmx paths and metadata from selected rows
+        pmx_paths = []
+        experiment_ids = []
+        animal_ids = []
+        metadata_sample = {}
+
+        for row in rows:
+            if row >= len(self.mw._master_file_list):
+                continue
+            task = self.mw._master_file_list[row]
+
+            # Find the .pmx file
+            results_path = task.get('results_path', '')
+            pmx_path = None
+            if results_path:
+                pmx_path = Path(results_path)
+                if not pmx_path.exists():
+                    pmx_path = None
+
+            if pmx_path is None:
+                # Fallback: discover from file path
+                fp = Path(task.get('file_path', ''))
+                if fp.exists():
+                    from core.npz_io import get_pmx_path
+                    candidate = get_pmx_path(
+                        fp, 'pleth',
+                        task.get('animal_id', ''),
+                        task.get('channel', ''),
+                    )
+                    if candidate.exists():
+                        pmx_path = candidate
+
+            if pmx_path is None:
+                continue
+
+            pmx_paths.append(pmx_path)
+            animal_ids.append(task.get('animal_id', ''))
+            eid = task.get('experiment_id') or task.get('id')
+            if eid is not None:
+                experiment_ids.append(int(eid))
+
+            # Capture shared metadata from first row
+            if not metadata_sample:
+                for key in ('strain', 'stim_type', 'power', 'sex', 'experiment'):
+                    val = task.get(key, '')
+                    if val:
+                        metadata_sample[key] = val
+
+        if len(pmx_paths) < 2:
+            QMessageBox.warning(
+                self.mw, "Cannot Group",
+                f"Need at least 2 experiments with .pmx results. Found {len(pmx_paths)}.\n\n"
+                "Run batch analysis first.",
+            )
+            return
+
+        # Suggest group name from metadata
+        parts = []
+        if metadata_sample.get('sex'):
+            parts.append(metadata_sample['sex'])
+        if metadata_sample.get('power'):
+            parts.append(metadata_sample['power'])
+        if metadata_sample.get('strain'):
+            parts.append(metadata_sample['strain'])
+        suggested = " ".join(parts) if parts else f"Group ({len(pmx_paths)} experiments)"
+
+        name, ok = QInputDialog.getText(
+            self.mw, "Group Name",
+            f"Name for this group ({len(pmx_paths)} experiments):",
+            text=suggested,
+        )
+        if not ok or not name.strip():
+            return
+
+        group_name = name.strip()
+
+        # Run grouping service with progress dialog
+        from core.services.grouping_service import create_group
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
+
+        # Output to physiometrics/ next to first .pmx
+        output_dir = pmx_paths[0].parent
+        print(f"[grouping] Creating group '{group_name}' from {len(pmx_paths)} experiments...")
+
+        progress = QProgressDialog(
+            f"Creating group '{group_name}'...\nLoading {len(pmx_paths)} experiments",
+            None, 0, 0, self.mw,
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        result = create_group(
+            pmx_paths=pmx_paths,
+            group_name=group_name,
+            output_dir=output_dir,
+            metadata=metadata_sample,
+            animal_ids=animal_ids,
+        )
+
+        progress.close()
+
+        if not result.success:
+            QMessageBox.critical(self.mw, "Grouping Failed", result.error)
+            return
+
+        # Save to DB
+        try:
+            store = self.mw._project_viewmodel.service.store
+            group_id = store.create_group(
+                group_name=group_name,
+                experiment_ids=experiment_ids,
+                group_path=str(result.group_path),
+                metadata=metadata_sample,
+            )
+            print(f"[grouping] Saved group #{group_id}: {result.group_path}")
+        except Exception as e:
+            print(f"[grouping] Warning: DB save failed: {e}")
+
+        # Auto-save figure as PNG alongside the group file
+        fig_path = result.group_path.with_suffix('.png') if result.group_path else None
+
+        QMessageBox.information(
+            self.mw, "Group Created",
+            f"Group '{group_name}' created with {result.n_experiments} experiments.\n\n"
+            f"Saved to: {result.group_path}\n"
+            f"Figure: {fig_path.name if fig_path else 'none'}\n"
+            f"Metrics: {', '.join(result.metric_keys)}",
+        )
+
+        # Generate and save comparison plot
+        try:
+            from core.services.comparison_service import compare_groups
+            fig = compare_groups(
+                [result.group_path],
+                title=group_name,
+                show_individual=True,
+            )
+            if fig is not None:
+                if fig_path:
+                    fig.savefig(str(fig_path), dpi=150, bbox_inches='tight')
+                    print(f"[grouping] Figure saved: {fig_path}")
+
+                # Show in a Qt dialog with embedded matplotlib canvas
+                from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+                from PyQt6.QtWidgets import QDialog, QVBoxLayout
+                from PyQt6.QtCore import Qt
+
+                dlg = QDialog(self.mw)
+                dlg.setWindowTitle(f"Group: {group_name}")
+                dlg.resize(1000, 700)
+                dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
+                layout = QVBoxLayout(dlg)
+                layout.setContentsMargins(0, 0, 0, 0)
+                canvas = FigureCanvasQTAgg(fig)
+                layout.addWidget(canvas)
+                dlg.show()
+                print(f"[grouping] Comparison plot displayed")
+        except Exception as e:
+            print(f"[grouping] Warning: Could not display comparison plot: {e}")
+
+    def _compare_groups_dialog(self):
+        """Open file picker for group .npz files and show comparison plot."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from pathlib import Path
+
+        # Try to get groups from DB for a smart starting directory
+        start_dir = str(Path.home())
+        try:
+            store = self.mw._project_viewmodel.service.store
+            groups = store.get_groups()
+            if groups and groups[0].get('group_path'):
+                gp = Path(groups[0]['group_path'])
+                if gp.parent.exists():
+                    start_dir = str(gp.parent)
+        except Exception:
+            pass
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self.mw,
+            "Select Group Files to Compare",
+            start_dir,
+            "Group Files (*.npz);;All Files (*)",
+        )
+
+        if len(file_paths) < 2:
+            if file_paths:
+                QMessageBox.warning(
+                    self.mw, "Need More Groups",
+                    "Select at least 2 group .npz files to compare.",
+                )
+            return
+
+        group_paths = [Path(fp) for fp in file_paths]
+
+        try:
+            from core.services.comparison_service import compare_groups
+            fig = compare_groups(group_paths)
+            fig.show()
+            print(f"[compare] Showing comparison of {len(group_paths)} groups")
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self.mw, "Comparison Failed",
+                f"Error: {e}\n\n{traceback.format_exc()}",
+            )

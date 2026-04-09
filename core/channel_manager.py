@@ -23,6 +23,7 @@ from PyQt6.QtGui import QFont, QCursor
 # Channel type options
 CHANNEL_TYPES = [
     ("Pleth", "Plethysmography - peak detection and breath analysis"),
+    ("EKG", "Electrocardiogram - R-peak detection, heart rate, and HRV analysis"),
     ("Opto Stim", "Optogenetic stimulus - shows blue background during stim"),
     ("Event", "Event channel - for marking licks, bouts, or other events"),
     ("Raw Signal", "Display only, no special processing"),
@@ -44,6 +45,8 @@ class ChannelConfig:
         name_lower = self.name.lower()
         if 'pleth' in name_lower or 'resp' in name_lower or 'breath' in name_lower or 'flow' in name_lower or 'airway' in name_lower:
             self.channel_type = "Pleth"
+        elif 'ecg' in name_lower or 'ekg' in name_lower or 'heart' in name_lower or 'cardiac' in name_lower:
+            self.channel_type = "EKG"
         elif 'opto' in name_lower or 'laser' in name_lower or 'stim' in name_lower or 'led' in name_lower or 'light' in name_lower:
             self.channel_type = "Opto Stim"
             # Opto Stim channels default to hidden (still creates blue spans on Pleth)
@@ -219,9 +222,11 @@ class ChannelRowWidget(QFrame):
                 padding: 4px;
             }
         """)
-        self.settings_btn.setToolTip("Edit photometry settings")
+        self.settings_btn.setToolTip("Edit channel settings")
         self.settings_btn.clicked.connect(self._on_settings_clicked)
-        self.settings_btn.setVisible(self.config.source == "computed")
+        self.settings_btn.setVisible(
+            self.config.source == "computed" or self.config.channel_type == "EKG"
+        )
         settings_layout.addWidget(self.settings_btn)
 
         layout.addWidget(self.settings_container)
@@ -244,8 +249,10 @@ class ChannelRowWidget(QFrame):
         idx = self.type_combo.findText(config.channel_type)
         if idx >= 0:
             self.type_combo.setCurrentIndex(idx)
-        # Show gear only for computed channels (container maintains alignment)
-        self.settings_btn.setVisible(config.source == "computed")
+        # Show gear for computed channels and EKG (container maintains alignment)
+        self.settings_btn.setVisible(
+            config.source == "computed" or config.channel_type == "EKG"
+        )
 
 
 class ChannelManagerWidget(QWidget):
@@ -686,6 +693,13 @@ class ChannelManagerWidget(QWidget):
                 return config.name
         return None
 
+    def get_ekg_channel(self) -> Optional[str]:
+        """Get the name of the EKG channel (for heart rate analysis)."""
+        for config in self._channels.values():
+            if config.channel_type == "EKG":
+                return config.name
+        return None
+
     def get_opto_stim_channel(self) -> Optional[str]:
         """Get the name of the Opto Stim channel (for blue overlay)."""
         for config in self._channels.values():
@@ -777,6 +791,13 @@ class ChannelManagerWidget(QWidget):
     def _on_channel_type_changed(self, name: str, new_type: str):
         if name in self._channels:
             self._channels[name].channel_type = new_type
+
+            # Show/hide gear icon based on type
+            if name in self._channel_rows:
+                row = self._channel_rows[name]
+                row.settings_btn.setVisible(
+                    self._channels[name].source == "computed" or new_type == "EKG"
+                )
 
             # Enforce single Pleth: if this channel is set to Pleth,
             # change all other Pleth channels to Raw Signal

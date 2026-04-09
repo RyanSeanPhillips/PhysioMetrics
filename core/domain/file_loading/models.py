@@ -44,6 +44,8 @@ class NpzLoadResult:
     gmm_cache: Optional[object] = None
     app_settings: Optional[dict] = None
     event_markers: Optional[dict] = None
+    cta_data: Optional[dict] = None     # CTA collection data
+    channel_config: Optional[dict] = None  # Channel visibility and types
     npz_path: Optional[Path] = None
     metadata: Optional[dict] = None     # NPZ header metadata
 

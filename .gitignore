@@ -63,9 +63,11 @@ profiling_results/
 # Keep the app icon (even if you later move it into an images folder)
 !assets/plethapp_thumbnail.ico
 
-# Test files (don't commit testing scripts)
-test_*.py
-test_*.bat
+# Test files (don't commit ad-hoc testing scripts in root)
+/test_*.py
+/test_*.bat
+# But DO track tests/ directory
+!tests/test_*.py
 *.tmp.*
 *.backup
 

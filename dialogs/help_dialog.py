@@ -529,8 +529,74 @@ class HelpDialog(ExportMixin, QDialog):
         self.update_label.setMaximumWidth(220)
         left_column.addWidget(self.update_label)
 
+        # Download & Install button (hidden by default)
+        from PyQt6.QtWidgets import QPushButton, QProgressBar
+        self.download_update_btn = QPushButton("Download && Install Update")
+        self.download_update_btn.setMaximumWidth(200)
+        self.download_update_btn.setVisible(False)
+        self.download_update_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a6a2a;
+                color: #e0e0e0;
+                border: 1px solid #4CAF50;
+                padding: 6px 12px;
+                border-radius: 3px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3a7a3a; }
+            QPushButton:pressed { background-color: #1a5a1a; }
+            QPushButton:disabled { background-color: #3a3a3a; border-color: #4a4a4a; color: #888; }
+        """)
+        self.download_update_btn.clicked.connect(self._on_download_update_clicked)
+        left_column.addWidget(self.download_update_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # Progress bar (hidden by default)
+        self.update_progress = QProgressBar()
+        self.update_progress.setMaximumWidth(200)
+        self.update_progress.setVisible(False)
+        self.update_progress.setTextVisible(True)
+        self.update_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #4a4a4a;
+                border-radius: 3px;
+                background-color: #2a2a2a;
+                text-align: center;
+                color: #e0e0e0;
+                font-size: 8pt;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 2px;
+            }
+        """)
+        left_column.addWidget(self.update_progress, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        left_column.addSpacing(4)
+
+        # Revert to Previous Version button (hidden by default)
+        self.rollback_btn = QPushButton("Revert to Previous Version")
+        self.rollback_btn.setMaximumWidth(200)
+        self.rollback_btn.setVisible(False)
+        self.rollback_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #e0e0e0;
+                border: 1px solid #4a4a4a;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-size: 8pt;
+            }
+            QPushButton:hover { background-color: #4a4a4a; }
+        """)
+        self.rollback_btn.clicked.connect(self._on_rollback_clicked)
+        left_column.addWidget(self.rollback_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         # Perform initial update check asynchronously to avoid blocking UI
         self._check_for_updates_async()
+
+        # Show rollback button if backup exists
+        self._check_rollback_available()
 
         left_column.addStretch()
 
@@ -732,6 +798,7 @@ class HelpDialog(ExportMixin, QDialog):
         # If update info already provided from main window and not forcing, use it immediately
         if self.update_info is not None and not force_check:
             self.update_label.setText(update_checker.get_update_message(self.update_info))
+            self._show_download_button_if_available(self.update_info)
             return
 
         # Otherwise, check in background
@@ -753,6 +820,7 @@ class HelpDialog(ExportMixin, QDialog):
                 self.update_label.setText(update_checker.get_update_message(update_info))
                 # Update cached info
                 self.update_info = update_info
+                self._show_download_button_if_available(update_info)
             else:
                 # No update or check failed
                 if force_check:
@@ -766,6 +834,149 @@ class HelpDialog(ExportMixin, QDialog):
         self.update_thread = UpdateChecker()
         self.update_thread.update_checked.connect(on_update_checked)
         self.update_thread.start()
+
+    def _show_download_button_if_available(self, update_info: dict):
+        """Show the download button if a Windows asset is available for the update."""
+        from core.auto_updater import is_running_as_bundle
+        if not is_running_as_bundle():
+            return
+
+        from core.update_checker import is_prerelease_version
+        from version_info import VERSION_STRING
+        is_beta = is_prerelease_version(VERSION_STRING)
+
+        asset = None
+        if is_beta and update_info.get('beta_update'):
+            asset = update_info['beta_update'].get('asset')
+        elif update_info.get('stable_update'):
+            asset = update_info['stable_update'].get('asset')
+
+        if asset and asset.get('download_url'):
+            self.download_update_btn.setVisible(True)
+            # Check if already downloading/ready via parent VM
+            if (self.parent_window and hasattr(self.parent_window, '_updater_vm')
+                    and self.parent_window._updater_vm is not None):
+                vm = self.parent_window._updater_vm
+                if vm.state == 'ready':
+                    self.download_update_btn.setText("Restart to Apply Update")
+                elif vm.state == 'downloading':
+                    self.download_update_btn.setText("Downloading...")
+                    self.download_update_btn.setEnabled(False)
+                    self.update_progress.setVisible(True)
+
+    def _check_rollback_available(self):
+        """Show rollback button if a backup version exists."""
+        from core.auto_updater import has_backup, get_backup_version, is_running_as_bundle
+        if is_running_as_bundle() and has_backup():
+            version = get_backup_version()
+            label = f"Revert to v{version}" if version else "Revert to Previous Version"
+            self.rollback_btn.setText(label)
+            self.rollback_btn.setVisible(True)
+
+    def _on_download_update_clicked(self):
+        """Start downloading the update via parent's UpdaterViewModel."""
+        if not self.parent_window or not hasattr(self.parent_window, '_get_updater_vm'):
+            return
+        if not hasattr(self.parent_window, '_pending_update_asset'):
+            return
+        asset = self.parent_window._pending_update_asset
+        if not asset:
+            # Try to find asset from update_info
+            if self.update_info:
+                from core.update_checker import is_prerelease_version
+                from version_info import VERSION_STRING
+                is_beta = is_prerelease_version(VERSION_STRING)
+                if is_beta and self.update_info.get('beta_update'):
+                    asset = self.update_info['beta_update'].get('asset')
+                elif self.update_info.get('stable_update'):
+                    asset = self.update_info['stable_update'].get('asset')
+                if asset:
+                    self.parent_window._pending_update_asset = asset
+            if not asset:
+                return
+
+        vm = self.parent_window._get_updater_vm()
+        if vm.state == 'downloading':
+            return
+        if vm.state == 'ready':
+            self.parent_window._prompt_restart_for_update()
+            return
+
+        # Connect progress signals to our UI
+        vm.download_progress.connect(self._on_download_progress)
+        vm.download_complete.connect(self._on_download_complete)
+        vm.download_error.connect(self._on_download_error)
+
+        self.download_update_btn.setText("Downloading...")
+        self.download_update_btn.setEnabled(False)
+        self.update_progress.setVisible(True)
+        self.update_progress.setValue(0)
+
+        vm.start_download(asset)
+
+    def _on_download_progress(self, downloaded: int, total: int):
+        """Update progress bar."""
+        if total > 0:
+            pct = int(downloaded * 100 / total)
+            self.update_progress.setValue(pct)
+            dl_mb = downloaded / (1024 * 1024)
+            total_mb = total / (1024 * 1024)
+            self.update_progress.setFormat(f"{dl_mb:.0f}/{total_mb:.0f} MB")
+
+    def _on_download_complete(self, script_path: str):
+        """Download finished — change button to restart."""
+        self.download_update_btn.setText("Restart to Apply Update")
+        self.download_update_btn.setEnabled(True)
+        self.update_progress.setValue(100)
+        self.update_progress.setFormat("Ready!")
+        # Disconnect progress signals, reconnect button for restart
+        try:
+            vm = self.parent_window._get_updater_vm()
+            vm.download_progress.disconnect(self._on_download_progress)
+            vm.download_complete.disconnect(self._on_download_complete)
+            vm.download_error.disconnect(self._on_download_error)
+        except (TypeError, AttributeError):
+            pass
+        self.download_update_btn.clicked.disconnect()
+        self.download_update_btn.clicked.connect(
+            lambda: self.parent_window._prompt_restart_for_update()
+        )
+
+    def _on_download_error(self, message: str):
+        """Handle download error."""
+        self.download_update_btn.setText("Download Failed — Retry")
+        self.download_update_btn.setEnabled(True)
+        self.update_progress.setVisible(False)
+        self.update_label.setText(
+            f'<p style="color: #FF6B6B; font-size: 8pt;">{message}</p>'
+        )
+        # Disconnect error signal
+        try:
+            vm = self.parent_window._get_updater_vm()
+            vm.download_progress.disconnect(self._on_download_progress)
+            vm.download_complete.disconnect(self._on_download_complete)
+            vm.download_error.disconnect(self._on_download_error)
+        except (TypeError, AttributeError):
+            pass
+
+    def _on_rollback_clicked(self):
+        """Handle rollback button click."""
+        from PyQt6.QtWidgets import QMessageBox
+        from core.auto_updater import get_backup_version
+
+        version = get_backup_version() or "previous"
+        reply = QMessageBox.question(
+            self,
+            "Revert Version",
+            f"This will replace the current version with v{version}.\n\n"
+            "PhysioMetrics will close and restart with the previous version.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.parent_window and hasattr(self.parent_window, '_get_updater_vm'):
+                self.parent_window._get_updater_vm().apply_rollback()
 
     def _on_report_issue(self):
         """Open the Report Issue dialog."""

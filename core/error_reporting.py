@@ -618,6 +618,18 @@ class ErrorReporter:
             if lock_data.get('session_id') == self._session_id:
                 return False
 
+            # Check if the locked PID is actually still running
+            # (if not, this is a stale lock from a killed process — still a "crash"
+            # but we know the process is gone, so the lock is safe to overwrite)
+            locked_pid = lock_data.get('pid')
+            if locked_pid:
+                try:
+                    import psutil
+                    if not psutil.pid_exists(int(locked_pid)):
+                        print(f"[Session] Previous session PID {locked_pid} no longer running (stale lock)")
+                except (ImportError, ValueError):
+                    pass  # psutil not available, continue normally
+
             # Lock file exists with different session_id = previous crash
             # Save the previous session info before we overwrite it
             self._previous_session_info = lock_data

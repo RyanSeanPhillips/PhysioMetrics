@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from core.state import AppState
 
 
@@ -73,7 +73,267 @@ def get_ml_npz_path_for_channel(data_path: Path, channel_name: str) -> Path:
     return ml_folder / f"{base}.{safe_channel}.ml.npz"
 
 
-def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None) -> None:
+def detect_session_format(path: Path) -> str:
+    """Detect whether a session file is NPZ or HDF5 by reading magic bytes.
+
+    Returns 'hdf5' if HDF5, 'npz' otherwise (default for any non-HDF5 file).
+    """
+    try:
+        with open(path, 'rb') as f:
+            magic = f.read(4)
+        if magic == b'\x89HDF':
+            return 'hdf5'
+    except (OSError, IOError):
+        pass
+    return 'npz'
+
+
+def load_session(path: Path, **kwargs):
+    """Universal session loader — auto-detects NPZ vs HDF5 format.
+
+    Returns the same 7-tuple as load_state_from_npz.
+    """
+    if detect_session_format(path) == 'hdf5':
+        from core.hdf5_io import load_state_from_hdf5
+        return load_state_from_hdf5(path, **kwargs)
+    return load_state_from_npz(path, **kwargs)
+
+
+def get_session_metadata(path: Path) -> dict:
+    """Universal metadata reader — auto-detects NPZ vs HDF5 format."""
+    if detect_session_format(path) == 'hdf5':
+        from core.hdf5_io import get_hdf5_metadata
+        return get_hdf5_metadata(path)
+    return get_npz_metadata(path)
+
+
+def get_pmx_path(
+    data_path: Path,
+    analysis_type: str = "pleth",
+    animal_id: str = "",
+    channel: str = "",
+) -> Path:
+    """Get .pmx output path for a recording file.
+
+    Output goes into a ``physiometrics/`` subfolder next to the data file.
+
+    Naming: ``{stem}.{analysis_type}.{id}.pmx``
+    where *id* is ``animal_id`` (preferred) or sanitised channel name.
+
+    Args:
+        data_path: Path to original data file (.abf, .smrx, .edf)
+        analysis_type: e.g. "pleth", "photometry", "hargreaves"
+        animal_id: Animal ID from experiment metadata (preferred identifier)
+        channel: Channel name fallback (e.g. "IN 0")
+
+    Returns:
+        Path to .pmx file inside ``physiometrics/`` subfolder.
+    """
+    stem = data_path.stem
+    id_part = animal_id.strip() if animal_id and animal_id.strip() else ""
+    if not id_part:
+        id_part = channel.replace(" ", "").replace("/", "_").replace("\\", "_")
+    if not id_part:
+        id_part = "default"
+
+    out_dir = data_path.parent / "physiometrics"
+    return out_dir / f"{stem}.{analysis_type}.{id_part}.pmx"
+
+
+def save_batch_result(
+    output_path: Path,
+    original_file: Path,
+    channel: str,
+    sr_hz: float,
+    t: np.ndarray,
+    config: Any,
+    filter_config: Any,
+    detection_results: Dict[int, Dict],
+    metrics_rows: List[Dict],
+    summary: Dict[str, float],
+    event_markers: Optional[Dict] = None,
+    analysis_type: str = "pleth",
+    stim_chan: str = "None",
+    y2_by_sweep: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
+    stim_results: Optional[Dict[int, Dict]] = None,
+) -> Path:
+    """Save batch analysis results to a .pmx (PhysioMetrics eXperiment) file.
+
+    The .pmx format is NPZ under the hood, extending the existing .pleth.npz
+    keys with v2 schema fields (schema_version, summary, metrics, config).
+
+    Args:
+        output_path: Where to write the .pmx file.
+        original_file: Path to original recording file.
+        channel: Channel analysed (e.g. "IN 0").
+        sr_hz: Sample rate in Hz.
+        t: Time array.
+        config: AnalysisConfig used for detection (has .to_dict()).
+        filter_config: FilterConfig used (has .to_dict()).
+        detection_results: sweep_idx -> detect_single_sweep output dict.
+        metrics_rows: List of per-breath metric dicts.
+        summary: One-row summary dict (mean_freq, mean_ti, etc.).
+        event_markers: Optional event marker data from EventMarkerService.
+        analysis_type: e.g. "pleth" (future: other modalities).
+
+    Returns:
+        The output_path written to.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: Dict[str, Any] = {}
+
+    # ── v2 metadata ───────────────────────────────────────────────
+    data["schema_version"] = 2
+    data["analysis_type"] = analysis_type
+    data["analysis_config_json"] = json.dumps(config.to_dict())
+    data["batch_timestamp"] = datetime.now().isoformat()
+    data["channel_analyzed"] = channel
+    data["summary_json"] = json.dumps(summary)
+    data["metrics_json"] = json.dumps(metrics_rows)
+
+    # ── Standard v1-compatible metadata ───────────────────────────
+    data["version"] = "2.0.0"
+    data["saved_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data["original_file_path"] = str(original_file)
+    data["sr_hz"] = sr_hz
+    data["t"] = t
+    data["analyze_chan"] = channel
+    data["stim_chan"] = stim_chan
+    data["event_channel"] = "None"
+
+    # ── Per-sweep peaks, labels, breath features ──────────────────
+    sweep_indices = sorted(detection_results.keys())
+    data["peak_sweep_indices"] = np.array(sweep_indices, dtype=int)
+
+    all_peaks_sweep_indices = []
+    breath_sweep_indices = []
+    peak_metrics_sweep_indices = []
+
+    for s in sweep_indices:
+        det = detection_results[s]
+
+        # Labeled peaks (filtered — what the user sees)
+        labeled_idx = det.get("labeled_indices", np.array([]))
+        data[f"peaks_sweep_{s}"] = labeled_idx
+
+        # All peaks (master list with labels)
+        apd = det.get("all_peaks_data")
+        if apd is not None:
+            all_peaks_sweep_indices.append(s)
+            data[f"all_peaks_indices_sweep_{s}"] = det.get("all_peak_indices", np.array([], dtype=int))
+            data[f"all_peaks_labels_sweep_{s}"] = apd["labels"]
+            data[f"all_peaks_label_source_sweep_{s}"] = apd["label_source"]
+            if "breath_type_class" in apd and apd["breath_type_class"] is not None:
+                data[f"all_peaks_breath_type_class_sweep_{s}"] = apd["breath_type_class"]
+
+        # Labeled breath features
+        labeled_br = det.get("labeled_breaths", {})
+        if labeled_br:
+            breath_sweep_indices.append(s)
+            breath_json = json.dumps({
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in labeled_br.items()
+                if k in ("onsets", "offsets", "expmins", "expoffs")
+            })
+            data[f"breath_sweep_{s}_json"] = breath_json
+
+        # Peak candidate metrics
+        cm = det.get("current_metrics")
+        if cm:
+            peak_metrics_sweep_indices.append(s)
+            data[f"peak_metrics_sweep_{s}_json"] = json.dumps(cm)
+
+    if all_peaks_sweep_indices:
+        data["all_peaks_sweep_indices"] = np.array(all_peaks_sweep_indices, dtype=int)
+    if breath_sweep_indices:
+        data["breath_sweep_indices"] = np.array(breath_sweep_indices, dtype=int)
+    if peak_metrics_sweep_indices:
+        data["peak_metrics_sweep_indices"] = np.array(peak_metrics_sweep_indices, dtype=int)
+
+    # ── Filter settings (v1 compatible) ───────────────────────────
+    fc = filter_config
+    data["use_low"] = fc.use_low
+    data["use_high"] = fc.use_high
+    data["use_mean_sub"] = fc.use_mean_sub
+    data["use_invert"] = fc.use_invert
+    data["low_hz"] = fc.low_hz if fc.low_hz else 0.0
+    data["high_hz"] = fc.high_hz if fc.high_hz else 0.0
+    data["mean_val"] = fc.mean_val
+
+    # ── Navigation defaults ───────────────────────────────────────
+    data["sweep_idx"] = 0
+    data["window_start_s"] = 0.0
+    data["window_dur_s"] = float(t[-1] - t[0]) if len(t) > 0 else 10.0
+
+    # ── Empty defaults for v1 keys the loader expects ─────────────
+    data["sigh_sweep_indices"] = np.array([], dtype=int)
+    data["omitted_sweeps"] = np.array([], dtype=int)
+    data["omitted_points_indices"] = np.array([], dtype=int)
+    data["omitted_ranges_indices"] = np.array([], dtype=int)
+    data["sniff_sweep_indices"] = np.array([], dtype=int)
+    data["bout_sweep_indices"] = np.array([], dtype=int)
+    data["gmm_sweep_indices"] = np.array([], dtype=int)
+    data["has_gmm_cache"] = False
+    # ── Stimulus detection results ───────────────────────────────
+    if stim_results:
+        onset_indices = sorted(stim_results.keys())
+        data["stim_onset_sweep_indices"] = np.array(onset_indices, dtype=int)
+        data["stim_offset_sweep_indices"] = np.array(onset_indices, dtype=int)
+        data["stim_spans_sweep_indices"] = np.array(onset_indices, dtype=int)
+        stim_metrics_indices = []
+        for s in onset_indices:
+            det = stim_results[s]
+            data[f"stim_onsets_sweep_{s}"] = det["onsets"]
+            data[f"stim_offsets_sweep_{s}"] = det["offsets"]
+            data[f"stim_spans_sweep_{s}_json"] = json.dumps(det["spans"])
+            if det.get("metrics"):
+                stim_metrics_indices.append(s)
+                data[f"stim_metrics_sweep_{s}_json"] = json.dumps(det["metrics"])
+        data["stim_metrics_sweep_indices"] = np.array(stim_metrics_indices, dtype=int)
+    else:
+        data["stim_onset_sweep_indices"] = np.array([], dtype=int)
+        data["stim_offset_sweep_indices"] = np.array([], dtype=int)
+        data["stim_spans_sweep_indices"] = np.array([], dtype=int)
+        data["stim_metrics_sweep_indices"] = np.array([], dtype=int)
+
+    # ── App settings ──────────────────────────────────────────────
+    data["has_app_settings"] = True
+    data["filter_order"] = fc.filter_order
+    data["use_zscore_normalization"] = fc.use_zscore
+    data["notch_filter_lower"] = fc.notch_lower if fc.notch_lower is not None else 0.0
+    data["notch_filter_upper"] = fc.notch_upper if fc.notch_upper is not None else 0.0
+    data["apnea_threshold"] = 0.5
+    data["active_classifier"] = config.active_classifier
+    data["active_eupnea_sniff_classifier"] = config.active_eupnea_sniff_classifier
+    data["active_sigh_classifier"] = config.active_sigh_classifier
+
+    # ── Continuous y2 metrics (for grouping/consolidation) ─────────
+    if y2_by_sweep:
+        y2_sweep_indices = sorted(y2_by_sweep.keys())
+        data["y2_continuous_sweep_indices"] = np.array(y2_sweep_indices, dtype=int)
+        # Collect all metric keys from first sweep
+        first_keys = list(y2_by_sweep[y2_sweep_indices[0]].keys())
+        data["y2_continuous_metric_keys_json"] = json.dumps(first_keys)
+        for s in y2_sweep_indices:
+            for key, arr in y2_by_sweep[s].items():
+                data[f"y2c_{key}_sweep_{s}"] = arr
+
+    # ── Event markers (carried over from existing .pmx on re-analyze) ─
+    if event_markers is not None:
+        for key, value in event_markers.items():
+            data[key] = value
+
+    # ── Write ─────────────────────────────────────────────────────
+    # np.savez_compressed auto-appends .npz — save then rename to .pmx
+    np.savez_compressed(str(output_path), **data)
+    npz_actual = Path(str(output_path) + ".npz")
+    if npz_actual.exists() and npz_actual != output_path:
+        npz_actual.replace(output_path)  # atomic on same volume
+    return output_path
+
+
+def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = False, gmm_cache: Optional[Dict] = None, app_settings: Optional[Dict] = None, event_markers: Optional[Dict] = None, cta_data: Optional[Dict] = None, channel_config: Optional[Dict] = None) -> None:
     """
     Save complete analysis state to .pleth.npz file.
 
@@ -127,15 +387,20 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             safe_name = chan_name.replace(' ', '_').replace('/', '_')
             data[f'sweeps_{safe_name}'] = sweep_data
 
-        data['t'] = state.t
         data['channel_names'] = np.array(state.channel_names, dtype=object)
 
+    # Always save time array and sample rate (needed for grouping/consolidation)
+    data['t'] = state.t
     data['sr_hz'] = state.sr_hz
 
     # ===== CHANNEL SELECTIONS =====
     data['analyze_chan'] = state.analyze_chan if state.analyze_chan else 'None'
     data['stim_chan'] = state.stim_chan if state.stim_chan else 'None'
     data['event_channel'] = state.event_channel if state.event_channel else 'None'
+
+    # ===== CHANNEL CONFIG (visibility, types) =====
+    if channel_config:
+        data['channel_config_json'] = json.dumps(channel_config)
 
     # ===== FILTER SETTINGS =====
     data['use_low'] = state.use_low
@@ -177,13 +442,22 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             if 'breath_type_class' in all_peaks_dict and all_peaks_dict['breath_type_class'] is not None:
                 data[f'all_peaks_breath_type_class_sweep_{sweep_idx}'] = all_peaks_dict['breath_type_class']
 
-            # Save read-only GMM predictions (for classifier switching)
-            if 'gmm_class_ro' in all_peaks_dict and all_peaks_dict['gmm_class_ro'] is not None:
-                data[f'all_peaks_gmm_class_ro_sweep_{sweep_idx}'] = all_peaks_dict['gmm_class_ro']
-
-            # Save eupnea/sniff source (which classifier produced each label)
-            if 'eupnea_sniff_source' in all_peaks_dict and all_peaks_dict['eupnea_sniff_source'] is not None:
-                data[f'all_peaks_eupnea_sniff_source_sweep_{sweep_idx}'] = all_peaks_dict['eupnea_sniff_source']
+            # Save ALL read-only classifier predictions (for instant classifier switching)
+            _ro_keys = [
+                # Breath vs noise
+                'labels_threshold_ro', 'labels_xgboost_ro', 'labels_rf_ro', 'labels_mlp_ro',
+                # Eupnea vs sniffing
+                'gmm_class_ro', 'eupnea_sniff_xgboost_ro', 'eupnea_sniff_rf_ro', 'eupnea_sniff_mlp_ro',
+                # Sigh
+                'sigh_xgboost_ro', 'sigh_rf_ro', 'sigh_mlp_ro',
+                # Source tracking
+                'eupnea_sniff_source',
+                # Prominences (needed for threshold recalculation)
+                'prominences',
+            ]
+            for ro_key in _ro_keys:
+                if ro_key in all_peaks_dict and all_peaks_dict[ro_key] is not None:
+                    data[f'all_peaks_{ro_key}_sweep_{sweep_idx}'] = all_peaks_dict[ro_key]
 
     # ===== PEAK METRICS (for ML export) =====
     # Save peak_metrics_by_sweep as JSON (list of dicts)
@@ -195,6 +469,15 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
             metrics_list = state.peak_metrics_by_sweep[sweep_idx]
             # Convert list of dicts to JSON
             data[f'peak_metrics_sweep_{sweep_idx}_json'] = json.dumps(metrics_list)
+
+    # ===== CURRENT PEAK METRICS (edited, for Y2 plotting) =====
+    if hasattr(state, 'current_peak_metrics_by_sweep') and state.current_peak_metrics_by_sweep:
+        cur_metrics_sweep_indices = sorted(state.current_peak_metrics_by_sweep.keys())
+        data['current_peak_metrics_sweep_indices'] = np.array(cur_metrics_sweep_indices, dtype=int)
+
+        for sweep_idx in cur_metrics_sweep_indices:
+            metrics_list = state.current_peak_metrics_by_sweep[sweep_idx]
+            data[f'current_peak_metrics_sweep_{sweep_idx}_json'] = json.dumps(metrics_list)
 
     # ===== BREATH FEATURES (per-sweep) =====
     # Each sweep's breath dict contains onsets, offsets, expmins, expoffs
@@ -261,6 +544,11 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         for key, value in event_markers.items():
             data[key] = value
 
+    # ===== CTA DATA =====
+    if cta_data is not None:
+        for key, value in cta_data.items():
+            data[key] = value
+
     # ===== GMM PROBABILITIES (per-sweep) =====
     gmm_sweep_indices = sorted(state.gmm_sniff_probabilities.keys())
     data['gmm_sweep_indices'] = np.array(gmm_sweep_indices, dtype=int)
@@ -293,6 +581,8 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         data['notch_filter_upper'] = app_settings.get('notch_filter_upper', 0.0) if app_settings.get('notch_filter_upper') is not None else 0.0
         data['apnea_threshold'] = app_settings.get('apnea_threshold', 0.5)
         data['active_eupnea_sniff_classifier'] = app_settings.get('active_eupnea_sniff_classifier', 'gmm')
+        data['active_classifier'] = app_settings.get('active_classifier', 'xgboost')
+        data['active_sigh_classifier'] = app_settings.get('active_sigh_classifier', 'xgboost')
     else:
         data['has_app_settings'] = False
 
@@ -330,6 +620,23 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
         metrics = state.stim_metrics_by_sweep[sweep_idx]
         data[f'stim_metrics_sweep_{sweep_idx}_json'] = json.dumps(metrics)
 
+    # ===== EKG / HEART RATE (per-sweep) =====
+    ekg_chan = getattr(state, 'ekg_chan', None)
+    data['ekg_chan'] = ekg_chan if ekg_chan else 'None'
+    ecg_results = getattr(state, 'ecg_results_by_sweep', {})
+    if ecg_results:
+        ecg_sweep_indices = sorted(ecg_results.keys())
+        data['ecg_sweep_indices'] = np.array(ecg_sweep_indices, dtype=int)
+        ecg_data_dict = {}
+        for si in ecg_sweep_indices:
+            r = ecg_results[si]
+            if hasattr(r, 'to_dict'):
+                ecg_data_dict[str(si)] = r.to_dict()
+        data['ecg_results_json'] = json.dumps(ecg_data_dict)
+    ecg_cfg = getattr(state, 'ecg_config', None)
+    if ecg_cfg is not None and hasattr(ecg_cfg, 'to_dict'):
+        data['ecg_config_json'] = json.dumps(ecg_cfg.to_dict())
+
     # ===== SAVE TO NPZ =====
     np.savez_compressed(npz_path, **data)
 
@@ -337,10 +644,14 @@ def save_state_to_npz(state: AppState, npz_path: Path, include_raw_data: bool = 
 def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                         alternative_data_path: Path = None) -> Tuple[AppState, bool, Optional[Dict], Optional[Dict], Optional[Dict]]:
     """
-    Load complete analysis state from .pleth.npz file.
+    Load complete analysis state from .pleth.npz or .pmx file.
+
+    Supports both v1 (.pleth.npz) and v2 (.pmx) formats. The v2 format
+    includes additional keys (schema_version, summary_json, metrics_json,
+    analysis_config_json) but is otherwise backwards-compatible.
 
     Args:
-        npz_path: Path to .pleth.npz file
+        npz_path: Path to .pleth.npz or .pmx file
         reload_raw_data: If True, reload raw data from original file
                         If False, only load if embedded in NPZ
         alternative_data_path: If provided, use this path instead of the original
@@ -390,12 +701,12 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
         print(f"[npz_io] Original path not found: {original_file_path}")
         print(f"[npz_io] Searching for {original_filename} relative to NPZ location...")
 
-        # Common locations to check (relative to NPZ file):
-        # 1. Parent folder of NPZ (if NPZ is in Pleth_App_analysis/)
+        # Common locations to check (relative to NPZ/PMX file):
+        # 1. Parent folder of NPZ (if NPZ is in Pleth_App_analysis/ or physiometrics/)
         # 2. Grandparent folder (../.. from NPZ)
         # 3. Same folder as NPZ
         search_paths = [
-            npz_path.parent.parent / original_filename,  # One folder up from Pleth_App_analysis
+            npz_path.parent.parent / original_filename,  # One folder up from Pleth_App_analysis or physiometrics
             npz_path.parent.parent.parent / original_filename,  # Two folders up
             npz_path.parent / original_filename,  # Same folder as NPZ
         ]
@@ -421,13 +732,32 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             state.in_path = data_path_to_load  # Use the actual path loaded from
             raw_data_loaded = True
         except Exception as e:
-            # Original file couldn't be loaded - try NPZ embedded data
+            # Original file couldn't be loaded - try photometry NPZ loader
             print(f"Warning: Could not reload from {data_path_to_load}: {e}")
-            print("Attempting to use embedded data from NPZ...")
-            pass
+
+            # Fallback: try loading as photometry NPZ
+            if data_path_to_load.suffix == '.npz':
+                try:
+                    from core.photometry import load_experiment_from_npz
+                    phot_data = load_experiment_from_npz(data_path_to_load, experiment_index=0)
+                    if phot_data and 'sweeps' in phot_data:
+                        state.sr_hz = phot_data['sr_hz']
+                        state.sweeps = phot_data['sweeps']
+                        state.channel_names = phot_data['channel_names']
+                        state.t = phot_data['t']
+                        state.in_path = data_path_to_load
+                        state.photometry_raw = phot_data.get('photometry_raw')
+                        state.photometry_npz_path = data_path_to_load
+                        raw_data_loaded = True
+                        print(f"[npz_io] Loaded raw data from photometry NPZ: {len(state.channel_names)} channels")
+                except Exception as e2:
+                    print(f"Warning: Photometry NPZ fallback also failed: {e2}")
+
+            if not raw_data_loaded:
+                print("Attempting to use embedded data from NPZ...")
 
     # Check if raw data is embedded in NPZ (fallback or if reload_raw_data=False)
-    if not raw_data_loaded and 't' in data:
+    if not raw_data_loaded and 't' in data and 'channel_names' in data:
         state.sr_hz = float(data['sr_hz'])
         state.t = data['t']
         state.channel_names = list(data['channel_names'])
@@ -542,15 +872,17 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                 # Backwards compatibility: load old gmm_class as breath_type_class
                 all_peaks_dict['breath_type_class'] = data[gmm_class_key]
 
-            # Load read-only GMM predictions (for classifier switching)
-            gmm_class_ro_key = f'all_peaks_gmm_class_ro_sweep_{sweep_idx}'
-            if gmm_class_ro_key in data:
-                all_peaks_dict['gmm_class_ro'] = data[gmm_class_ro_key]
-
-            # Load eupnea/sniff source
-            eupnea_sniff_source_key = f'all_peaks_eupnea_sniff_source_sweep_{sweep_idx}'
-            if eupnea_sniff_source_key in data:
-                all_peaks_dict['eupnea_sniff_source'] = data[eupnea_sniff_source_key]
+            # Load ALL read-only classifier predictions (for instant classifier switching)
+            _ro_keys = [
+                'labels_threshold_ro', 'labels_xgboost_ro', 'labels_rf_ro', 'labels_mlp_ro',
+                'gmm_class_ro', 'eupnea_sniff_xgboost_ro', 'eupnea_sniff_rf_ro', 'eupnea_sniff_mlp_ro',
+                'sigh_xgboost_ro', 'sigh_rf_ro', 'sigh_mlp_ro',
+                'eupnea_sniff_source', 'prominences',
+            ]
+            for ro_key in _ro_keys:
+                npz_key = f'all_peaks_{ro_key}_sweep_{sweep_idx}'
+                if npz_key in data:
+                    all_peaks_dict[ro_key] = data[npz_key]
 
             state.all_peaks_by_sweep[int(sweep_idx)] = all_peaks_dict
 
@@ -561,6 +893,16 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             metrics_json = str(data[f'peak_metrics_sweep_{sweep_idx}_json'])
             metrics_list = json.loads(metrics_json)
             state.peak_metrics_by_sweep[int(sweep_idx)] = metrics_list
+
+    # ===== CURRENT PEAK METRICS (edited, for Y2 plotting) =====
+    if 'current_peak_metrics_sweep_indices' in data:
+        cur_metrics_indices = data['current_peak_metrics_sweep_indices']
+        for sweep_idx in cur_metrics_indices:
+            key = f'current_peak_metrics_sweep_{sweep_idx}_json'
+            if key in data:
+                metrics_json = str(data[key])
+                metrics_list = json.loads(metrics_json)
+                state.current_peak_metrics_by_sweep[int(sweep_idx)] = metrics_list
 
     # ===== BREATH FEATURES (per-sweep) =====
     if 'breath_sweep_indices' in data:
@@ -575,6 +917,13 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
                 'expmins': np.array(breath_dict['expmins'], dtype=int),
                 'expoffs': np.array(breath_dict['expoffs'], dtype=int)
             }
+
+    # Populate all_breaths_by_sweep from breath_by_sweep (they share the same data
+    # for labeled breaths — all_breaths includes noise peaks too, but after restore
+    # we only have the filtered set, which is sufficient for CTA and display)
+    if state.breath_by_sweep and not state.all_breaths_by_sweep:
+        for sweep_idx, breath_dict in state.breath_by_sweep.items():
+            state.all_breaths_by_sweep[sweep_idx] = breath_dict.copy()
 
     # ===== SIGHS (per-sweep) =====
     if 'sigh_sweep_indices' in data:
@@ -652,8 +1001,13 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             'notch_filter_lower': notch_lower if notch_lower != 0.0 else None,
             'notch_filter_upper': notch_upper if notch_upper != 0.0 else None,
             'apnea_threshold': float(data['apnea_threshold']),
-            'active_eupnea_sniff_classifier': str(data.get('active_eupnea_sniff_classifier', 'gmm'))
+            'active_eupnea_sniff_classifier': str(data.get('active_eupnea_sniff_classifier', 'gmm')),
+            'active_classifier': str(data.get('active_classifier', 'xgboost')),
+            'active_sigh_classifier': str(data.get('active_sigh_classifier', 'xgboost')),
         }
+        # Also set on state directly so they're available before _restore_app_settings runs
+        state.active_classifier = app_settings['active_classifier']
+        state.active_sigh_classifier = app_settings['active_sigh_classifier']
 
     # ===== Y2 METRICS =====
     if 'y2_metric_key' in data:
@@ -667,6 +1021,20 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             for sweep_idx in y2_indices:
                 y2_vals = data[f'y2_values_sweep_{sweep_idx}']
                 state.y2_values_by_sweep[int(sweep_idx)] = y2_vals
+
+    # ===== CONTINUOUS Y2 METRICS (batch-computed, for grouping) =====
+    if 'y2_continuous_sweep_indices' in data:
+        y2c_indices = data['y2_continuous_sweep_indices']
+        y2c_keys = json.loads(str(data['y2_continuous_metric_keys_json']))
+        state.y2_continuous_by_sweep = {}
+        for sweep_idx in y2c_indices:
+            s = int(sweep_idx)
+            sweep_data = {}
+            for key in y2c_keys:
+                arr_key = f'y2c_{key}_sweep_{sweep_idx}'
+                if arr_key in data:
+                    sweep_data[key] = data[arr_key]
+            state.y2_continuous_by_sweep[s] = sweep_data
 
     # ===== STIMULUS DETECTION (per-sweep) =====
     if 'stim_onset_sweep_indices' in data:
@@ -689,20 +1057,62 @@ def load_state_from_npz(npz_path: Path, reload_raw_data: bool = True,
             metrics = json.loads(metrics_json)
             state.stim_metrics_by_sweep[int(sweep_idx)] = metrics
 
-    return state, raw_data_loaded, gmm_cache, app_settings, event_markers
+    # ===== EKG / HEART RATE (per-sweep) =====
+    ekg_chan_raw = str(data.get('ekg_chan', 'None'))
+    state.ekg_chan = ekg_chan_raw if ekg_chan_raw != 'None' else None
+
+    if 'ecg_results_json' in data:
+        try:
+            from core.domain.ecg.models import ECGResult
+            ecg_data_dict = json.loads(str(data['ecg_results_json']))
+            for si_str, rd in ecg_data_dict.items():
+                state.ecg_results_by_sweep[int(si_str)] = ECGResult.from_dict(rd)
+        except Exception:
+            pass  # graceful fallback if models not available
+
+    if 'ecg_config_json' in data:
+        try:
+            from core.domain.ecg.models import ECGConfig
+            state.ecg_config = ECGConfig.from_dict(
+                json.loads(str(data['ecg_config_json']))
+            )
+        except Exception:
+            pass
+
+    # ===== CTA DATA =====
+    cta_data = None
+    if 'cta_version' in data:
+        cta_data = {'cta_version': data['cta_version']}
+        # New workspace format (v2) — full multi-tab state
+        if 'cta_workspace_json' in data:
+            cta_data['cta_workspace_json'] = str(data['cta_workspace_json'])
+        # Legacy or fallback single-collection format
+        if 'cta_json' in data:
+            cta_data['cta_json'] = str(data['cta_json'])
+
+    # ===== CHANNEL CONFIG =====
+    channel_config = None
+    if 'channel_config_json' in data:
+        try:
+            channel_config = json.loads(str(data['channel_config_json']))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return state, raw_data_loaded, gmm_cache, app_settings, event_markers, cta_data, channel_config
 
 
 def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:
     """
-    Get metadata from .pleth.npz file without loading full state.
+    Get metadata from .pleth.npz or .pmx file without loading full state.
 
     Useful for displaying info in load dialogs.
 
     Args:
-        npz_path: Path to .pleth.npz file
+        npz_path: Path to .pleth.npz or .pmx file
 
     Returns:
         Dict with metadata: version, timestamp, n_peaks, n_sweeps, etc.
+        For v2 (.pmx) files, also includes schema_version, analysis_type, summary.
     """
     try:
         data = np.load(npz_path, allow_pickle=True)
@@ -729,7 +1139,7 @@ def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:
                 val = val.item()
             return str(val)
 
-        return {
+        result = {
             'version': safe_str(data.get('version'), 'unknown'),
             'saved_timestamp': safe_str(data.get('saved_timestamp'), 'unknown'),
             'modified_time': mtime.strftime('%Y-%m-%d %H:%M'),
@@ -740,6 +1150,21 @@ def get_npz_metadata(npz_path: Path) -> Dict[str, Any]:
             'has_gmm': len(data.get('gmm_sweep_indices', [])) > 0,
             'has_edits': True  # Assume true if NPZ exists (could be more sophisticated)
         }
+
+        # v2 (.pmx) fields
+        schema_ver = data.get('schema_version')
+        if schema_ver is not None:
+            if hasattr(schema_ver, 'item'):
+                schema_ver = schema_ver.item()
+            result['schema_version'] = int(schema_ver)
+            result['analysis_type'] = safe_str(data.get('analysis_type'), 'pleth')
+            summary_str = safe_str(data.get('summary_json'), '{}')
+            try:
+                result['summary'] = json.loads(summary_str)
+            except (json.JSONDecodeError, TypeError):
+                result['summary'] = {}
+
+        return result
     except Exception as e:
         return {
             'error': str(e),

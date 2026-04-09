@@ -299,9 +299,9 @@ class AppBridgeService:
                     }
                     # Top-level tool box pages
                     TOP_TAB_MAP = {
-                        "project": "projectPage",
-                        "analysis": "analysisPage",
-                        "curation": "curationPage",
+                        "project": "ProjectBuilderTab",
+                        "analysis": "Analysis",
+                        "curation": "Curation",
                     }
 
                     widget_name = TAB_MAP.get(tab_name)
@@ -315,12 +315,13 @@ class AppBridgeService:
                                 return
 
                     top_name = TOP_TAB_MAP.get(tab_name)
-                    if top_name and hasattr(mw, 'mainToolBox'):
-                        tb = mw.mainToolBox
-                        for i in range(tb.count()):
-                            w = tb.widget(i)
+                    # Try the top-level Tabs QTabWidget (named 'Tabs' in .ui)
+                    top_tabs = getattr(mw, 'Tabs', None) or getattr(mw, 'mainToolBox', None)
+                    if top_name and top_tabs:
+                        for i in range(top_tabs.count()):
+                            w = top_tabs.widget(i)
                             if w and w.objectName() == top_name:
-                                tb.setCurrentIndex(i)
+                                top_tabs.setCurrentIndex(i)
                                 result_holder["switched"] = tab_name
                                 return
 

@@ -1,0 +1,5 @@
+# Test output — screenshots, baselines, verification plots
+# These are machine-specific (resolution, theme) so don't commit
+*.png
+screenshots/
+baselines/

@@ -79,16 +79,20 @@ class CTATrace:
     event_time: float
     time: np.ndarray
     values: np.ndarray
+    paired_event_offset: Optional[float] = None  # Time offset to paired marker (onset→withdrawal or vice versa)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary (for JSON storage)."""
-        return {
+        d = {
             'event_id': self.event_id,
             'sweep_idx': self.sweep_idx,
             'event_time': float(self.event_time),
             'time': self.time.tolist() if isinstance(self.time, np.ndarray) else list(self.time),
             'values': self.values.tolist() if isinstance(self.values, np.ndarray) else list(self.values),
         }
+        if self.paired_event_offset is not None:
+            d['paired_event_offset'] = float(self.paired_event_offset)
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'CTATrace':
@@ -99,6 +103,7 @@ class CTATrace:
             event_time=float(d['event_time']),
             time=np.array(d['time'], dtype=np.float64),
             values=np.array(d['values'], dtype=np.float64),
+            paired_event_offset=d.get('paired_event_offset'),
         )
 
 
@@ -259,3 +264,122 @@ class CTACollection:
         except (json.JSONDecodeError, KeyError) as e:
             print(f"[CTACollection] Warning: Failed to load CTA data: {e}")
             return None
+
+
+@dataclass
+class CTATabConfig:
+    """
+    Configuration for a single CTA comparison tab (pure data, no Qt).
+
+    Captures all UI widget state needed to reconstruct a tab exactly
+    as the user configured it.
+    """
+    tab_name: str = "CTA 1"
+    trigger_source: str = "event_markers"  # "event_markers" or "breath_events"
+
+    # Breath event config
+    breath_trigger_point: str = "inspiratory_onset"
+    breath_type_filter: str = "all"
+    breath_max_events: int = 100
+    breath_min_bout: int = 1
+    breath_time_start: float = 0.0
+    breath_time_end: float = 0.0
+
+    # Time windows
+    window_before: float = 30.0
+    window_after: float = 30.0
+
+    # Z-score normalization
+    zscore_enabled: bool = True
+    baseline_start: float = -5.0
+    baseline_end: float = -0.25
+
+    # Condition mode
+    condition_mode: str = "overlay"
+
+    # Selections
+    selected_categories: List[str] = field(default_factory=list)
+    selected_conditions: List[str] = field(default_factory=list)
+    selected_metrics: List[str] = field(default_factory=list)
+    metric_colors: Dict[str, str] = field(default_factory=dict)  # key -> hex
+
+    # Display toggles
+    show_paired_lines: bool = True
+    show_baseline_zone: bool = True
+    show_stim_period: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'tab_name': self.tab_name,
+            'trigger_source': self.trigger_source,
+            'breath_trigger_point': self.breath_trigger_point,
+            'breath_type_filter': self.breath_type_filter,
+            'breath_max_events': self.breath_max_events,
+            'breath_min_bout': self.breath_min_bout,
+            'breath_time_start': self.breath_time_start,
+            'breath_time_end': self.breath_time_end,
+            'window_before': self.window_before,
+            'window_after': self.window_after,
+            'zscore_enabled': self.zscore_enabled,
+            'baseline_start': self.baseline_start,
+            'baseline_end': self.baseline_end,
+            'condition_mode': self.condition_mode,
+            'selected_categories': self.selected_categories,
+            'selected_conditions': self.selected_conditions,
+            'selected_metrics': self.selected_metrics,
+            'metric_colors': self.metric_colors,
+            'show_paired_lines': self.show_paired_lines,
+            'show_baseline_zone': self.show_baseline_zone,
+            'show_stim_period': self.show_stim_period,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'CTATabConfig':
+        return cls(
+            tab_name=str(d.get('tab_name', 'CTA 1')),
+            trigger_source=str(d.get('trigger_source', 'event_markers')),
+            breath_trigger_point=str(d.get('breath_trigger_point', 'inspiratory_onset')),
+            breath_type_filter=str(d.get('breath_type_filter', 'all')),
+            breath_max_events=int(d.get('breath_max_events', 100)),
+            breath_min_bout=int(d.get('breath_min_bout', 1)),
+            breath_time_start=float(d.get('breath_time_start', 0.0)),
+            breath_time_end=float(d.get('breath_time_end', 0.0)),
+            window_before=float(d.get('window_before', 30.0)),
+            window_after=float(d.get('window_after', 30.0)),
+            zscore_enabled=bool(d.get('zscore_enabled', True)),
+            baseline_start=float(d.get('baseline_start', -5.0)),
+            baseline_end=float(d.get('baseline_end', -0.25)),
+            condition_mode=str(d.get('condition_mode', 'overlay')),
+            selected_categories=list(d.get('selected_categories', [])),
+            selected_conditions=list(d.get('selected_conditions', [])),
+            selected_metrics=list(d.get('selected_metrics', [])),
+            metric_colors=dict(d.get('metric_colors', {})),
+            show_paired_lines=bool(d.get('show_paired_lines', True)),
+            show_baseline_zone=bool(d.get('show_baseline_zone', True)),
+            show_stim_period=bool(d.get('show_stim_period', True)),
+        )
+
+
+@dataclass
+class CTAWorkspaceConfig:
+    """
+    Complete CTA workspace state — all tabs with configs and results.
+    """
+    active_tab_index: int = 0
+    tabs: List[Dict[str, Any]] = field(default_factory=list)
+    # Each tab entry: {'config': CTATabConfig.to_dict(), 'collection': CTACollection.to_dict() or None,
+    #                   'condition_collections': {cond_name: CTACollection.to_dict()} or None}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'version': 2,
+            'active_tab_index': self.active_tab_index,
+            'tabs': self.tabs,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'CTAWorkspaceConfig':
+        return cls(
+            active_tab_index=int(d.get('active_tab_index', 0)),
+            tabs=list(d.get('tabs', [])),
+        )

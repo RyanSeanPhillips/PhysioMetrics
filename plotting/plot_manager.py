@@ -28,11 +28,12 @@ class ChannelPanelConfig:
     enabling unified handling of 1-N channel displays.
     """
     name: str                          # Channel name
-    channel_type: str                  # "Pleth", "Opto Stim", "Event", "Raw Signal"
+    channel_type: str                  # "Pleth", "EKG", "Opto Stim", "Event", "Raw Signal"
     height_ratio: float = 0.25         # Relative height (0.0-1.0, normalized later)
     show_overlays: bool = False        # Show peak/breath/region overlays (Pleth only)
     is_primary_pleth: bool = False     # Is this the primary Pleth for editing/analysis
     is_event_channel: bool = False     # Show bout annotations on this panel
+    is_ekg_channel: bool = False       # Show R-peak markers and HR axis
     show_stim_spans: bool = False      # Show blue stim background spans
     apply_filtering: bool = False      # Apply filtering (Pleth channels only)
 
@@ -50,6 +51,8 @@ class ChannelPanelConfig:
         # Determine height ratio based on channel type
         if channel_type == "Pleth":
             height_ratio = 0.6
+        elif channel_type == "EKG":
+            height_ratio = 0.30
         elif channel_type == "Opto Stim":
             height_ratio = 0.15
         elif channel_type == "Event":
@@ -64,7 +67,8 @@ class ChannelPanelConfig:
             show_overlays=(channel_type == "Pleth" and is_primary),
             is_primary_pleth=is_primary,
             is_event_channel=(channel_type == "Event"),
-            show_stim_spans=(channel_type == "Pleth"),
+            is_ekg_channel=(channel_type == "EKG"),
+            show_stim_spans=(channel_type in ("Pleth", "EKG")),
             apply_filtering=(channel_type == "Pleth"),
         )
 
@@ -159,6 +163,8 @@ class PlotManager:
         self._metrics_by_sweep.clear()
         self._onsets_by_sweep.clear()
         self._global_outlier_stats = None
+        if hasattr(self, '_outlier_cache'):
+            self._outlier_cache.clear()
 
     def _is_single_panel_mode(self) -> bool:
         """Check if single panel mode is active."""
@@ -474,13 +480,22 @@ class PlotManager:
                     if t1_span > t0_span:
                         ax.axvspan(t0_span, t1_span, color="#2E5090", alpha=0.25)
 
-            # Set labels
-            ax.set_ylabel(config.name, fontsize=10)
+            # Descriptive Y-axis labels for typed channels
+            if config.channel_type == "Pleth":
+                ax.set_ylabel(f"Pleth ({config.name})", fontsize=10)
+            elif config.channel_type == "EKG":
+                ax.set_ylabel(f"EKG ({config.name})", fontsize=10)
+            else:
+                ax.set_ylabel(config.name, fontsize=10)
             ax.grid(False)
 
             # Apply Y-axis autoscaling
             if not grid_mode:
                 self._autoscale_axis(ax, y_data)
+
+            # EKG channel: draw R-peak markers and HR trace
+            if config.is_ekg_channel:
+                self._draw_ekg_overlays(ax, s, t_plot, y_data)
 
         # Set title on first axis
         title = self._build_plot_title(s)
@@ -545,11 +560,13 @@ class PlotManager:
             self.plot_host._store_from_axes(mode="single")
 
         # Layout adjustments
+        has_ekg = any(c.is_ekg_channel for c in channel_configs)
+        right_margin = 0.92 if has_ekg else 0.98  # leave room for HR right axis
         if grid_mode:
             self.plot_host.fig.tight_layout(pad=1.0)
         else:
             self.plot_host.fig.tight_layout(pad=0.5, h_pad=0.1, w_pad=0.1)
-            self.plot_host.fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.08)
+            self.plot_host.fig.subplots_adjust(left=0.06, right=right_margin, top=0.95, bottom=0.08)
 
         self.plot_host.canvas.draw_idle()
 
@@ -657,7 +674,8 @@ class PlotManager:
         # --- Layout reuse: skip expensive PlotItem create/destroy if panel config unchanged ---
         # Build a fingerprint from channel configs to detect layout changes
         layout_key = (is_dark, tuple((c.name, c.channel_type, c.is_primary_pleth, c.is_event_channel,
-                                      c.show_stim_spans, c.show_overlays, c.apply_filtering)
+                                      c.is_ekg_channel, c.show_stim_spans, c.show_overlays,
+                                      c.apply_filtering)
                                      for c in channel_configs))
         can_reuse = (
             hasattr(self, '_layout_key') and self._layout_key == layout_key
@@ -669,6 +687,9 @@ class PlotManager:
             plots = list(self.plot_host._subplots)
             for plot in plots:
                 plot.clear()  # Removes curves/scatter/regions but keeps axes, labels, x-link
+                # Re-setup axis drag handlers (plot.clear() can drop event overrides)
+                if hasattr(self.plot_host, '_setup_axis_drag'):
+                    self.plot_host._setup_axis_drag(plot)
         else:
             # Full rebuild: panel config changed (different channels, added/removed panels)
             self.plot_host.ax_main = None
@@ -711,7 +732,13 @@ class PlotManager:
                 plots.append(plot)
                 self.plot_host._subplots.append(plot)
 
-                plot.setLabel('left', config.name)
+                # Descriptive Y-axis labels for typed channels
+                if config.channel_type == "Pleth":
+                    plot.setLabel('left', f"Pleth ({config.name})")
+                elif config.channel_type == "EKG":
+                    plot.setLabel('left', f"EKG ({config.name})")
+                else:
+                    plot.setLabel('left', config.name)
 
             # Batch x-link: block signals to avoid O(N) cascade during setup
             if len(plots) > 1:
@@ -728,6 +755,8 @@ class PlotManager:
         ax_main = None
         ax_event = None
         primary_y_data = None
+        first_y_data = None  # Fallback for minimap when no primary pleth
+        minimap_channels = []  # (y_data, color) tuples for minimap
 
         for i, config in enumerate(channel_configs):
             plot = plots[i]
@@ -759,6 +788,10 @@ class PlotManager:
             if config.is_primary_pleth:
                 primary_y_data = y_data
 
+            # Capture first non-event channel data as minimap fallback
+            if first_y_data is None and not config.is_event_channel:
+                first_y_data = y_data
+
             # Choose trace color based on channel type and name
             ch_lower = config.name.lower()
             if 'iso' in ch_lower or '415' in ch_lower:
@@ -774,9 +807,20 @@ class PlotManager:
             else:
                 channel_trace_color = trace_color
 
+            # Collect channel data for minimap (skip event channels)
+            if not config.is_event_channel:
+                minimap_channels.append((y_data, channel_trace_color))
+
             # Plot trace: clipToView sends only visible data to GPU
-            curve = plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
-                              clipToView=True)
+            # EKG channels: raw trace is faint (filtered overlay added later)
+            if config.is_ekg_channel:
+                raw_pen = pg.mkPen(channel_trace_color, width=0.5, style=pg.QtCore.Qt.PenStyle.SolidLine)
+                raw_pen.setColor(pg.mkColor(channel_trace_color))
+                raw_pen.color().setAlpha(80)
+                curve = plot.plot(t_plot, y_data, pen=raw_pen, clipToView=True)
+            else:
+                curve = plot.plot(t_plot, y_data, pen=pg.mkPen(channel_trace_color, width=1.2),
+                                  clipToView=True)
             # Peak-preserving downsampling: reduces points during zoom/pan while
             # keeping min/max per bucket so peaks/valleys are never lost
             if self.use_auto_downsample:
@@ -802,6 +846,16 @@ class PlotManager:
                         )
                         region.setZValue(-10)
                         plot.addItem(region)
+
+        # Draw EKG overlays on any EKG channel panels (pyqtgraph path)
+        for i, config in enumerate(channel_configs):
+            if config.is_ekg_channel and i < len(plots):
+                plots[i]._ekg_channel_name = config.name  # tag for click routing
+                if config.name in st.sweeps:
+                    ekg_y = st.sweeps[config.name][:, s]
+                    self._draw_ekg_overlays_pyqtgraph(plots[i], s, t_plot, ekg_y)
+            elif i < len(plots):
+                plots[i]._ekg_channel_name = None  # ensure non-EKG plots aren't tagged
 
         # Set title on first plot
         if plots:
@@ -867,11 +921,69 @@ class PlotManager:
             except:
                 pass
 
+        # Ensure Y range includes sigh markers (they have a 7% offset above peaks)
+        if plots and ax_main is not None and primary_y_data is not None:
+            self._ensure_sigh_markers_visible(plots[0], s, primary_y_data)
+
         # Disable auto-range after view is set to prevent jumpiness during edits
         # Only disable if we successfully restored a view OR if force_autorange completed
         if plots and (view_was_restored or force_autorange):
             if hasattr(self.plot_host, 'disable_autorange'):
                 self.plot_host.disable_autorange()
+
+        # Update navigation bars with data range
+        if hasattr(self.plot_host, 'update_nav_bars') and t_plot is not None and len(t_plot) > 0:
+            t_min, t_max = float(t_plot[0]), float(t_plot[-1])
+            # Collect all minimap markers: stim spans + opto spans + event markers
+            nav_markers = []
+            # Add stim spans (already in plot coordinates)
+            for (a, b) in spans_plot:
+                nav_markers.append({
+                    'start_time': a, 'end_time': b, 'color': '#4682E0',
+                })
+            # Add opto stim spans (blue shading)
+            for (a, b) in opto_spans_plot:
+                nav_markers.append({
+                    'start_time': a, 'end_time': b, 'color': '#007acc',
+                })
+            # Add user-created event markers
+            nav_markers.extend(self._collect_minimap_markers(s, t0=t0))
+            self.plot_host.update_nav_bars(
+                t_min, t_max, t_plot,
+                minimap_channels=minimap_channels if minimap_channels else None,
+                markers=nav_markers if nav_markers else None,
+            )
+            # Reconnect nav sync in case subplots were rebuilt
+            if not can_reuse:
+                self.plot_host._connect_nav_to_primary()
+
+    def _collect_minimap_markers(self, sweep_idx, t0=0.0):
+        """Collect event markers for the current sweep to display on minimap.
+
+        Args:
+            sweep_idx: Current sweep index
+            t0: Time offset applied to plot coordinates (stim alignment)
+        """
+        try:
+            mw = self.window
+            if mw is None:
+                return []
+            vm = getattr(mw, '_event_marker_viewmodel', None)
+            if vm is None or vm.marker_count == 0:
+                return []
+            markers = vm.get_markers_for_sweep(sweep_idx)
+            result = []
+            for m in markers:
+                color = vm.get_color_for_marker(m)
+                end = (m.end_time - t0) if m.end_time is not None else None
+                result.append({
+                    'start_time': m.start_time - t0,
+                    'end_time': end,
+                    'color': color,
+                })
+            return result
+        except Exception:
+            return []
 
     def _draw_peaks_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw peak markers on PyQtGraph plot, with gray markers for omitted regions."""
@@ -977,6 +1089,30 @@ class PlotManager:
         add_markers(breath.get('expmins'), (31, 120, 180), 's')
         # Exp offs (purple diamonds)
         add_markers(breath.get('expoffs'), (155, 89, 182), 'd')
+
+    def _ensure_sigh_markers_visible(self, plot, sweep_idx, y_data):
+        """Extend Y range if sigh markers would be clipped above the view."""
+        st = self.state
+        sigh_idx = getattr(st, "sigh_by_sweep", {}).get(sweep_idx, None)
+        if sigh_idx is None or len(sigh_idx) == 0:
+            return
+
+        valid_idx = [i for i in sigh_idx if i < len(y_data)]
+        if not valid_idx:
+            return
+
+        # Calculate where sigh stars actually sit (same offset as _draw_sigh_markers_pyqtgraph)
+        offset_frac = float(getattr(self.window, "_sigh_offset_frac", 0.07))
+        y_span = float(np.nanmax(y_data) - np.nanmin(y_data))
+        y_off = offset_frac * (y_span if np.isfinite(y_span) and y_span > 0 else 1.0)
+        sigh_y_max = float(np.max(y_data[valid_idx])) + y_off
+
+        # Check if current Y range clips the sigh markers
+        y_range = plot.viewRange()[1]
+        if sigh_y_max > y_range[1]:
+            # Extend upper Y limit with a small margin above the sigh star
+            margin = 0.03 * (y_range[1] - y_range[0])
+            plot.setYRange(y_range[0], sigh_y_max + margin, padding=0)
 
     def _draw_sigh_markers_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
         """Draw sigh markers (gold stars) on PyQtGraph plot."""
@@ -1362,7 +1498,7 @@ class PlotManager:
                 main_plot = self.plot_host._get_main_plot()
                 if main_plot is not None and main_plot.layout is not None:
                     main_plot.layout.removeItem(self.plot_host._y2_axis)
-            except:
+            except Exception:
                 pass
             self.plot_host._y2_axis = None
 
@@ -1398,12 +1534,30 @@ class PlotManager:
         elif key == "eupnea_conf":
             label = "Eupnea Confidence"
             color = "#2ecc71"  # Green
+        elif key == "hr":
+            label = "Heart Rate (BPM)"
+            color = "#FF9800"  # Orange
+        elif key == "rr_interval":
+            label = "RR Interval (ms)"
+            color = "#FF9800"
+        elif key == "rsa_amplitude":
+            label = "RSA Amplitude (BPM)"
+            color = "#E91E63"  # Pink
         else:
             label = key
             color = "#39FF14"  # Default bright green
 
-        # Create a new ViewBox for Y2 data
+        # Create a new ViewBox for Y2 data (no mouse interaction — scroll/drag affects main plot only)
         y2_viewbox = pg.ViewBox()
+        y2_viewbox.setMouseEnabled(x=False, y=False)
+        y2_viewbox.setMenuEnabled(False)
+        # Prevent Y2 viewbox from stealing drag events from the main ViewBox.
+        # pyqtgraph dispatches drags to the highest-Z item first; without this,
+        # the Y2 ViewBox (Z=100) accepts drags before the main ViewBox sees them,
+        # breaking all drag-based editing modes (omit, merge, move point).
+        from PyQt6.QtCore import Qt
+        y2_viewbox.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        y2_viewbox.mouseDragEvent = lambda ev, axis=None: None
         self.plot_host._y2_viewbox = y2_viewbox
 
         # Create Y2 axis on the right
@@ -1455,8 +1609,14 @@ class PlotManager:
         self.plot_host._y2_update_connection = update_views  # Store reference for cleanup
         update_views()
 
-        # Auto-range the Y2 axis
-        y2_viewbox.autoRange()
+        # Auto-range the Y2 axis to actual data range (not NaN/0)
+        valid = arr[np.isfinite(arr)]
+        if len(valid) > 0:
+            ymin, ymax = float(np.min(valid)), float(np.max(valid))
+            margin = max(0.05 * (ymax - ymin), 1.0)  # at least 1 unit margin
+            y2_viewbox.setYRange(ymin - margin, ymax + margin, padding=0)
+        else:
+            y2_viewbox.autoRange()
 
     def _build_channel_configs_from_manager(self) -> List[ChannelPanelConfig]:
         """Build ChannelPanelConfig list from channel manager.
@@ -1958,6 +2118,198 @@ class PlotManager:
 
         return " | ".join(title_parts)
 
+    def _draw_ekg_overlays_pyqtgraph(self, plot, sweep_idx, t_plot, y_data):
+        """Draw filtered signal, R-peak markers, and summary on a PyQtGraph EKG panel."""
+        import pyqtgraph as pg
+        st = self.state
+        sr_hz = st.sr_hz or 1000.0
+        ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+        result = ecg_results.get(sweep_idx)
+        if result is None:
+            return
+
+        r_peaks = result.r_peaks
+        labels = result.labels
+        n = min(len(y_data), len(t_plot))
+
+        # Bandpass-filtered signal overlaid in blue (this is the "real" trace)
+        filtered = None
+        ecg_config = getattr(st, 'ecg_config', None)
+        if ecg_config is not None:
+            try:
+                from scipy.signal import butter, sosfiltfilt
+                nyq = (st.sr_hz or 1000.0) / 2.0
+                low = max(ecg_config.bandpass_low, 0.5)
+                high = min(ecg_config.bandpass_high, nyq - 1.0)
+                if low < high:
+                    sos = butter(ecg_config.filter_order, [low, high],
+                                 btype='band', fs=st.sr_hz, output='sos')
+                    filtered = sosfiltfilt(sos, y_data)
+                    filt_curve = plot.plot(
+                        t_plot, filtered,
+                        pen=pg.mkPen('#42A5F5', width=1.5),
+                    )
+                    filt_curve.setZValue(2)
+                    if self.use_auto_downsample:
+                        filt_curve.setDownsampling(auto=True, method='peak')
+            except Exception:
+                pass
+
+        # Show Pan-Tompkins integrated signal + threshold (scaled to fit, faint)
+        if filtered is not None and ecg_config is not None:
+            try:
+                from scipy.signal import find_peaks as _fp
+                h_deriv = np.array([-1.0, -2.0, 0.0, 2.0, 1.0]) * (sr_hz / 8.0)
+                deriv = np.convolve(filtered, h_deriv, mode='same')
+                squared = deriv ** 2
+                win = max(1, int(ecg_config.mwi_window_ms * sr_hz / 1000.0))
+                integrated = np.convolve(squared, np.ones(win) / win, mode='same')
+
+                # Scale integrated to fit in bottom 25% of signal range
+                sig_min, sig_max = np.nanmin(filtered), np.nanmax(filtered)
+                sig_range = sig_max - sig_min if sig_max > sig_min else 1.0
+                int_max = np.max(integrated) if np.max(integrated) > 0 else 1.0
+                scale = 0.25 * sig_range / int_max
+                offset = sig_min - 0.05 * sig_range
+                integrated_scaled = integrated * scale + offset
+
+                int_curve = plot.plot(
+                    t_plot, integrated_scaled,
+                    pen=pg.mkPen('#66BB6A', width=0.7, style=pg.QtCore.Qt.PenStyle.SolidLine),
+                )
+                int_curve.setZValue(1)
+                int_curve.setOpacity(0.4)
+
+                # Threshold line
+                pct_val = np.percentile(integrated, ecg_config.threshold_percentile)
+                if pct_val <= 0:
+                    pct_val = np.percentile(integrated, 99)
+                thresh_val = ecg_config.threshold_fraction * pct_val
+                thresh_scaled = thresh_val * scale + offset
+                thresh_line = pg.InfiniteLine(
+                    pos=thresh_scaled, angle=0,
+                    pen=pg.mkPen('#FF9800', width=1.0,
+                                 style=pg.QtCore.Qt.PenStyle.DashLine),
+                )
+                thresh_line.setZValue(1)
+                plot.addItem(thresh_line)
+            except Exception:
+                pass
+
+        # Use filtered signal for peak marker Y positions (peaks were detected on filtered)
+        peak_y_source = filtered if filtered is not None else y_data
+
+        if len(r_peaks) == 0:
+            return
+
+        valid_mask = (r_peaks >= 0) & (r_peaks < n)
+        r_peaks_v = r_peaks[valid_mask]
+        labels_v = labels[valid_mask]
+
+        # Valid R-peak markers (red downward triangles on the filtered signal)
+        valid_beats = r_peaks_v[labels_v == 1]
+        if len(valid_beats):
+            scatter = pg.ScatterPlotItem(
+                x=t_plot[valid_beats], y=peak_y_source[valid_beats],
+                size=8, symbol='t',
+                brush=pg.mkBrush(229, 57, 53), pen=None,
+            )
+            scatter.setZValue(10)
+            plot.addItem(scatter)
+
+        # Artifact markers (gray)
+        artifact_beats = r_peaks_v[labels_v == 0]
+        if len(artifact_beats):
+            scatter_art = pg.ScatterPlotItem(
+                x=t_plot[artifact_beats], y=peak_y_source[artifact_beats],
+                size=5, symbol='t',
+                brush=pg.mkBrush(128, 128, 128, 120), pen=None,
+            )
+            scatter_art.setZValue(9)
+            plot.addItem(scatter_art)
+
+        # Summary in panel title
+        sr_hz = st.sr_hz or 1000.0
+        n_valid = int(np.sum(labels_v == 1))
+        hr_mean = result.mean_hr_bpm(sr_hz)
+        q = int(result.quality_score * 100)
+        inv = " (inv)" if result.is_inverted else ""
+        plot.setTitle(
+            f"EKG: {hr_mean:.0f} BPM | {n_valid} beats | Q:{q}%{inv}",
+            color='#FF9800', size='8pt',
+        )
+
+    def _draw_ekg_overlays(self, ax, sweep_idx, t_plot, y_data):
+        """Draw R-peak markers and instantaneous HR trace on an EKG channel panel."""
+        st = self.state
+        ecg_results = getattr(st, 'ecg_results_by_sweep', {})
+        result = ecg_results.get(sweep_idx)
+        if result is None:
+            return
+
+        r_peaks = result.r_peaks
+        labels = result.labels
+        if len(r_peaks) == 0:
+            return
+
+        # Clamp peak indices to data range
+        n = min(len(y_data), len(t_plot))
+        valid_mask = (r_peaks >= 0) & (r_peaks < n)
+        r_peaks_v = r_peaks[valid_mask]
+        labels_v = labels[valid_mask]
+
+        # R-peak markers — red triangles for valid, gray for artifact
+        valid_beats = r_peaks_v[labels_v == 1]
+        artifact_beats = r_peaks_v[labels_v == 0]
+
+        if len(valid_beats):
+            ax.scatter(
+                t_plot[valid_beats], y_data[valid_beats],
+                s=18, c='#E53935', marker='v', zorder=6,
+                edgecolors='none', linewidths=0,
+            )
+        if len(artifact_beats):
+            ax.scatter(
+                t_plot[artifact_beats], y_data[artifact_beats],
+                s=12, c='gray', marker='v', zorder=5,
+                edgecolors='none', linewidths=0, alpha=0.5,
+            )
+
+        # Instantaneous HR trace on right y-axis
+        sr_hz = st.sr_hz or 1000.0
+        hr_trace = result.compute_hr_trace(sr_hz, len(y_data))
+        has_hr = hr_trace is not None and not np.all(np.isnan(hr_trace))
+        if has_hr:
+            # Reuse existing twinx or create new one
+            ax_hr = ax.twinx()
+            ax_hr.plot(
+                t_plot, hr_trace,
+                linewidth=1.0, color='#FF9800', alpha=0.7, zorder=3,
+            )
+            ax_hr.set_ylabel('BPM', fontsize=7, color='#FF9800')
+            ax_hr.tick_params(axis='y', labelcolor='#FF9800', labelsize=6)
+            hr_valid = hr_trace[~np.isnan(hr_trace)]
+            if len(hr_valid) > 0:
+                hr_min, hr_max = np.min(hr_valid), np.max(hr_valid)
+                margin = max(10, (hr_max - hr_min) * 0.15)
+                ax_hr.set_ylim(hr_min - margin, hr_max + margin)
+            ax_hr.grid(False)
+
+        # Summary strip text
+        n_valid = int(np.sum(labels_v == 1))
+        hr_mean = result.mean_hr_bpm(sr_hz)
+        q = int(result.quality_score * 100)
+        inv = " (inv.)" if result.is_inverted else ""
+        summary = f"HR: {hr_mean:.0f} BPM  |  {n_valid} beats  |  Q: {q}%{inv}"
+        ax.text(
+            0.99, 0.02, summary,
+            transform=ax.transAxes, fontsize=7,
+            ha='right', va='bottom', color='#FF9800', alpha=0.9,
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.3),
+        )
+
+        print(f"[ekg] Drew {len(valid_beats)} valid + {len(artifact_beats)} artifact markers on sweep {sweep_idx}")
+
     def _draw_peak_markers(self, sweep_idx, t_plot, y):
         """Draw peak markers for current sweep, with gray markers for omitted regions."""
         st = self.state
@@ -2210,6 +2562,14 @@ class PlotManager:
         outlier_mask = None
         failure_mask = None
 
+        # Cache check — skip recomputation if peaks haven't changed for this sweep
+        n_peaks = len(pks) if pks is not None else 0
+        cache_key = (sweep_idx, n_peaks)
+        if not hasattr(self, '_outlier_cache'):
+            self._outlier_cache = {}
+        if cache_key in self._outlier_cache:
+            return self._outlier_cache[cache_key]
+
         try:
             from core.breath_outliers import identify_problematic_breaths, compute_global_metric_statistics
 
@@ -2259,6 +2619,7 @@ class PlotManager:
             import traceback
             traceback.print_exc()
 
+        self._outlier_cache[cache_key] = (outlier_mask, failure_mask)
         return outlier_mask, failure_mask
 
     def _is_peak_in_omitted_region(self, sweep_idx, peak_idx):

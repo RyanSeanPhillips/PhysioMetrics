@@ -8,7 +8,7 @@ and the existing plot backend.
 
 from typing import Optional, Callable, List, Tuple
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtWidgets import QMenu, QColorDialog
+from PyQt6.QtWidgets import QMenu, QColorDialog, QInputDialog
 from PyQt6.QtGui import QCursor, QColor, QPen
 import pyqtgraph as pg
 
@@ -313,11 +313,22 @@ class EventMarkerPlotIntegration(QObject):
                 self._update_preview_position(event.scenePos())
 
         elif event.type() == QEvent.Type.KeyPress:
+            # Ignore keyboard shortcuts when a dialog (notes, edit, color picker) is active
+            active_modal = QApplication.activeModalWidget()
+            if active_modal is not None:
+                return False
+
             key = event.key()
             modifiers = event.modifiers()
 
-            # Ctrl+Z for undo
+            # Ctrl+Z for undo — editing modes take priority over marker undo
             if key == Qt.Key.Key_Z and modifiers & Qt.KeyboardModifier.ControlModifier:
+                # Check if an editing mode has undo history first
+                mw = self._plot_host._find_main_window() if hasattr(self._plot_host, '_find_main_window') else None
+                em = getattr(mw, 'editing_modes', None) if mw else None
+                if em and em._undo_stack:
+                    em.undo()
+                    return True
                 if self._viewmodel.can_undo:
                     self._viewmodel.undo()
                     self.refresh()
@@ -654,8 +665,35 @@ class EventMarkerPlotIntegration(QObject):
         menu.derivative_toggle_changed.connect(self._on_derivative_toggle_changed)
         menu.generate_cta_requested.connect(self._on_generate_cta_requested)
 
-        # Add Performance Mode submenu
+        # Add Display / Y2 Metric / View Settings submenus
         mw = self._plot_host._find_main_window() if hasattr(self._plot_host, '_find_main_window') else None
+        if mw and hasattr(mw, 'state'):
+            from views.plot_context_menu import PlotDisplayMenuBuilder
+            from core import metrics
+            state = mw.state
+            settings = getattr(mw, 'settings', None)
+            builder = PlotDisplayMenuBuilder(
+                get_eupnea_shade=lambda: state.eupnea_use_shade,
+                get_sniffing_shade=lambda: state.sniffing_use_shade,
+                get_apnea_shade=lambda: state.apnea_use_shade,
+                get_outliers_shade=lambda: state.outliers_use_shade,
+                get_dark_mode=lambda: settings.value("plot_dark_mode", True, type=bool) if settings else True,
+                get_percentile_autoscale=lambda: state.use_percentile_autoscale,
+                get_autoscale_padding=lambda: state.autoscale_padding,
+                get_y2_metric_key=lambda: state.y2_metric_key,
+                metric_specs=metrics.METRIC_SPECS,
+                on_eupnea_toggled=mw.on_eupnea_display_toggled,
+                on_sniffing_toggled=mw.on_sniffing_display_toggled,
+                on_apnea_toggled=mw.on_apnea_display_toggled,
+                on_outliers_toggled=mw.on_outliers_display_toggled,
+                on_dark_mode_toggled=mw.on_dark_mode_toggled,
+                on_autoscale_toggled=mw.on_yautoscale_toggled,
+                on_padding_changed=mw.on_ypadding_changed,
+                on_y2_metric_changed=mw._on_y2_metric_from_menu,
+            )
+            builder.add_to_menu(menu)
+
+        # Add Performance Mode submenu
         pm = getattr(mw, 'plot_manager', None) if mw else None
         if pm:
             menu.addSeparator()
@@ -678,6 +716,50 @@ class EventMarkerPlotIntegration(QObject):
             action_auto.triggered.connect(lambda: pm.toggle_auto_downsample(force=None))
             action_fast.triggered.connect(lambda: pm.toggle_auto_downsample(force=True))
             action_full.triggered.connect(lambda: pm.toggle_auto_downsample(force=False))
+
+        # Navigation submenu
+        ph = self._plot_host
+        if hasattr(ph, '_nav_bar_visible'):
+            menu.addSeparator()
+            nav_menu = menu.addMenu("Navigation")
+
+            nav_visible = getattr(ph, '_nav_bar_visible', True)
+            action_nav_vis = nav_menu.addAction("Show Navigation Bar")
+            action_nav_vis.setCheckable(True)
+            action_nav_vis.setChecked(nav_visible)
+            action_nav_vis.triggered.connect(lambda: ph.set_nav_bar_visible(not ph._nav_bar_visible))
+
+            nav_expand = getattr(ph, '_nav_expandable', True)
+            action_expandable = nav_menu.addAction("Expand on Hover")
+            action_expandable.setCheckable(True)
+            action_expandable.setChecked(nav_expand)
+            action_expandable.triggered.connect(lambda: ph.set_nav_expandable(not ph._nav_expandable))
+
+            style_menu = nav_menu.addMenu("Navigation Style")
+            nav_mode = getattr(ph, '_nav_bar_mode', 'scrollbar')
+            a_scroll = style_menu.addAction("Scrollbar")
+            a_scroll.setCheckable(True)
+            a_scroll.setChecked(nav_mode == 'scrollbar')
+            a_scroll.triggered.connect(lambda: ph.set_nav_bar_mode('scrollbar'))
+            a_mini = style_menu.addAction("Minimap")
+            a_mini.setCheckable(True)
+            a_mini.setChecked(nav_mode == 'minimap')
+            a_mini.triggered.connect(lambda: ph.set_nav_bar_mode('minimap'))
+
+            wheel_menu = nav_menu.addMenu("Scroll Wheel")
+            wm = getattr(ph, '_wheel_mode', 'zoom')
+            a_wz = wheel_menu.addAction("Zoom (Shift+Wheel = Pan)")
+            a_wz.setCheckable(True)
+            a_wz.setChecked(wm == 'zoom')
+            a_wz.triggered.connect(lambda: ph.set_wheel_mode('zoom'))
+            a_wp = wheel_menu.addAction("Pan (Shift+Wheel = Zoom)")
+            a_wp.setCheckable(True)
+            a_wp.setChecked(wm == 'pan')
+            a_wp.triggered.connect(lambda: ph.set_wheel_mode('pan'))
+
+            nav_menu.addSeparator()
+            a_help = nav_menu.addAction("Navigation Help...")
+            a_help.triggered.connect(ph._show_navigation_help)
 
         # Show menu
         menu.exec(QCursor.pos())
@@ -1214,17 +1296,28 @@ class EventMarkerPlotIntegration(QObject):
                 writer.writerow([])  # Blank line between channels
 
     def _on_edit_marker_requested(self, marker_id: str) -> None:
-        """Handle edit marker request."""
-        # TODO: Show edit dialog
-        pass
+        """Handle edit marker request — opens a dialog to edit notes and color."""
+        marker = self._viewmodel.store.get(marker_id)
+        if marker is None:
+            return
+
+        from dialogs.marker_edit_dialog import MarkerEditDialog
+        dialog = MarkerEditDialog(marker, self._viewmodel, parent=None)
+        if dialog.exec() == MarkerEditDialog.DialogCode.Accepted:
+            kwargs = dialog.get_changes()
+            if kwargs:
+                self._viewmodel.update_marker(marker_id, **kwargs)
+                self.refresh()
 
     def _on_category_changed(self, marker_id: str, new_category: str) -> None:
         """Handle category change."""
         self._viewmodel.update_marker(marker_id, category=new_category)
+        self.refresh()
 
     def _on_label_changed(self, marker_id: str, new_label: str) -> None:
         """Handle label change."""
         self._viewmodel.update_marker(marker_id, label=new_label)
+        self.refresh()
 
     def _on_color_requested(self, marker_id: str) -> None:
         """Handle color picker request."""
@@ -1258,8 +1351,20 @@ class EventMarkerPlotIntegration(QObject):
 
     def _on_note_requested(self, marker_id: str) -> None:
         """Handle add note request."""
-        # TODO: Show note dialog
-        pass
+        marker = self._viewmodel.store.get(marker_id)
+        if marker is None:
+            return
+
+        current_notes = marker.notes or ""
+        text, ok = QInputDialog.getMultiLineText(
+            None,
+            "Marker Notes",
+            f"Notes for {marker.category}/{marker.label}:",
+            current_notes,
+        )
+        if ok:
+            self._viewmodel.update_marker(marker_id, notes=text)
+            self.refresh()
 
     def _on_convert_requested(self, marker_id: str, new_type: str) -> None:
         """Handle convert type request."""

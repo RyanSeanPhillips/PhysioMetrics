@@ -46,10 +46,10 @@ class ButtonDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._button_width = 24
         self._button_spacing = 2
+        # (action, icon_text, tooltip, normal_color, hover_color)
         self._buttons = [
-            ('analyze', '▶', 'Analyze this file'),
-            ('delete', '✕', 'Remove from list'),
-            ('info', 'ℹ', 'Show file info'),
+            ('analyze', '▶', 'Open in Analysis tab', QColor(45, 125, 70), QColor(58, 158, 90)),
+            ('info', 'ℹ', 'View metadata & sources', QColor(37, 99, 168), QColor(52, 120, 194)),
         ]
         self._hover_row = -1
         self._hover_button = -1
@@ -71,27 +71,27 @@ class ButtonDelegate(QStyledItemDelegate):
         x = option.rect.left() + 4
         y = option.rect.top() + (option.rect.height() - self._button_width) // 2
 
-        for i, (action, icon_text, tooltip) in enumerate(self._buttons):
+        for i, (action, icon_text, tooltip, normal_color, hover_color) in enumerate(self._buttons):
             btn_rect = QRect(x, y, self._button_width, self._button_width)
 
             # Determine button state
             is_hover = (row == self._hover_row and i == self._hover_button)
             is_pressed = (row == self._hover_row and i == self._pressed_button)
 
-            # Draw button background
+            # Draw button background with per-button color
             if is_pressed:
-                painter.fillRect(btn_rect, QColor(80, 80, 80))
+                painter.fillRect(btn_rect, hover_color.darker(120))
             elif is_hover:
-                painter.fillRect(btn_rect, QColor(60, 60, 60))
+                painter.fillRect(btn_rect, hover_color)
             else:
-                painter.fillRect(btn_rect, QColor(50, 50, 50))
+                painter.fillRect(btn_rect, normal_color)
 
-            # Draw border
-            painter.setPen(QPen(QColor(100, 100, 100), 1))
-            painter.drawRect(btn_rect)
+            # Draw rounded border
+            painter.setPen(QPen(normal_color.lighter(130), 1))
+            painter.drawRoundedRect(btn_rect, 3, 3)
 
-            # Draw icon/text
-            painter.setPen(QPen(QColor(200, 200, 200)))
+            # Draw icon/text in white
+            painter.setPen(QPen(QColor(240, 240, 240)))
             painter.drawText(btn_rect, Qt.AlignmentFlag.AlignCenter, icon_text)
 
             x += self._button_width + self._button_spacing
@@ -143,8 +143,6 @@ class ButtonDelegate(QStyledItemDelegate):
                     action = self._buttons[button_idx][0]
                     if action == 'analyze':
                         self.analyze_clicked.emit(row)
-                    elif action == 'delete':
-                        self.delete_clicked.emit(row)
                     elif action == 'info':
                         self.info_clicked.emit(row)
 
@@ -180,7 +178,13 @@ class StatusDelegate(QStyledItemDelegate):
     """
     Delegate for rendering status indicators.
 
-    Shows colored icons/text based on status value.
+    Shows colored icons/text for static states, and a mini progress bar
+    with detail text for in_progress rows during batch analysis.
+
+    Row data keys used:
+        status: 'pending' | 'in_progress' | 'completed' | 'error' | ...
+        batch_detail: Optional short string (e.g. "Detecting peaks...")
+        batch_progress: Optional float 0.0-1.0 for progress bar fill
     """
 
     STATUS_STYLES = {
@@ -191,6 +195,11 @@ class StatusDelegate(QStyledItemDelegate):
         'skipped': ('⏭', QColor(150, 150, 150)),
         'conflict': ('⚠', QColor(200, 150, 50)),
     }
+
+    # Colors for the mini progress bar
+    _BAR_BG = QColor(50, 50, 55)
+    _BAR_FILL = QColor(45, 125, 70)
+    _BAR_TEXT = QColor(200, 200, 200)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
         """Paint the status indicator."""
@@ -204,14 +213,50 @@ class StatusDelegate(QStyledItemDelegate):
         value = index.data(Qt.ItemDataRole.DisplayRole)
         status = str(value).lower() if value else 'pending'
 
-        # Get style for status
-        icon, color = self.STATUS_STYLES.get(status, ('?', QColor(150, 150, 150)))
-
-        # Draw status
-        painter.setPen(QPen(color))
-        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, icon)
+        # For in_progress rows with batch detail, draw a mini progress bar
+        from core.file_table_model import FileTableModel
+        row_data = index.data(FileTableModel.RowDataRole)
+        if status == 'in_progress' and row_data and row_data.get('batch_detail'):
+            self._paint_progress(painter, option.rect, row_data)
+        else:
+            # Static icon
+            icon, color = self.STATUS_STYLES.get(status, ('?', QColor(150, 150, 150)))
+            painter.setPen(QPen(color))
+            painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, icon)
 
         painter.restore()
+
+    def _paint_progress(self, painter: QPainter, rect: QRect, row_data: dict):
+        """Draw a mini progress bar with detail text inside the status cell."""
+        progress = float(row_data.get('batch_progress', 0.0))
+        detail = str(row_data.get('batch_detail', ''))
+
+        # Bar dimensions — inset from cell edges
+        bar_rect = rect.adjusted(2, 3, -2, -3)
+
+        # Background
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self._BAR_BG))
+        painter.drawRoundedRect(bar_rect, 3, 3)
+
+        # Fill
+        if progress > 0:
+            fill_width = int(bar_rect.width() * min(progress, 1.0))
+            fill_rect = QRect(bar_rect.left(), bar_rect.top(),
+                              fill_width, bar_rect.height())
+            painter.setBrush(QBrush(self._BAR_FILL))
+            painter.drawRoundedRect(fill_rect, 3, 3)
+
+        # Text overlay
+        painter.setPen(QPen(self._BAR_TEXT))
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        painter.drawText(bar_rect, Qt.AlignmentFlag.AlignCenter, detail)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        """Return preferred size — slightly wider to fit progress text."""
+        return QSize(80, option.rect.height() if option.rect.height() > 0 else 22)
 
 
 class ExportsDelegate(QStyledItemDelegate):

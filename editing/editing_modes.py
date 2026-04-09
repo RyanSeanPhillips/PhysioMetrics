@@ -55,6 +55,16 @@ class EditingModes:
         self._update_peaks = cb.get('update_peaks', getattr(parent_window, 'update_peaks', None))
         self._is_auto_gmm_enabled = cb.get('is_auto_gmm_enabled', lambda: getattr(parent_window, 'auto_gmm_enabled', False))
 
+        # Wrap _redraw to also schedule auto-save (every _redraw in editing_modes follows an edit)
+        _raw_redraw = self._redraw
+        _autosave_fn = cb.get('schedule_autosave', getattr(parent_window, '_schedule_autosave', None))
+        if _autosave_fn:
+            def _redraw_and_autosave():
+                if _raw_redraw:
+                    _raw_redraw()
+                _autosave_fn()
+            self._redraw = _redraw_and_autosave
+
         # Buttons dict
         btn = buttons or {}
         self._btn_add_peaks = btn.get('addPeaks', getattr(parent_window, 'addPeaksButton', None))
@@ -108,6 +118,10 @@ class EditingModes:
         # Peak editing window size
         self._peak_edit_half_win_s = 0.08  # ±80ms window for peak operations
 
+        # Undo stack: list of (description, restore_fn) tuples
+        self._undo_stack = []
+        self._max_undo = 50
+
         # Connect button signals
         self._connect_buttons()
 
@@ -128,6 +142,67 @@ class EditingModes:
             # HIDDEN: Mark Sniff button is disabled until we implement proper per-peak
             # eupnea/sniffing editing that syncs with breath_type_class for ML export.
             self._btn_mark_sniff.setVisible(False)
+
+    # ========== Undo Stack ==========
+
+    def _push_undo(self, description, restore_fn):
+        """Push an undo entry. restore_fn() should restore state + redraw."""
+        self._undo_stack.append((description, restore_fn))
+        if len(self._undo_stack) > self._max_undo:
+            self._undo_stack.pop(0)
+
+    def _push_undo_peaks(self, sweep_idx):
+        """Snapshot current peaks + sigh markers for undo."""
+        import copy
+        st = self.state
+        peaks_snap = copy.deepcopy(st.all_peaks_by_sweep.get(sweep_idx, []))
+        filtered_snap = copy.deepcopy(st.peaks_by_sweep.get(sweep_idx, []))
+        breaths_snap = copy.deepcopy(st.breath_by_sweep.get(sweep_idx, {}))
+        sigh_snap = copy.deepcopy(st.sigh_by_sweep.get(sweep_idx, []))
+
+        def restore():
+            st.all_peaks_by_sweep[sweep_idx] = peaks_snap
+            st.peaks_by_sweep[sweep_idx] = filtered_snap
+            st.breath_by_sweep[sweep_idx] = breaths_snap
+            st.sigh_by_sweep[sweep_idx] = sigh_snap
+            self._redraw()
+        self._push_undo(f"peak edit (sweep {sweep_idx})", restore)
+
+    def _push_undo_omit(self, sweep_idx):
+        """Snapshot current omit state for undo."""
+        import copy
+        st = self.state
+        ranges_snap = copy.deepcopy(st.omitted_ranges.get(sweep_idx, []))
+        sweeps_snap = set(st.omitted_sweeps)
+
+        def restore():
+            if ranges_snap:
+                st.omitted_ranges[sweep_idx] = ranges_snap
+            elif sweep_idx in st.omitted_ranges:
+                del st.omitted_ranges[sweep_idx]
+            st.omitted_sweeps = sweeps_snap
+            self._redraw()
+            try:
+                self._refresh_omit_label()
+            except Exception:
+                pass
+        self._push_undo(f"omit edit (sweep {sweep_idx})", restore)
+
+    def undo(self):
+        """Pop and execute the most recent undo entry."""
+        if not self._undo_stack:
+            try:
+                self._log_status("Nothing to undo", 1500)
+            except Exception:
+                pass
+            return
+        desc, restore_fn = self._undo_stack.pop()
+        print(f"[undo] Restoring: {desc}", flush=True)
+        restore_fn()
+        try:
+            self._log_status(f"Undid: {desc}", 2000)
+        except Exception:
+            pass
 
     def _set_persistent_status(self, msg):
         """Set a persistent status message (survives redraws)."""
@@ -396,6 +471,33 @@ class EditingModes:
 
     # ========== Turn Off All Edit Modes ==========
 
+    def _deactivate_move_point(self):
+        """Fully deactivate Move Point mode, including drag/key callbacks."""
+        if not getattr(self, "_move_point_mode", False):
+            return
+        self._move_point_mode = False
+        self._btn_move_point.blockSignals(True)
+        self._btn_move_point.setChecked(False)
+        self._btn_move_point.blockSignals(False)
+        self._btn_move_point.setText("Move Point")
+        self._selected_point = None
+        if self._move_point_artist:
+            self._move_point_artist.remove()
+            self._move_point_artist = None
+        # Clear pyqtgraph drag/key callbacks
+        if self._is_pyqtgraph_backend():
+            if hasattr(self.plot_host, 'clear_drag_callback'):
+                self.plot_host.clear_drag_callback()
+            if hasattr(self.plot_host, 'clear_key_callback'):
+                self.plot_host.clear_key_callback()
+        # Clear matplotlib event connections
+        elif self._has_matplotlib_canvas():
+            for attr in ('_key_press_cid', '_motion_cid', '_release_cid'):
+                cid = getattr(self, attr, None)
+                if cid is not None:
+                    self.plot_host.canvas.mpl_disconnect(cid)
+                    setattr(self, attr, None)
+
     def turn_off_all_edit_modes(self):
         """Turn off all edit modes (add peaks, move point, mark sniff)."""
         # Turn off Add Peaks mode
@@ -414,17 +516,7 @@ class EditingModes:
             self._add_sigh_mode = False
 
         # Turn off Move Point mode
-        if getattr(self, "_move_point_mode", False):
-            self._move_point_mode = False
-            self._btn_move_point.blockSignals(True)
-            self._btn_move_point.setChecked(False)
-            self._btn_move_point.blockSignals(False)
-            self._btn_move_point.setText("Move Point")
-            # Clean up any selected point visualization
-            if self._move_point_artist:
-                self._move_point_artist.remove()
-                self._move_point_artist = None
-            self._selected_point = None
+        self._deactivate_move_point()
 
         # Turn off Mark Sniff mode
         if getattr(self, "_mark_sniff_mode", False):
@@ -504,13 +596,8 @@ class EditingModes:
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
 
-            # turn OFF move point mode
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            # turn OFF move point mode (must also clear drag/key callbacks)
+            self._deactivate_move_point()
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -536,7 +623,7 @@ class EditingModes:
                     '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
                     'Breath <span style="color:#F44336">●</span>'
                     '&nbsp;&nbsp;&nbsp;&nbsp;'
-                    '<b>RIGHT CLICK:</b> '
+                    '<b>SHIFT+CLICK:</b> '
                     '<span style="color:#4CAF50">+</span>/<span style="color:#F44336">−</span> '
                     'Sigh <span style="color:#FFD700">★</span>')
             self._show_instructions(html)
@@ -606,6 +693,13 @@ class EditingModes:
         if event.inaxes is None or xdata is None:
             return
 
+        st = self.state
+
+        # Snapshot for undo before making any changes (including sigh toggle redirect)
+        if st.t is not None and st.analyze_chan in st.sweeps:
+            s_undo = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+            self._push_undo_peaks(s_undo)
+
         # Check for right-click or modifier keys (but not if we're already in force mode to prevent recursion)
         if _force_mode is None:
             # Right-click (button 3) toggles sigh
@@ -621,7 +715,6 @@ class EditingModes:
                 self._on_plot_click_add_sigh(xdata, ydata, event, _force_mode='sigh')
                 return
 
-        st = self.state
         if st.t is None or st.analyze_chan not in st.sweeps:
             return
 
@@ -688,6 +781,21 @@ class EditingModes:
 
         # Toggle the label
         self._toggle_peak_label(s, closest_peak_idx, new_label=new_label)
+
+        # If deleting a breath, also remove its sigh marker (can't be a sigh if not a breath)
+        if new_label == 0:
+            sigh_set = set(map(int, st.sigh_by_sweep.get(s, [])))
+            if closest_peak_idx in sigh_set:
+                sigh_set.discard(closest_peak_idx)
+                st.sigh_by_sweep[s] = np.array(sorted(sigh_set), dtype=int)
+                print(f"[toggle-breath] Also removed sigh marker at sample {closest_peak_idx}")
+                # Clear sigh_class in all_peaks too
+                if s in st.all_peaks_by_sweep:
+                    all_peaks = st.all_peaks_by_sweep[s]
+                    if 'sigh_class' in all_peaks and 'indices' in all_peaks:
+                        mask = all_peaks['indices'] == closest_peak_idx
+                        if np.any(mask):
+                            all_peaks['sigh_class'][mask] = 0
 
         # Re-derive peaks_by_sweep from labels
         self._update_peaks_by_sweep_from_labels(s)
@@ -775,12 +883,7 @@ class EditingModes:
                 self._add_sigh_mode = False
 
             # turn OFF move point mode
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -970,12 +1073,7 @@ class EditingModes:
                 self._delete_peaks_mode = False
 
             # turn OFF move point mode
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             # turn OFF mark sniff mode
             if getattr(self, "_mark_sniff_mode", False):
@@ -1256,6 +1354,8 @@ class EditingModes:
         if best_type is None:
             return
 
+        # Snapshot for undo BEFORE any movement starts
+        self._push_undo_peaks(s)
         # Store selection (keep original_index for finding it later)
         self._selected_point = {'type': best_type, 'index': best_idx, 'sweep': s, 'original_index': best_idx}
         self._log_status(f"Selected {best_type} - drag or use arrow keys to move", 2000)
@@ -1550,6 +1650,8 @@ class EditingModes:
             # Pick closest by 2D distance
             best_type, best_idx, _ = min(candidates, key=lambda c: c[2])
 
+            # Snapshot for undo BEFORE any movement starts
+            self._push_undo_peaks(s)
             # Store selection
             self._selected_point = {
                 'type': best_type,
@@ -1712,12 +1814,7 @@ class EditingModes:
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
 
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             # turn OFF merge peaks mode
             if getattr(self, "_merge_peaks_mode", False):
@@ -2085,6 +2182,9 @@ class EditingModes:
         self._omit_region_mode = True
         self._omit_region_remove_mode = remove_mode
 
+        # Clear any lingering click callback from previous mode (e.g. add/del peaks)
+        self.plot_host.clear_click_callback()
+
         # Turn off matplotlib toolbar modes
         self.plot_host.turn_off_toolbar_modes()
 
@@ -2102,12 +2202,7 @@ class EditingModes:
         if getattr(self, "_add_sigh_mode", False):
             self._add_sigh_mode = False
 
-        if getattr(self, "_move_point_mode", False):
-            self._move_point_mode = False
-            self._btn_move_point.blockSignals(True)
-            self._btn_move_point.setChecked(False)
-            self._btn_move_point.blockSignals(False)
-            self._btn_move_point.setText("Move Point")
+        self._deactivate_move_point()
 
         if getattr(self, "_mark_sniff_mode", False):
             self._mark_sniff_mode = False
@@ -2540,12 +2635,11 @@ class EditingModes:
 
 
         if event_type == 'press':
-            # Start drag - similar to _on_plot_click_omit_region
-            # Check modifier keys from event (more reliable than QApplication.keyboardModifiers())
-            # The wrapped event stores modifiers captured at event time
+            # Check modifier keys from the wrapped event
             if hasattr(event, 'shift_held') and hasattr(event, 'ctrl_held'):
                 shift_held = event.shift_held
                 ctrl_held = event.ctrl_held
+                print(f"[omit-drag] press: ctrl={ctrl_held} shift={shift_held} x={xdata:.2f}", flush=True)
             else:
                 # Fallback to QApplication
                 modifiers = QApplication.keyboardModifiers()
@@ -2556,6 +2650,7 @@ class EditingModes:
             if ctrl_held and shift_held:
                 st = self.state
                 s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+                self._push_undo_omit(s)
                 if s in st.omitted_sweeps:
                     st.omitted_sweeps.discard(s)
                     # Clear any omitted regions for this sweep as well
@@ -2590,6 +2685,7 @@ class EditingModes:
             if ctrl_held and not shift_held:
                 st = self.state
                 s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+                self._push_undo_omit(s)
                 sr_hz = st.sr_hz if st.sr_hz else 1000.0
                 spans = st.stim_spans_by_sweep.get(s, []) if st.stim_chan else []
                 t0 = spans[0][0] if (st.stim_chan and spans) else 0.0
@@ -2603,17 +2699,28 @@ class EditingModes:
                 self._pyqtgraph_handled_ctrl_shift = True
 
                 regions = st.omitted_ranges.get(s, [])
+                print(f"[omit-ctrl-click] Looking for region at x={xdata:.3f}, {len(regions)} regions, t0={t0:.3f}, sr={sr_hz:.0f}", flush=True)
                 for i, (i_start, i_end) in enumerate(regions):
                     t_start = i_start / sr_hz - t0
                     t_end = i_end / sr_hz - t0
+                    print(f"  region[{i}]: samples={i_start}-{i_end}, time={t_start:.3f}-{t_end:.3f}", flush=True)
                     if t_start <= xdata <= t_end:
                         del st.omitted_ranges[s][i]
                         if not st.omitted_ranges[s]:
                             del st.omitted_ranges[s]
                         print(f"[omit-region] Deleted region {i}")
                         self._redraw()
-                        return 'handled'  # Signal to eventFilter not to start drag
-                return 'handled'  # Ctrl+click outside region - don't start drag
+                        self._refresh_omit_label()
+                        return 'handled'
+
+                # No region found — check if full sweep is omitted
+                if s in st.omitted_sweeps:
+                    st.omitted_sweeps.discard(s)
+                    print(f"[omit-region] Ctrl+Click removed full sweep omit for sweep {s}")
+                    self._redraw()
+                    self._refresh_omit_label()
+
+                return 'handled'
 
             # Normal click - check for edge grab or start new region
             st = self.state
@@ -2679,6 +2786,11 @@ class EditingModes:
                 print(f"[omit-region] Region too small, ignoring")
                 self._reset_omit_region_state()
                 return
+
+            # Snapshot for undo before committing the region
+            st = self.state
+            s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+            self._push_undo_omit(s)
 
             # Get current sweep and convert to sample indices
             st = self.state
@@ -2748,6 +2860,7 @@ class EditingModes:
         """Snap all omitted regions on current sweep to breath onsets (onset to onset)."""
         st = self.state
         s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        self._push_undo_omit(s)
 
         if s not in st.omitted_ranges:
             try: self._log_status("No omitted regions to snap on this sweep", 2000)
@@ -2894,6 +3007,8 @@ class EditingModes:
         self._merge_peaks_mode = checked
 
         if checked:
+            # Clear any lingering click callback from previous mode
+            self.plot_host.clear_click_callback()
             # Turn off matplotlib toolbar modes (zoom, pan)
             self.plot_host.turn_off_toolbar_modes()
 
@@ -2911,12 +3026,7 @@ class EditingModes:
             if getattr(self, "_add_sigh_mode", False):
                 self._add_sigh_mode = False
 
-            if getattr(self, "_move_point_mode", False):
-                self._move_point_mode = False
-                self._btn_move_point.blockSignals(True)
-                self._btn_move_point.setChecked(False)
-                self._btn_move_point.blockSignals(False)
-                self._btn_move_point.setText("Move Point")
+            self._deactivate_move_point()
 
             if getattr(self, "_mark_sniff_mode", False):
                 self._mark_sniff_mode = False
@@ -3342,6 +3452,7 @@ class EditingModes:
 
         st = self.state
         s = max(0, min(st.sweep_idx, self._nav_vm.sweep_count() - 1))
+        self._push_undo_peaks(s)
         pks = np.asarray(st.peaks_by_sweep.get(s, np.array([], dtype=int)), dtype=int)
 
         if pks.size == 0:

@@ -113,7 +113,7 @@ def build_executable():
         # Run PyInstaller with the spec file
         result = subprocess.run([
             sys.executable, '-m', 'PyInstaller',
-            '--clean',
+            '--clean', '-y',
             'physiometrics.spec'
         ], capture_output=True, text=True)
 
@@ -122,9 +122,9 @@ def build_executable():
             print("BUILD SUCCESSFUL!")
             print("="*60)
 
-            # Check for versioned directory output
+            # Check for versioned directory output (exe has fixed name, folder is versioned)
             dist_dir = Path(f'dist/PhysioMetrics_v{version}')
-            exe_path = dist_dir / f'PhysioMetrics_v{version}.exe'
+            exe_path = dist_dir / 'PhysioMetrics.exe'
 
             if exe_path.exists():
                 file_size = exe_path.stat().st_size

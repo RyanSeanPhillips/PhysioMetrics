@@ -59,6 +59,11 @@ class CTAViewModel(QObject):
         # Selected marker categories
         self._selected_categories: List[str] = []
 
+        # Condition mode: 'combined', 'separate', 'overlay'
+        self._condition_mode: str = 'combined'
+        # Per-condition collections for separate/overlay modes
+        self._condition_collections: Dict[str, CTACollection] = {}
+
     @property
     def service(self) -> CTAService:
         """Get the underlying CTA service."""
@@ -149,6 +154,7 @@ class CTAViewModel(QObject):
         signals: Dict[str, np.ndarray],
         time_array: np.ndarray,
         metric_labels: Optional[Dict[str, str]] = None,
+        condition_mode: str = 'combined',
     ) -> None:
         """
         Generate CTA preview.
@@ -158,7 +164,10 @@ class CTAViewModel(QObject):
             signals: Dictionary of signals keyed by metric
             time_array: Time array for signals
             metric_labels: Optional metric labels
+            condition_mode: 'combined', 'separate', or 'overlay'
         """
+        self._condition_mode = condition_mode
+        self._condition_collections.clear()
         self.calculation_started.emit()
 
         try:
@@ -181,6 +190,12 @@ class CTAViewModel(QObject):
             else:
                 filtered_signals = signals
 
+            print(f"[CTA VM] selected_categories={self._selected_categories}")
+            print(f"[CTA VM] filtered_markers={len(filtered_markers)} from {len(markers)} input")
+            print(f"[CTA VM] selected_metrics={self._selected_metrics}")
+            print(f"[CTA VM] filtered_signals={list(filtered_signals.keys())} from {list(signals.keys())}")
+            print(f"[CTA VM] condition_mode={condition_mode}")
+
             if not filtered_markers:
                 self.error_occurred.emit("No markers selected for CTA")
                 return
@@ -189,15 +204,49 @@ class CTAViewModel(QObject):
                 self.error_occurred.emit("No metrics selected for CTA")
                 return
 
-            # Calculate CTAs
-            self._current_collection = self._service.calculate_for_markers(
-                markers=filtered_markers,
-                signals=filtered_signals,
-                time_array=time_array,
-                metric_labels=metric_labels or self._available_metrics,
-                config=self._config,
-                progress_callback=lambda p: self.calculation_progress.emit(p),
-            )
+            labels = metric_labels or self._available_metrics
+
+            if condition_mode in ('separate', 'overlay'):
+                # Group markers by condition
+                condition_groups: Dict[str, List[EventMarker]] = {}
+                for m in filtered_markers:
+                    cond = m.condition or '(no condition)'
+                    if cond not in condition_groups:
+                        condition_groups[cond] = []
+                    condition_groups[cond].append(m)
+
+                # Calculate CTAs per condition
+                total_conditions = len(condition_groups)
+                for ci, (cond, cond_markers) in enumerate(sorted(condition_groups.items())):
+                    def _progress(p, _ci=ci, _total=total_conditions):
+                        overall = int((_ci * 100 + p) / _total)
+                        self.calculation_progress.emit(overall)
+
+                    collection = self._service.calculate_for_markers(
+                        markers=cond_markers,
+                        signals=filtered_signals,
+                        time_array=time_array,
+                        metric_labels=labels,
+                        config=self._config,
+                        progress_callback=_progress,
+                    )
+                    self._condition_collections[cond] = collection
+
+                # Use first condition as "current" for backwards compat
+                if self._condition_collections:
+                    self._current_collection = next(iter(self._condition_collections.values()))
+                else:
+                    self._current_collection = None
+            else:
+                # Combined mode — original behavior
+                self._current_collection = self._service.calculate_for_markers(
+                    markers=filtered_markers,
+                    signals=filtered_signals,
+                    time_array=time_array,
+                    metric_labels=labels,
+                    config=self._config,
+                    progress_callback=lambda p: self.calculation_progress.emit(p),
+                )
 
             self.calculation_complete.emit()
             self.preview_ready.emit()
@@ -233,6 +282,16 @@ class CTAViewModel(QObject):
         if self._current_collection is None:
             return {}
         return self._current_collection.results
+
+    @property
+    def condition_mode(self) -> str:
+        """Get the current condition mode."""
+        return self._condition_mode
+
+    @property
+    def condition_collections(self) -> Dict[str, CTACollection]:
+        """Get per-condition collections (populated in separate/overlay modes)."""
+        return self._condition_collections
 
     def get_marker_types(self) -> List[str]:
         """
@@ -270,6 +329,39 @@ class CTAViewModel(QObject):
             self.export_complete.emit(filepath)
         except Exception as e:
             self.error_occurred.emit(f"CSV export failed: {str(e)}")
+
+    def export_to_csv_wide(self, filepath: str, metadata: Optional[Dict] = None) -> None:
+        """
+        Export CTA data in wide format (time + one column per event + mean + sem).
+
+        In separate/overlay modes, exports all conditions with condition name in headers.
+
+        Args:
+            filepath: Base path for CSV files
+            metadata: Optional metadata dict for CSV header
+        """
+        if self._condition_mode in ('separate', 'overlay') and self._condition_collections:
+            try:
+                self._service.export_conditions_to_csv_wide(
+                    self._condition_collections,
+                    filepath,
+                    metadata=metadata,
+                )
+                self.export_complete.emit(filepath)
+            except Exception as e:
+                self.error_occurred.emit(f"CSV export failed: {str(e)}")
+        elif self._current_collection is not None:
+            try:
+                self._service.export_to_csv_wide(
+                    self._current_collection,
+                    filepath,
+                    metadata=metadata,
+                )
+                self.export_complete.emit(filepath)
+            except Exception as e:
+                self.error_occurred.emit(f"CSV export failed: {str(e)}")
+        else:
+            self.error_occurred.emit("No CTA data to export")
 
     def export_to_npz(self, filepath: str) -> None:
         """

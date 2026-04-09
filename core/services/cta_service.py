@@ -35,6 +35,7 @@ class CTAService:
         event_times: List[float],
         event_ids: Optional[List[str]] = None,
         baseline_ref_times: Optional[List[float]] = None,
+        paired_event_times: Optional[List[float]] = None,
         sweep_idx: int = 0,
         config: Optional[CTAConfig] = None,
         metric_key: str = 'signal',
@@ -79,6 +80,21 @@ class CTAService:
         window_before = float(config.window_before)
         window_after = float(config.window_after)
         n_points = int(config.n_points)  # Ensure integer for np.linspace
+
+        # Auto-scale n_points based on source signal resolution.
+        # We don't want to go below the source sampling rate (e.g. 30 Hz photometry)
+        # or lose waveform detail for high-rate signals (pleth at 10 kHz).
+        # Cap at 200 Hz — enough to capture breath waveforms, not wasteful for storage.
+        total_window = window_before + window_after
+        if len(time_array) > 1:
+            source_hz = 1.0 / np.median(np.diff(time_array[:1000]))
+            target_hz = min(source_hz, 200.0)  # Cap at 200 Hz
+            target_hz = max(target_hz, 17.0)   # Floor at 17 Hz
+        else:
+            target_hz = 50.0
+        min_points = int(total_window * target_hz)
+        if min_points > n_points:
+            n_points = min_points
         zscore_baseline = config.zscore_baseline
         baseline_start = float(config.baseline_start)
         baseline_end = float(config.baseline_end)
@@ -120,27 +136,36 @@ class CTAService:
                         # If std is ~0, just subtract mean (flat baseline)
                         vals_window = vals_window - baseline_mean
 
-            trace = CTATrace(
-                event_id=event_ids[i] if i < len(event_ids) else f"event_{i}",
-                sweep_idx=sweep_idx,
-                event_time=float(event_time),
-                time=t_window,
-                values=vals_window,
-            )
-            traces.append(trace)
+            # Compute offset to paired event (onset→withdrawal or withdrawal→onset)
+            paired_offset = None
+            if paired_event_times is not None and i < len(paired_event_times) and paired_event_times[i] is not None:
+                paired_offset = float(paired_event_times[i] - event_time)
+
+            traces.append((
+                event_ids[i] if i < len(event_ids) else f"event_{i}",
+                sweep_idx, float(event_time), t_window, vals_window, paired_offset,
+            ))
 
         # Create common time base
         t_common = np.linspace(-window_before, window_after, n_points)
 
-        # Interpolate all traces to common time base
+        # Interpolate all traces to common time base and store at reduced resolution
+        # (raw traces at 10kHz × 60s = 600K pts per event — store at CTA resolution instead)
         interp_traces = []
-        for trace in traces:
-            if len(trace.time) > 1:
+        final_traces = []
+        for (eid, sidx, etime, t_win, v_win, p_offset) in traces:
+            if len(t_win) > 1:
                 interp_vals = np.interp(
-                    t_common, trace.time, trace.values,
+                    t_common, t_win, v_win,
                     left=np.nan, right=np.nan
                 )
                 interp_traces.append(interp_vals)
+                # Store trace at interpolated resolution (not raw 10kHz)
+                final_traces.append(CTATrace(
+                    event_id=eid, sweep_idx=sidx, event_time=etime,
+                    time=t_common, values=interp_vals,
+                    paired_event_offset=p_offset,
+                ))
 
         # Compute mean and SEM
         mean = None
@@ -157,11 +182,11 @@ class CTAService:
             category=category,
             label=label,
             config=config,
-            traces=traces,
+            traces=final_traces,
             time_common=t_common,
             mean=mean,
             sem=sem,
-            n_events=len(traces),
+            n_events=len(final_traces),
         )
 
     def calculate_for_markers(
@@ -212,6 +237,14 @@ class CTAService:
             onset_times = [m.start_time for m in group_markers]
             onset_ids = [m.id for m in group_markers]
 
+            # For onset CTA: paired event = withdrawal time (for paired marker lines)
+            onset_paired_times = []
+            for m in group_markers:
+                if m.is_paired and m.end_time is not None:
+                    onset_paired_times.append(m.end_time)
+                else:
+                    onset_paired_times.append(None)
+
             # Withdrawal times (only for paired markers)
             # Keep track of corresponding onset times for z-score baseline
             withdrawal_times = []
@@ -235,6 +268,7 @@ class CTAService:
                         signal=signal,
                         event_times=onset_times,
                         event_ids=onset_ids,
+                        paired_event_times=onset_paired_times,
                         config=config,
                         metric_key=metric_key,
                         metric_label=metric_label,
@@ -258,6 +292,7 @@ class CTAService:
                         event_times=withdrawal_times,
                         event_ids=withdrawal_ids,
                         baseline_ref_times=withdrawal_onset_times,  # Z-score to onset baseline
+                        paired_event_times=withdrawal_onset_times,  # Show onset lines on withdrawal CTA
                         config=config,
                         metric_key=metric_key,
                         metric_label=metric_label,
@@ -406,3 +441,208 @@ class CTAService:
                                 marker_type, result.alignment, result.metric_key,
                                 t, m, s
                             ])
+
+    def export_to_csv_wide(
+        self,
+        collection: CTACollection,
+        filepath: str,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """
+        Export all CTA data into a single wide-format CSV.
+
+        Columns: time, metric1_event1, metric1_event2, ..., metric1_mean, metric1_sem,
+                        metric2_event1, metric2_event2, ..., metric2_mean, metric2_sem, ...
+
+        All metrics share the same time column (common time base).
+
+        Args:
+            collection: The CTA collection to export
+            filepath: Path to save CSV
+            metadata: Optional dict of metadata to write as header comments
+        """
+        import csv
+        from scipy import interpolate
+
+        # Collect all results that have data, grouped by alignment
+        results_with_data = []
+        for key, result in collection.results.items():
+            if result.time_common is not None and len(result.traces) > 0:
+                results_with_data.append(result)
+
+        if not results_with_data:
+            return
+
+        # Use the first result's time base as the common time
+        t_common = results_with_data[0].time_common
+        n_points = len(t_common)
+
+        # Build columns for each result
+        all_columns = []  # list of (header, values_array)
+        all_columns.append(('time', t_common))
+
+        blank = np.full(n_points, np.nan)
+        for ri, result in enumerate(results_with_data):
+            safe_metric = result.metric_key.replace('/', '_')
+            prefix = f"{safe_metric}_{result.alignment}"
+
+            # Interpolate each trace onto the common time base
+            for i, trace in enumerate(result.traces):
+                if len(trace.time) < 2:
+                    continue
+                f_interp = interpolate.interp1d(
+                    trace.time, trace.values,
+                    kind='linear', bounds_error=False, fill_value=np.nan
+                )
+                all_columns.append((f"{prefix}_event{i + 1}", f_interp(t_common)))
+
+            # Add mean and sem
+            if result.mean is not None:
+                all_columns.append((f"{prefix}_mean", result.mean))
+            if result.sem is not None:
+                all_columns.append((f"{prefix}_sem", result.sem))
+
+            # Add 2 blank separator columns between metrics
+            if ri < len(results_with_data) - 1:
+                all_columns.append(('', blank))
+                all_columns.append(('', blank))
+
+        # Write single CSV
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            self._write_metadata_header(writer, metadata, collection)
+            writer.writerow([col[0] for col in all_columns])
+            for j in range(n_points):
+                writer.writerow([col[1][j] for col in all_columns])
+
+    def export_conditions_to_csv_wide(
+        self,
+        condition_collections: Dict[str, CTACollection],
+        filepath: str,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """
+        Export per-condition CTA data into a single wide-format CSV.
+
+        Each column header is prefixed with the condition name so all
+        conditions appear side-by-side.
+
+        Args:
+            condition_collections: Dict of condition_name -> CTACollection
+            filepath: Path to save CSV
+        """
+        import csv
+        from scipy import interpolate
+
+        # Collect all results with data across all conditions
+        all_columns = []
+        t_common = None
+
+        result_count = 0
+        for cond_name, collection in sorted(condition_collections.items()):
+            safe_cond = cond_name.replace('/', '_').replace(' ', '_')
+
+            for key, result in collection.results.items():
+                if result.time_common is None or len(result.traces) == 0:
+                    continue
+
+                # Use the first result's time base as the common time
+                if t_common is None:
+                    t_common = result.time_common
+                    all_columns.append(('time', t_common))
+
+                n_points = len(t_common)
+                safe_metric = result.metric_key.replace('/', '_')
+                prefix = f"{safe_cond}_{safe_metric}_{result.alignment}"
+
+                # Add 2 blank separator columns between metric groups
+                if result_count > 0:
+                    blank = np.full(n_points, np.nan)
+                    all_columns.append(('', blank))
+                    all_columns.append(('', blank))
+
+                for i, trace in enumerate(result.traces):
+                    if len(trace.time) < 2:
+                        continue
+                    f_interp = interpolate.interp1d(
+                        trace.time, trace.values,
+                        kind='linear', bounds_error=False, fill_value=np.nan
+                    )
+                    all_columns.append((f"{prefix}_event{i + 1}", f_interp(t_common)))
+
+                if result.mean is not None:
+                    all_columns.append((f"{prefix}_mean", result.mean))
+                if result.sem is not None:
+                    all_columns.append((f"{prefix}_sem", result.sem))
+
+                result_count += 1
+
+        if not all_columns or t_common is None:
+            return
+
+        n_points = len(t_common)
+        # Use first collection for header metadata
+        first_coll = next(iter(condition_collections.values()))
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            self._write_metadata_header(writer, metadata, first_coll)
+            writer.writerow([col[0] for col in all_columns])
+            for j in range(n_points):
+                writer.writerow([col[1][j] for col in all_columns])
+
+    def _write_metadata_header(self, writer, metadata: Optional[Dict],
+                                collection: Optional[CTACollection]) -> None:
+        """Write metadata comment rows at the top of the CSV."""
+        from datetime import datetime
+
+        writer.writerow(['# PhysioMetrics CTA Export'])
+        writer.writerow([f'# Exported: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+
+        if metadata:
+            if metadata.get('source_file'):
+                writer.writerow([f'# Source file: {metadata["source_file"]}'])
+            if metadata.get('pmx_file'):
+                writer.writerow([f'# Session file: {metadata["pmx_file"]}'])
+            if metadata.get('animal_id'):
+                writer.writerow([f'# Animal ID: {metadata["animal_id"]}'])
+            if metadata.get('experiment_index') is not None:
+                writer.writerow([f'# Experiment: {metadata["experiment_index"]}'])
+            if metadata.get('analyze_channel'):
+                writer.writerow([f'# Analyze channel: {metadata["analyze_channel"]}'])
+            if metadata.get('trigger_source'):
+                writer.writerow([f'# Trigger source: {metadata["trigger_source"]}'])
+            if metadata.get('condition_mode'):
+                writer.writerow([f'# Condition mode: {metadata["condition_mode"]}'])
+            if metadata.get('conditions'):
+                writer.writerow([f'# Conditions: {", ".join(metadata["conditions"])}'])
+            if metadata.get('max_events'):
+                writer.writerow([f'# Max events: {metadata["max_events"]}'])
+            if metadata.get('time_window'):
+                writer.writerow([f'# Time window filter: {metadata["time_window"]}'])
+            if metadata.get('sample_rate'):
+                writer.writerow([f'# Sample rate: {metadata["sample_rate"]} Hz'])
+            if metadata.get('app_version'):
+                writer.writerow([f'# App version: {metadata["app_version"]}'])
+
+        if collection:
+            config = collection.config
+            writer.writerow([f'# Window: -{config.window_before}s to +{config.window_after}s'])
+            if config.zscore_baseline:
+                writer.writerow([f'# Z-score baseline: {config.baseline_start}s to {config.baseline_end}s'])
+            writer.writerow([f'# N points: {config.n_points}'])
+
+            marker_types = set()
+            total_events = 0
+            metrics_used = set()
+            for r in collection.results.values():
+                marker_types.add(f'{r.category}:{r.label}')
+                if r.alignment == 'onset':
+                    total_events = max(total_events, r.n_events)
+                metrics_used.add(r.metric_key)
+            if marker_types:
+                writer.writerow([f'# Marker types: {", ".join(sorted(marker_types))}'])
+            writer.writerow([f'# Events: {total_events}'])
+            if metrics_used:
+                writer.writerow([f'# Metrics: {", ".join(sorted(metrics_used))}'])
+
+        writer.writerow(['#'])

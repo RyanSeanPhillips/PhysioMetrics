@@ -397,6 +397,56 @@ def load_data_file(
     }
 
 
+# ── Summary statistics ────────────────────────────────────────────
+
+
+def _safe_float(v) -> Optional[float]:
+    """Convert to float, returning None for non-numeric or NaN values."""
+    try:
+        f = float(v)
+        return None if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_summary(
+    metrics_rows: List[Dict[str, Any]],
+    n_sweeps: int,
+) -> Dict[str, Any]:
+    """Compute one-row summary from per-breath metrics.
+
+    Returns a dict with mean_freq, mean_ti, mean_te, mean_amp, n_breaths,
+    n_sweeps, and other aggregate stats useful for grouping.
+    """
+    summary: Dict[str, Any] = {
+        "n_breaths": len(metrics_rows),
+        "n_sweeps": n_sweeps,
+    }
+
+    if not metrics_rows:
+        return summary
+
+    # Collect numeric arrays for common metrics (single pass per key)
+    metric_keys = ["if", "ti", "te", "amp_insp", "amp_exp", "area_insp", "area_exp"]
+    for key in metric_keys:
+        values = []
+        for r in metrics_rows:
+            f = _safe_float(r.get(key))
+            if f is not None:
+                values.append(f)
+        if values:
+            arr = np.array(values)
+            summary[f"mean_{key}"] = float(np.mean(arr))
+            summary[f"std_{key}"] = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+            summary[f"median_{key}"] = float(np.median(arr))
+
+    # Frequency is 1/if for instantaneous frequency → derive mean_freq
+    if "mean_if" in summary and summary["mean_if"] > 0:
+        summary["mean_freq"] = 1.0 / summary["mean_if"]
+
+    return summary
+
+
 # ── Batch analysis ───────────────────────────────────────────────
 
 
@@ -405,6 +455,11 @@ def analyze_file(
     config: AnalysisConfig,
     output_dir: Optional[Path] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    write_csv: bool = True,
+    save_session: bool = False,
+    analyze_channel: Optional[str] = None,
+    animal_id: str = "",
+    existing_event_markers: Optional[Dict] = None,
 ) -> AnalysisResult:
     """Headless analysis of a single recording file.
 
@@ -415,13 +470,18 @@ def analyze_file(
     4. Auto-detect threshold (if not in config)
     5. Filter + detect peaks per sweep
     6. Compute per-breath metrics
-    7. Save results CSV
+    7. Save results CSV and/or .pmx session
 
     Args:
         path: Path to recording file (ABF, SMRX, EDF, MAT)
         config: Full analysis configuration
         output_dir: Where to write results. Defaults to same folder as input.
         progress_callback: Optional status message callback
+        write_csv: If False, skip CSV writing (dry run). Still returns full metrics.
+        save_session: If True, save .pmx session file in physiometrics/ subfolder.
+        analyze_channel: If provided (e.g. "IN 0"), use that channel instead of auto-detect.
+        animal_id: Animal ID for .pmx file naming and metadata.
+        existing_event_markers: Event markers to carry over on re-analysis.
 
     Returns:
         AnalysisResult with paths to output files.
@@ -446,13 +506,20 @@ def analyze_file(
         ch_names = data["channel_names"]
         t = data["t"]
 
-        # 2. Auto-detect channels
+        # 2. Select analysis channel + detect stim
         from core.abf_io import auto_select_channels
-        stim_ch, analyze_ch = auto_select_channels(sweeps, ch_names)
-        if analyze_ch is None:
-            # Fallback: pick first non-stim channel
-            non_stim = [c for c in ch_names if c != stim_ch]
-            analyze_ch = non_stim[0] if non_stim else ch_names[0]
+        stim_ch, auto_analyze_ch = auto_select_channels(sweeps, ch_names)
+
+        if analyze_channel and analyze_channel in ch_names:
+            analyze_ch = analyze_channel
+        elif analyze_channel and analyze_channel not in ch_names:
+            result.error = f"Channel '{analyze_channel}' not found in {ch_names}"
+            return result
+        else:
+            analyze_ch = auto_analyze_ch
+            if analyze_ch is None:
+                non_stim = [c for c in ch_names if c != stim_ch]
+                analyze_ch = non_stim[0] if non_stim else ch_names[0]
 
         Y = sweeps[analyze_ch]  # (n_samples, n_sweeps)
         n_sweeps = Y.shape[1]
@@ -525,8 +592,89 @@ def analyze_file(
 
                     all_metrics_rows.append(row)
 
-        # 7. Save results CSV
-        if all_metrics_rows:
+        # 7. Compute continuous y2 metrics per sweep (for grouping/consolidation)
+        y2_by_sweep = {}  # sweep_idx -> {metric_key: 1D array}
+        _Y2_METRICS = {
+            'if': 'compute_if',
+            'ti': 'compute_ti',
+            'te': 'compute_te',
+            'amp_insp': 'compute_amp_insp',
+            'amp_exp': 'compute_amp_exp',
+            'area_insp': 'compute_area_insp',
+            'area_exp': 'compute_area_exp',
+            'vent_proxy': 'compute_vent_proxy',
+        }
+        try:
+            from core import metrics as _metrics_mod
+            for s in range(n_sweeps):
+                det = all_results[s]
+                labeled_idx = det["labeled_indices"]
+                if len(labeled_idx) < 2:
+                    continue
+                labeled_br = det.get("labeled_breaths", {})
+                onsets = labeled_br.get("onsets", np.array([]))
+                offsets = labeled_br.get("offsets", np.array([]))
+                expmins = labeled_br.get("expmins", np.array([]))
+                expoffs = labeled_br.get("expoffs", np.array([]))
+                if len(onsets) < 2:
+                    continue
+                y_proc = get_processed_signal(Y[:, s], sr_hz, fc)
+                sweep_y2 = {}
+                for key, fn_name in _Y2_METRICS.items():
+                    fn = getattr(_metrics_mod, fn_name)
+                    sweep_y2[key] = fn(t, y_proc, sr_hz, labeled_idx, onsets, offsets, expmins, expoffs)
+                y2_by_sweep[s] = sweep_y2
+        except Exception as e:
+            import traceback
+            _log(f"Warning: y2 metric computation failed: {e}\n{traceback.format_exc()}")
+
+        # 7b. Detect stimulus spans (for grouping time normalization)
+        stim_results_by_sweep = {}
+        if stim_ch and stim_ch != "None" and stim_ch in sweeps:
+            try:
+                from core.services.stim_service import detect_stims_all_sweeps
+                stim_data = sweeps[stim_ch]
+                stim_results_by_sweep = detect_stims_all_sweeps(stim_data, t)
+                _log(f"Detected stim in {len(stim_results_by_sweep)} sweeps")
+            except Exception as e:
+                _log(f"Warning: stim detection failed: {e}")
+
+        # 8. Compute summary statistics
+        summary = _compute_summary(all_metrics_rows, n_sweeps)
+        result.summary = summary
+
+        # 9. Save .pmx session file
+        if save_session:
+            from core.npz_io import get_pmx_path, save_batch_result
+
+            pmx_path = get_pmx_path(
+                path,
+                analysis_type="pleth",
+                animal_id=animal_id,
+                channel=analyze_ch,
+            )
+            _log(f"Saving session to {pmx_path.name}...")
+            save_batch_result(
+                output_path=pmx_path,
+                original_file=path,
+                channel=analyze_ch,
+                sr_hz=sr_hz,
+                t=t,
+                config=config,
+                filter_config=fc,
+                detection_results=all_results,
+                metrics_rows=all_metrics_rows,
+                summary=summary,
+                event_markers=existing_event_markers,
+                stim_chan=stim_ch if stim_ch else "None",
+                y2_by_sweep=y2_by_sweep,
+                stim_results=stim_results_by_sweep,
+            )
+            result.session_path = pmx_path
+            _log(f"Saved {pmx_path.name}")
+
+        # 10. Save results CSV (skip in dry-run mode)
+        if all_metrics_rows and write_csv:
             import csv
             csv_path = output_dir / f"{path.stem}_results.csv"
             fieldnames = list(all_metrics_rows[0].keys())

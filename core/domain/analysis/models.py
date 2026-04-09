@@ -256,8 +256,9 @@ class AnalysisResult:
     n_sweeps: int = 0
     n_peaks_total: int = 0
     n_breaths_total: int = 0
-    session_path: Optional[Path] = None   # NPZ path
+    session_path: Optional[Path] = None   # .pmx / NPZ path
     results_path: Optional[Path] = None   # CSV path
+    summary: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
 
@@ -273,6 +274,29 @@ class AnalysisResult:
             "n_breaths_total": self.n_breaths_total,
             "session_path": str(self.session_path) if self.session_path else None,
             "results_path": str(self.results_path) if self.results_path else None,
+            "summary": self.summary,
             "error": self.error,
             "warnings": self.warnings,
         }
+
+
+@dataclass
+class GroupResult:
+    """Result from grouping multiple experiments.
+
+    Holds the mean +/- SEM for continuous metrics aligned to a common time grid.
+    Saved as group .npz files for comparison plotting.
+    """
+
+    group_name: str
+    group_path: Optional[Path] = None
+    source_files: List[str] = field(default_factory=list)
+    source_animal_ids: List[str] = field(default_factory=list)
+    n_experiments: int = 0
+    metric_keys: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
